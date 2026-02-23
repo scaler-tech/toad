@@ -56,6 +56,12 @@ type NotifyFunc func(channel, threadTS, text string)
 // ReactFunc adds an emoji reaction to a message.
 type ReactFunc func(channel, timestamp, emoji string)
 
+// chunk is a group of messages to analyze in a single Claude call.
+type chunk struct {
+	messages []Message
+	label    string // for logging, e.g. "#errors (42 msgs)" or "mixed (12 msgs, 4 channels)"
+}
+
 // DigestStats holds observable digest engine metrics.
 type DigestStats struct {
 	BufferSize    int
@@ -166,19 +172,47 @@ func (e *Engine) flush(ctx context.Context) {
 
 	e.totalProcessed.Add(int64(len(msgs)))
 
-	slog.Debug("digest analyzing batch", "messages", len(msgs))
+	chunks := e.buildChunks(msgs)
+	slog.Debug("digest analyzing batch", "messages", len(msgs), "chunks", len(chunks))
 
-	opportunities, err := e.analyze(ctx, msgs)
-	if err != nil {
-		slog.Warn("digest analysis failed", "error", err)
-		return
+	for _, ch := range chunks {
+		slog.Debug("digest analyzing chunk", "label", ch.label, "messages", len(ch.messages))
+
+		// Scale timeout for oversized chunks (single channels that exceed MaxChunkSize)
+		baseTimeout := time.Duration(e.cfg.ChunkTimeoutSecs) * time.Second
+		chunkTimeout := baseTimeout
+		maxSize := e.cfg.MaxChunkSize
+		if maxSize <= 0 {
+			maxSize = 50
+		}
+		if len(ch.messages) > maxSize {
+			// Proportionally longer: 2x messages = 2x timeout
+			chunkTimeout = baseTimeout * time.Duration(len(ch.messages)) / time.Duration(maxSize)
+		}
+		chunkCtx, cancel := context.WithTimeout(ctx, chunkTimeout)
+
+		opportunities, err := e.analyze(chunkCtx, ch.messages)
+		cancel()
+
+		if err != nil {
+			slog.Warn("digest chunk analysis failed", "error", err, "label", ch.label)
+			continue // other chunks may still succeed
+		}
+
+		if len(opportunities) == 0 {
+			continue
+		}
+
+		if !e.processOpportunities(ctx, ch.messages, opportunities) {
+			return // spawn limit reached
+		}
 	}
+}
 
-	if len(opportunities) == 0 {
-		slog.Debug("digest found no opportunities")
-		return
-	}
-
+// processOpportunities handles the investigation, persistence, and spawn logic
+// for a set of opportunities from a single chunk. Returns false when the hourly
+// spawn limit is reached (caller should stop processing further chunks).
+func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, opportunities []Opportunity) bool {
 	for _, opp := range opportunities {
 		if !e.passesGuardrails(opp) {
 			slog.Debug("digest opportunity filtered by guardrails",
@@ -246,7 +280,7 @@ func (e *Engine) flush(ctx context.Context) {
 		// should not consume spawn slots.
 		if !e.trySpawn() {
 			slog.Info("digest hourly spawn limit reached", "limit", e.cfg.MaxAutoSpawnHour)
-			return
+			return false
 		}
 
 		// In dry-run mode: log and skip spawn/notify
@@ -295,6 +329,7 @@ func (e *Engine) flush(ctx context.Context) {
 			}
 		}
 	}
+	return true
 }
 
 const digestPrompt = `You are the Toad King — a conservative code-change detector. You are given a batch of recent Slack messages from a development team. Your job is to identify ONLY clear, specific, one-shot bug reports or feature requests that a coding agent could fix autonomously.
@@ -325,6 +360,11 @@ Critical rules:
 - confidence must be >= 0.95 to be considered
 - message_index is 0-based, referring to the message list above
 
+Deduplication — one opportunity per issue:
+- Messages ending with "(xN duplicates)" are recurring — the same text appeared N times. Treat as one issue, not N.
+- If multiple DIFFERENT messages describe the same underlying issue (e.g. an error alert and a human reporting the same error), create only ONE opportunity referencing the most specific/informative message.
+- Never create two opportunities that would result in the same code fix.
+
 Structured alerts (Sentry, CI, monitoring bots):
 - Error alerts with exception names, stack traces, or file paths ARE specific and concrete
 - A coding agent CAN investigate an exception class, trace the logic, and propose a fix
@@ -349,10 +389,7 @@ func (e *Engine) analyze(ctx context.Context, msgs []Message) ([]Opportunity, er
 		"-p", prompt,
 	}
 
-	analyzeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(analyzeCtx, "claude", args...)
+	cmd := exec.CommandContext(ctx, "claude", args...)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("claude digest call failed: %w", err)
@@ -430,6 +467,108 @@ func findMatchingBracket(s string, pos int) int {
 		}
 	}
 	return -1
+}
+
+// dedupChannel collapses messages with identical text within a channel.
+// The first occurrence is kept; duplicates are removed and their count appended.
+func dedupChannel(msgs []Message) []Message {
+	type entry struct {
+		idx   int // index into result slice
+		count int
+	}
+	seen := make(map[string]*entry)
+	var result []Message
+
+	for _, msg := range msgs {
+		if e, ok := seen[msg.Text]; ok {
+			e.count++
+		} else {
+			seen[msg.Text] = &entry{idx: len(result), count: 1}
+			result = append(result, msg)
+		}
+	}
+
+	// Append duplicate counts
+	for text, e := range seen {
+		if e.count > 1 {
+			result[e.idx].Text = fmt.Sprintf("%s (x%d duplicates)", text, e.count)
+		}
+	}
+
+	return result
+}
+
+// buildChunks groups messages by channel, deduplicates within each channel,
+// and packs them into chunks. A single channel is NEVER split — Haiku needs
+// full channel context to correlate messages about the same underlying issue.
+// MaxChunkSize only governs coalescing of small channels into mixed chunks.
+func (e *Engine) buildChunks(msgs []Message) []chunk {
+	maxSize := e.cfg.MaxChunkSize
+	if maxSize <= 0 {
+		maxSize = 50
+	}
+
+	// Group by channel
+	byChannel := make(map[string][]Message)
+	channelOrder := []string{} // preserve insertion order
+	for _, msg := range msgs {
+		key := msg.ChannelName
+		if _, exists := byChannel[key]; !exists {
+			channelOrder = append(channelOrder, key)
+		}
+		byChannel[key] = append(byChannel[key], msg)
+	}
+
+	// Dedup within each channel and log significant reductions
+	for ch, chMsgs := range byChannel {
+		deduped := dedupChannel(chMsgs)
+		if len(chMsgs) != len(deduped) {
+			slog.Info("digest dedup", "channel", ch,
+				"before", len(chMsgs), "after", len(deduped))
+		}
+		byChannel[ch] = deduped
+	}
+
+	var chunks []chunk
+
+	// Large channels get their own dedicated chunk (never split)
+	var smallChannels []string
+	for _, ch := range channelOrder {
+		chMsgs := byChannel[ch]
+		if len(chMsgs) >= maxSize {
+			label := fmt.Sprintf("#%s (%d msgs)", ch, len(chMsgs))
+			chunks = append(chunks, chunk{messages: chMsgs, label: label})
+		} else {
+			smallChannels = append(smallChannels, ch)
+		}
+	}
+
+	// Coalesce small channels into mixed chunks up to maxSize
+	var current []Message
+	var currentChannels int
+	for _, ch := range smallChannels {
+		chMsgs := byChannel[ch]
+		if len(current)+len(chMsgs) > maxSize && len(current) > 0 {
+			label := fmt.Sprintf("mixed (%d msgs, %d channels)", len(current), currentChannels)
+			if currentChannels == 1 {
+				label = fmt.Sprintf("#%s (%d msgs)", current[0].ChannelName, len(current))
+			}
+			chunks = append(chunks, chunk{messages: current, label: label})
+			current = nil
+			currentChannels = 0
+		}
+		current = append(current, chMsgs...)
+		currentChannels++
+	}
+	if len(current) > 0 {
+		label := fmt.Sprintf("mixed (%d msgs, %d channels)", len(current), currentChannels)
+		if currentChannels == 1 {
+			label = fmt.Sprintf("#%s (%d msgs)", current[0].ChannelName, len(current))
+		}
+		chunks = append(chunks, chunk{messages: current, label: label})
+	}
+
+	return chunks
 }
 
 func (e *Engine) passesGuardrails(opp Opportunity) bool {

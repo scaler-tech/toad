@@ -189,6 +189,32 @@ Inspired by [Stripe Minions](https://stripe.dev/blog/minions-stripes-one-shot-en
 - [x] Wire into `cmd/root.go`: collect in handleMessage, start digest loop
 - [x] `:crown: Toad King detected...` notification before auto-spawning
 
+## Phase 4: Multi-repo, Code Owners & MCP
+
+**Status: Planned**
+
+### Multi-repo support
+
+- [ ] Support multiple repos in a single toad instance
+  - Config: `repos:` list with per-repo path, default_branch, services, test/lint commands
+  - Triage/digest must resolve which repo a message refers to (keywords, file hints, channel mapping)
+  - Worktrees scoped per repo (`~/.toad/worktrees/<repo-slug>/`)
+  - State DB: add `repo` column to runs table
+
+### Code owner tagging
+
+- [ ] After opening a PR, identify relevant code owners and request review
+  - Parse CODEOWNERS file or use `git log --format='%ae' -- <changed-files>` to find recent contributors
+  - `gh pr edit --add-reviewer` to request review from top contributors to changed files
+  - Configurable: opt-in, max reviewers, exclude list
+
+### MCP tool use
+
+- [ ] Integrate MCP servers into tadpole and ribbit for richer context and actions
+- [ ] **Linear**: create Linear issues/tasks linked to PRs, update issue status on PR merge, pull issue context into tadpole prompts
+- [ ] **Laravel Boost** (or similar framework-specific MCP): give tadpoles framework-aware tools for better fixes in Laravel codebases
+- [ ] Configurable MCP server list in `.toad.yaml` — tadpoles and ribbit get `--mcp-config` flag pointing to project MCP config
+
 ## Verification
 
 ### MVP (Phase 1)

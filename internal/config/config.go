@@ -67,13 +67,15 @@ type ClaudeConfig struct {
 }
 
 type DigestConfig struct {
-	Enabled           bool     `yaml:"enabled"`             // default: false (opt-in)
-	DryRun            bool     `yaml:"dry_run"`             // collect + analyze but skip spawn/notify
-	BatchMinutes      int      `yaml:"batch_minutes"`       // default: 5
-	MinConfidence     float64  `yaml:"min_confidence"`      // default: 0.95
-	MaxAutoSpawnHour  int      `yaml:"max_auto_spawn_hour"` // default: 3
-	AllowedCategories []string `yaml:"allowed_categories"`  // default: ["bug"]
-	MaxEstSize        string   `yaml:"max_est_size"`        // default: "small"
+	Enabled           bool     `yaml:"enabled"`              // default: false (opt-in)
+	DryRun            bool     `yaml:"dry_run"`              // collect + analyze but skip spawn/notify
+	BatchMinutes      int      `yaml:"batch_minutes"`        // default: 5
+	MinConfidence     float64  `yaml:"min_confidence"`       // default: 0.95
+	MaxAutoSpawnHour  int      `yaml:"max_auto_spawn_hour"`  // default: 3
+	AllowedCategories []string `yaml:"allowed_categories"`   // default: ["bug"]
+	MaxEstSize        string   `yaml:"max_est_size"`         // default: "small"
+	MaxChunkSize      int      `yaml:"max_chunk_size"`       // default: 50
+	ChunkTimeoutSecs  int      `yaml:"chunk_timeout_secs"`   // default: 60
 }
 
 type LogConfig struct {
@@ -118,6 +120,8 @@ func defaults() *Config {
 			MaxAutoSpawnHour:  3,
 			AllowedCategories: []string{"bug"},
 			MaxEstSize:        "small",
+			MaxChunkSize:      50,
+			ChunkTimeoutSecs:  60,
 		},
 		Log: LogConfig{
 			Level: "info",
