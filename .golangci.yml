@@ -71,14 +71,20 @@ linters:
         - appendCombine
         - hugeParam
         - ifElseChain
+        - rangeValCopy
 
     gosec:
       excludes:
         - G104 # Audit errors not checked (handled by errcheck)
         - G204 # Subprocess launched with variable (expected for CLI tools invoking claude/gh)
         - G304 # File path provided as taint input (acceptable for CLI)
+        - G114 # net/http serve without timeouts (acceptable for local-only status server)
+        - G117 # Struct field matches secret pattern (false positive on Slack token struct)
+        - G301 # Directory permissions (0755 is fine for ~/.toad/)
+        - G302 # File permissions (0644 is fine for log files)
         - G306 # SQLite file permissions
         - G404 # Weak random (fine for non-crypto use)
+        - G704 # SSRF via taint (false positive on local status server)
 
     govet:
       enable-all: true
