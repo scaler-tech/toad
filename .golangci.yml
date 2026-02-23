@@ -12,7 +12,6 @@ output:
     text:
       print-issued-lines: true
       print-linter-name: true
-  sort-results: true
 
 linters:
   enable:
@@ -80,9 +79,6 @@ linters:
 
     misspell:
       locale: US
-      ignore-words:
-        - cancelled
-        - cancelling
 
     nakedret:
       max-func-lines: 30
@@ -117,9 +113,6 @@ linters:
       - linters:
           - errcheck
         source: "defer"
-
-    max-issues-per-linter: 50
-    max-same-issues: 10
 
 formatters:
   enable:
