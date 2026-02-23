@@ -1,0 +1,46 @@
+# Toad configuration
+# Copy to .toad.yaml and fill in your values
+# Place in repo root or globally at ~/.toad/config.yaml
+
+slack:
+  # Tokens (can also use TOAD_SLACK_APP_TOKEN / TOAD_SLACK_BOT_TOKEN env vars)
+  app_token: "xapp-1-..."
+  bot_token: "xoxb-..."
+
+  # Channels to monitor (use channel IDs, not names)
+  channels:
+    - "C0123456789"
+
+  # What triggers Toad
+  triggers:
+    emoji: "frog"              # React with 🐸 to trigger
+    keywords:                  # These in messages trigger Toad
+      - "toad fix"
+      - "toad help"
+
+repo:
+  # Defaults to current working directory
+  # path: "/path/to/repo"
+  test_command: "go test ./..."
+  lint_command: "golangci-lint run"
+  default_branch: "main"
+
+limits:
+  max_concurrent: 2            # Max parallel tadpoles
+  max_turns: 30                # Claude Code max turns per tadpole
+  timeout_minutes: 10          # Kill tadpole after this
+  max_files_changed: 5         # Abort if too many files touched
+  max_budget_usd: 1.00         # Per-tadpole cost cap
+  max_retries: 1               # Test/lint failure retries
+
+triage:
+  model: "haiku"               # Fast + cheap for classification
+  auto_spawn: false            # Require explicit 🐸 trigger for code changes
+
+claude:
+  model: "sonnet"              # Model for tadpole code runs
+  # append_system_prompt: ""   # Extra instructions for all tadpole runs
+
+log:
+  level: "info"                # debug, info, warn, error
+  # file: "~/.toad/toad.log"
