@@ -194,6 +194,213 @@ func TestBuildChunks_LargeAndSmallChannels(t *testing.T) {
 	}
 }
 
+func TestFindMatchingBracket_Simple(t *testing.T) {
+	idx := findMatchingBracket(`[]`, 0)
+	if idx != 1 {
+		t.Errorf("expected 1, got %d", idx)
+	}
+}
+
+func TestFindMatchingBracket_WithContent(t *testing.T) {
+	idx := findMatchingBracket(`[{"a":1}]`, 0)
+	if idx != 8 {
+		t.Errorf("expected 8, got %d", idx)
+	}
+}
+
+func TestFindMatchingBracket_Nested(t *testing.T) {
+	idx := findMatchingBracket(`[[1,2],[3,4]]`, 0)
+	if idx != 12 {
+		t.Errorf("expected 12, got %d", idx)
+	}
+}
+
+func TestFindMatchingBracket_BracketsInString(t *testing.T) {
+	idx := findMatchingBracket(`["[]"]`, 0)
+	if idx != 5 {
+		t.Errorf("expected 5, got %d", idx)
+	}
+}
+
+func TestFindMatchingBracket_EscapedQuotes(t *testing.T) {
+	idx := findMatchingBracket(`["val\"ue"]`, 0)
+	if idx != 10 {
+		t.Errorf("expected 10, got %d", idx)
+	}
+}
+
+func TestFindMatchingBracket_NoMatch(t *testing.T) {
+	idx := findMatchingBracket(`[unclosed`, 0)
+	if idx != -1 {
+		t.Errorf("expected -1, got %d", idx)
+	}
+}
+
+func TestParseOpportunities_ValidArray(t *testing.T) {
+	data := []byte(`[{"summary":"fix bug","category":"bug","confidence":0.96,"estimated_size":"small","message_index":0,"keywords":["err"],"files_hint":["main.go"]}]`)
+	opps, err := parseOpportunities(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(opps) != 1 {
+		t.Fatalf("expected 1 opportunity, got %d", len(opps))
+	}
+	if opps[0].Summary != "fix bug" {
+		t.Errorf("expected 'fix bug', got %q", opps[0].Summary)
+	}
+	if opps[0].Confidence != 0.96 {
+		t.Errorf("expected 0.96, got %f", opps[0].Confidence)
+	}
+}
+
+func TestParseOpportunities_EmptyArray(t *testing.T) {
+	opps, err := parseOpportunities([]byte(`[]`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(opps) != 0 {
+		t.Errorf("expected 0 opportunities, got %d", len(opps))
+	}
+}
+
+func TestParseOpportunities_WithCodeFences(t *testing.T) {
+	data := []byte("```json\n[{\"summary\":\"fix\",\"category\":\"bug\",\"confidence\":0.9,\"estimated_size\":\"tiny\",\"message_index\":0}]\n```")
+	opps, err := parseOpportunities(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(opps) != 1 {
+		t.Errorf("expected 1 opportunity, got %d", len(opps))
+	}
+}
+
+func TestParseOpportunities_WithTrailingText(t *testing.T) {
+	data := []byte(`[{"summary":"fix","category":"bug","confidence":0.9,"estimated_size":"tiny","message_index":0}]
+
+**Reasoning**: The message describes a clear bug.`)
+	opps, err := parseOpportunities(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(opps) != 1 {
+		t.Errorf("expected 1 opportunity, got %d", len(opps))
+	}
+}
+
+func TestParseOpportunities_NoArray(t *testing.T) {
+	_, err := parseOpportunities([]byte(`no json here`))
+	if err == nil {
+		t.Error("expected error for no JSON array")
+	}
+}
+
+func TestParseOpportunities_MalformedJSON(t *testing.T) {
+	_, err := parseOpportunities([]byte(`[{broken`))
+	if err == nil {
+		t.Error("expected error for malformed JSON")
+	}
+}
+
+func TestPassesGuardrails_AllPass(t *testing.T) {
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.95,
+		AllowedCategories: []string{"bug", "feature"},
+		MaxEstSize:        "small",
+	}
+	e := &Engine{cfg: cfg}
+	opp := Opportunity{Confidence: 0.96, Category: "bug", EstSize: "small"}
+	if !e.passesGuardrails(opp) {
+		t.Error("expected opportunity to pass guardrails")
+	}
+}
+
+func TestPassesGuardrails_LowConfidence(t *testing.T) {
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.95,
+		AllowedCategories: []string{"bug"},
+		MaxEstSize:        "small",
+	}
+	e := &Engine{cfg: cfg}
+	opp := Opportunity{Confidence: 0.80, Category: "bug", EstSize: "small"}
+	if e.passesGuardrails(opp) {
+		t.Error("expected low confidence to be filtered")
+	}
+}
+
+func TestPassesGuardrails_WrongCategory(t *testing.T) {
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.95,
+		AllowedCategories: []string{"bug"},
+		MaxEstSize:        "small",
+	}
+	e := &Engine{cfg: cfg}
+	opp := Opportunity{Confidence: 0.96, Category: "feature", EstSize: "small"}
+	if e.passesGuardrails(opp) {
+		t.Error("expected wrong category to be filtered")
+	}
+}
+
+func TestPassesGuardrails_TooLarge(t *testing.T) {
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.95,
+		AllowedCategories: []string{"bug"},
+		MaxEstSize:        "small",
+	}
+	e := &Engine{cfg: cfg}
+	opp := Opportunity{Confidence: 0.96, Category: "bug", EstSize: "medium"}
+	if e.passesGuardrails(opp) {
+		t.Error("expected medium size to be filtered when max is small")
+	}
+}
+
+func TestPassesGuardrails_TinyAlwaysPasses(t *testing.T) {
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.95,
+		AllowedCategories: []string{"bug"},
+		MaxEstSize:        "small",
+	}
+	e := &Engine{cfg: cfg}
+	opp := Opportunity{Confidence: 0.96, Category: "bug", EstSize: "tiny"}
+	if !e.passesGuardrails(opp) {
+		t.Error("expected tiny size to pass when max is small")
+	}
+}
+
+func TestPassesGuardrails_MaxSizeTiny(t *testing.T) {
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.95,
+		AllowedCategories: []string{"bug"},
+		MaxEstSize:        "tiny",
+	}
+	e := &Engine{cfg: cfg}
+
+	if e.passesGuardrails(Opportunity{Confidence: 0.96, Category: "bug", EstSize: "small"}) {
+		t.Error("expected small to be filtered when max is tiny")
+	}
+	if !e.passesGuardrails(Opportunity{Confidence: 0.96, Category: "bug", EstSize: "tiny"}) {
+		t.Error("expected tiny to pass when max is tiny")
+	}
+}
+
+func TestPassesGuardrails_ExactConfidenceThreshold(t *testing.T) {
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.95,
+		AllowedCategories: []string{"bug"},
+		MaxEstSize:        "small",
+	}
+	e := &Engine{cfg: cfg}
+	// Exactly at threshold passes (comparison is <, not <=)
+	opp := Opportunity{Confidence: 0.95, Category: "bug", EstSize: "small"}
+	if !e.passesGuardrails(opp) {
+		t.Error("expected exact threshold to pass (comparison is strict less-than)")
+	}
+	// Just below threshold should fail
+	opp2 := Opportunity{Confidence: 0.949, Category: "bug", EstSize: "small"}
+	if e.passesGuardrails(opp2) {
+		t.Error("expected below-threshold to be filtered")
+	}
+}
+
 func TestProcessOpportunities_SpawnLimitReturnsFalse(t *testing.T) {
 	cfg := &config.DigestConfig{
 		MinConfidence:     0.5,
