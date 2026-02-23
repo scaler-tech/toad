@@ -6,8 +6,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -67,6 +70,7 @@ type apiResponse struct {
 	Watches       []apiWatch       `json:"watches"`
 	Opportunities []apiOpportunity `json:"opportunities"`
 	Config        *apiConfig       `json:"config,omitempty"`
+	CCUsage       *apiCCUsage      `json:"cc_usage,omitempty"`
 	Now           int64            `json:"now"`
 }
 
@@ -128,6 +132,24 @@ type apiConfig struct {
 	DigestEnabled  bool    `json:"digest_enabled"`
 	DigestInterval int     `json:"digest_interval_min,omitempty"`
 	DigestMaxSpawn int     `json:"digest_max_spawn_hour,omitempty"`
+}
+
+type apiCCUsage struct {
+	FiveHour   *ccWindow `json:"five_hour,omitempty"`
+	SevenDay   *ccWindow `json:"seven_day,omitempty"`
+	ExtraUsage *ccExtra  `json:"extra_usage,omitempty"`
+}
+
+type ccWindow struct {
+	Utilization float64 `json:"utilization"`
+	ResetsAt    string  `json:"resets_at"`
+}
+
+type ccExtra struct {
+	Enabled      bool    `json:"is_enabled"`
+	MonthlyLimit float64 `json:"monthly_limit"`
+	UsedCredits  float64 `json:"used_credits"`
+	Utilization  float64 `json:"utilization"`
 }
 
 func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
@@ -259,6 +281,8 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 			resp.Config = ac
 		}
 
+		resp.CCUsage = fetchCCUsage()
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
@@ -279,6 +303,100 @@ func openBrowser(url string) {
 	if err := cmd.Start(); err != nil {
 		slog.Debug("could not open browser", "error", err)
 	}
+}
+
+var (
+	ccUsageCache   *apiCCUsage
+	ccUsageCacheAt time.Time
+	ccUsageMu      sync.Mutex
+)
+
+func fetchCCUsage() *apiCCUsage {
+	ccUsageMu.Lock()
+	defer ccUsageMu.Unlock()
+
+	if time.Since(ccUsageCacheAt) < 60*time.Second {
+		return ccUsageCache
+	}
+
+	defer func() { ccUsageCacheAt = time.Now() }()
+	ccUsageCache = nil
+
+	token := resolveCCToken()
+	if token == "" {
+		return nil
+	}
+
+	req, err := http.NewRequest("GET", "https://api.anthropic.com/api/oauth/usage", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil
+	}
+
+	var usage apiCCUsage
+	if err := json.NewDecoder(resp.Body).Decode(&usage); err != nil {
+		return nil
+	}
+
+	ccUsageCache = &usage
+	return ccUsageCache
+}
+
+func resolveCCToken() string {
+	if t := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); t != "" {
+		return t
+	}
+
+	home, err := os.UserHomeDir()
+	if err == nil {
+		data, err := os.ReadFile(filepath.Join(home, ".claude", ".credentials.json"))
+		if err == nil {
+			if t := extractOAuthToken(data); t != "" {
+				return t
+			}
+		}
+	}
+
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("security", "find-generic-password", "-s", "Claude Code-credentials", "-w").Output()
+		if err == nil {
+			if t := extractOAuthToken(out); t != "" {
+				return t
+			}
+		}
+	}
+
+	return ""
+}
+
+func extractOAuthToken(data []byte) string {
+	var creds map[string]json.RawMessage
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return ""
+	}
+	raw, ok := creds["claudeAiOauth"]
+	if !ok {
+		return ""
+	}
+	var oauth struct {
+		AccessToken string `json:"accessToken"`
+	}
+	if err := json.Unmarshal(raw, &oauth); err != nil {
+		return ""
+	}
+	return oauth.AccessToken
 }
 
 const dashboardHTML = `<!DOCTYPE html>
@@ -336,7 +454,7 @@ const dashboardHTML = `<!DOCTYPE html>
   /* Stats cards */
   .stats {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     gap: 10px;
     margin-bottom: 20px;
   }
@@ -459,8 +577,31 @@ const dashboardHTML = `<!DOCTYPE html>
     font-size: 12px;
   }
 
+  /* Toggle buttons for expand/collapse */
+  .toggle-row {
+    text-align: center; padding: 8px;
+    cursor: pointer; color: var(--blue);
+    font-size: 12px; font-weight: 500;
+    border-top: 1px solid var(--border);
+  }
+  .toggle-row:hover { text-decoration: underline; }
+
+  /* Collapsible config */
+  .section-header {
+    cursor: pointer; user-select: none;
+  }
+  .section-header .chevron {
+    transition: transform 0.2s;
+    display: inline-block; font-size: 10px;
+  }
+  .section-header.collapsed .chevron { transform: rotate(-90deg); }
+
+  /* Active runs padding boost */
+  #active-wrap td { padding: 9px 12px; }
+  #active-wrap th { padding: 9px 12px; }
+
   @media (max-width: 800px) {
-    .stats { grid-template-columns: repeat(2, 1fr); }
+    .stats { grid-template-columns: repeat(3, 1fr); }
     .two-col { grid-template-columns: 1fr; }
     body { padding: 12px; }
   }
@@ -487,7 +628,20 @@ const dashboardHTML = `<!DOCTYPE html>
   <div class="stat-card"><div class="label">Total Cost</div><div class="value" id="s-cost">-</div><div class="sub" id="s-cost-sub"></div></div>
   <div class="stat-card"><div class="label">Avg Duration</div><div class="value" id="s-dur">-</div><div class="sub">&nbsp;</div></div>
   <div class="stat-card"><div class="label">Ribbits</div><div class="value" id="s-ribbits">-</div><div class="sub" id="s-ribbits-sub"></div></div>
+  <div class="stat-card"><div class="label">CC Usage</div><div class="value" id="s-cc">-</div><div class="sub" id="s-cc-sub">&nbsp;</div></div>
 </div>
+
+<!-- Active Runs -->
+<section id="active-section">
+  <h2>Active Runs <span class="count" id="active-count">0</span></h2>
+  <div class="table-wrap" id="active-wrap"></div>
+</section>
+
+<!-- Recent History -->
+<section id="history-section">
+  <h2>Recent History <span class="count" id="history-count"></span></h2>
+  <div class="table-wrap" id="history-wrap"></div>
+</section>
 
 <!-- Two-column: Triage + Digest -->
 <div class="two-col">
@@ -520,18 +674,6 @@ const dashboardHTML = `<!DOCTYPE html>
   <div class="table-wrap" id="opps-wrap"></div>
 </section>
 
-<!-- Active Runs -->
-<section id="active-section">
-  <h2>Active Runs <span class="count" id="active-count">0</span></h2>
-  <div class="table-wrap" id="active-wrap"></div>
-</section>
-
-<!-- Recent History -->
-<section id="history-section">
-  <h2>Recent History</h2>
-  <div class="table-wrap" id="history-wrap"></div>
-</section>
-
 <!-- PR Watches -->
 <section id="watches-section" style="display:none">
   <h2>PR Watches <span class="count" id="watches-count">0</span></h2>
@@ -540,11 +682,26 @@ const dashboardHTML = `<!DOCTYPE html>
 
 <!-- Config -->
 <section id="config-section" style="display:none">
-  <h2>Configuration</h2>
-  <div class="info-panel" id="config-panel"></div>
+  <h2 class="section-header collapsed" id="config-header" onclick="toggleConfig()">Configuration <span class="chevron">&#x25BC;</span></h2>
+  <div class="info-panel" id="config-panel" style="display:none"></div>
 </section>
 
 <script>
+const MAX_VISIBLE = 5;
+let historyExpanded = false;
+let oppsExpanded = false;
+let configExpanded = false;
+
+function toggleHistory() { historyExpanded = !historyExpanded; refresh(); }
+function toggleOpps() { oppsExpanded = !oppsExpanded; refresh(); }
+function toggleConfig() {
+  configExpanded = !configExpanded;
+  const panel = document.getElementById('config-panel');
+  const header = document.getElementById('config-header');
+  panel.style.display = configExpanded ? '' : 'none';
+  header.className = 'section-header' + (configExpanded ? '' : ' collapsed');
+}
+
 function fmtDuration(seconds) {
   if (!seconds) return '-';
   const s = Math.round(seconds);
@@ -651,6 +808,75 @@ async function refresh() {
     document.getElementById('s-ribbits-sub').textContent =
       st.ThreadCount ? st.ThreadCount + ' thread memories' : 'this session';
 
+    // CC Usage card
+    const cc = d.cc_usage;
+    if (cc && cc.five_hour) {
+      const u5 = cc.five_hour.utilization;
+      const color = u5 > 80 ? 'var(--red)' : u5 > 50 ? 'var(--amber)' : 'var(--green)';
+      document.getElementById('s-cc').textContent = Math.round(u5) + '%';
+      document.getElementById('s-cc').style.color = color;
+      let sub = '';
+      if (cc.seven_day) sub += '7d: ' + Math.round(cc.seven_day.utilization) + '%';
+      if (cc.extra_usage && cc.extra_usage.is_enabled) {
+        if (sub) sub += ' \u00b7 ';
+        sub += 'extra: ' + Math.round(cc.extra_usage.utilization) + '%';
+      }
+      document.getElementById('s-cc-sub').textContent = sub;
+    } else {
+      document.getElementById('s-cc').textContent = '-';
+      document.getElementById('s-cc').style.color = 'var(--dim)';
+      document.getElementById('s-cc-sub').innerHTML = '&nbsp;';
+    }
+
+    // Active runs
+    document.getElementById('active-count').textContent = active.length;
+    if (active.length === 0) {
+      document.getElementById('active-wrap').innerHTML = '<div class="empty" style="color:var(--green)">&#x2714; All clear</div>';
+    } else {
+      let html = '<table><tr><th style="width:110px">Status</th><th style="width:25%">Branch</th><th>Task</th><th style="width:80px">Duration</th></tr>';
+      for (const r of active) {
+        const elapsed = now - r.started_at;
+        html += '<tr><td>' + statusBadge(r.status, true) + '</td>'
+          + '<td class="mono">' + esc(r.branch) + '</td>'
+          + '<td>' + esc(r.task) + '</td>'
+          + '<td class="mono">' + fmtDuration(elapsed) + '</td></tr>';
+      }
+      html += '</table>';
+      document.getElementById('active-wrap').innerHTML = html;
+    }
+
+    // History (limited)
+    const history = d.history || [];
+    document.getElementById('history-count').textContent = history.length;
+    if (history.length === 0) {
+      document.getElementById('history-wrap').innerHTML = '<div class="empty">No completed runs</div>';
+    } else {
+      let html = '<table><tr><th style="width:90px">Status</th><th style="width:22%">Branch</th><th>Task</th><th style="width:60px">Files</th><th style="width:65px">Cost</th><th style="width:80px">Duration</th><th style="width:22%">PR</th></tr>';
+      for (let i = 0; i < history.length; i++) {
+        const r = history[i];
+        const hidden = !historyExpanded && i >= MAX_VISIBLE ? ' style="display:none"' : '';
+        const pr = r.status === 'done' && r.pr_url
+          ? shortURL(r.pr_url)
+          : '<span style="color:var(--dim)">' + esc(r.error || '-') + '</span>';
+        html += '<tr' + hidden + '><td>' + statusBadge(r.status, false) + '</td>'
+          + '<td class="mono">' + esc(r.branch) + '</td>'
+          + '<td>' + esc(r.task) + '</td>'
+          + '<td class="mono">' + (r.files_changed || '-') + '</td>'
+          + '<td class="mono">' + fmtCost(r.cost) + '</td>'
+          + '<td class="mono">' + fmtDuration(r.duration_s) + '</td>'
+          + '<td>' + pr + '</td></tr>';
+      }
+      html += '</table>';
+      if (history.length > MAX_VISIBLE) {
+        if (historyExpanded) {
+          html += '<div class="toggle-row" onclick="toggleHistory()">Show less</div>';
+        } else {
+          html += '<div class="toggle-row" onclick="toggleHistory()">Show all (' + history.length + ')</div>';
+        }
+      }
+      document.getElementById('history-wrap').innerHTML = html;
+    }
+
     // Triage panel
     const cat = dm.triage_by_category || {};
     document.getElementById('t-total').textContent = num(dm.triages || 0);
@@ -695,7 +921,7 @@ async function refresh() {
     const tsec = document.getElementById('triage-section');
     tsec.style.display = (dm.running || (dm.triages || 0) > 0) ? '' : 'none';
 
-    // Digest Opportunities
+    // Digest Opportunities (limited)
     const opps = d.opportunities || [];
     const oppsSec = document.getElementById('opportunities-section');
     if (opps.length === 0) {
@@ -704,65 +930,36 @@ async function refresh() {
       oppsSec.style.display = '';
       document.getElementById('opps-count').textContent = opps.length;
       let ohtml = '<table><tr><th style="width:80px">When</th><th>Summary</th><th style="width:70px">Category</th><th style="width:80px">Confidence</th><th style="width:60px">Size</th><th style="width:80px">Status</th></tr>';
-      for (const o of opps) {
-        let badge;
+      for (let i = 0; i < opps.length; i++) {
+        const o = opps[i];
+        const hidden = !oppsExpanded && i >= MAX_VISIBLE ? ' display:none;' : '';
+        let obadge;
         if (o.dismissed) {
-          badge = '<span class="badge badge-failed">dismissed</span>';
+          obadge = '<span class="badge badge-failed">dismissed</span>';
         } else if (o.dry_run) {
-          badge = '<span class="badge badge-validating">dry-run</span>';
+          obadge = '<span class="badge badge-validating">dry-run</span>';
         } else {
-          badge = '<span class="badge badge-done">spawned</span>';
+          obadge = '<span class="badge badge-done">spawned</span>';
         }
-        const rowStyle = o.dismissed ? ' style="opacity:0.55"' : '';
+        const dimStyle = o.dismissed ? 'opacity:0.55;' : '';
+        const rowStyle = (hidden || dimStyle) ? ' style="' + hidden + dimStyle + '"' : '';
         const reasonTip = o.reasoning ? '<br><span style="color:var(--dim);font-size:11px">' + esc(o.reasoning).substring(0, 120) + '</span>' : '';
         ohtml += '<tr' + rowStyle + '><td>' + relTimeAgo(o.created_at, now) + '</td>'
           + '<td style="white-space:normal">' + esc(o.summary) + reasonTip + '</td>'
           + '<td>' + esc(o.category) + '</td>'
           + '<td class="mono">' + (o.confidence * 100).toFixed(0) + '%</td>'
           + '<td>' + esc(o.est_size) + '</td>'
-          + '<td>' + badge + '</td></tr>';
+          + '<td>' + obadge + '</td></tr>';
       }
       ohtml += '</table>';
+      if (opps.length > MAX_VISIBLE) {
+        if (oppsExpanded) {
+          ohtml += '<div class="toggle-row" onclick="toggleOpps()">Show less</div>';
+        } else {
+          ohtml += '<div class="toggle-row" onclick="toggleOpps()">Show all (' + opps.length + ')</div>';
+        }
+      }
       document.getElementById('opps-wrap').innerHTML = ohtml;
-    }
-
-    // Active runs
-    document.getElementById('active-count').textContent = active.length;
-    if (active.length === 0) {
-      document.getElementById('active-wrap').innerHTML = '<div class="empty">No active runs</div>';
-    } else {
-      let html = '<table><tr><th style="width:110px">Status</th><th style="width:25%">Branch</th><th>Task</th><th style="width:80px">Duration</th></tr>';
-      for (const r of active) {
-        const elapsed = now - r.started_at;
-        html += '<tr><td>' + statusBadge(r.status, true) + '</td>'
-          + '<td class="mono">' + esc(r.branch) + '</td>'
-          + '<td>' + esc(r.task) + '</td>'
-          + '<td class="mono">' + fmtDuration(elapsed) + '</td></tr>';
-      }
-      html += '</table>';
-      document.getElementById('active-wrap').innerHTML = html;
-    }
-
-    // History
-    const history = d.history || [];
-    if (history.length === 0) {
-      document.getElementById('history-wrap').innerHTML = '<div class="empty">No completed runs</div>';
-    } else {
-      let html = '<table><tr><th style="width:90px">Status</th><th style="width:22%">Branch</th><th>Task</th><th style="width:60px">Files</th><th style="width:65px">Cost</th><th style="width:80px">Duration</th><th style="width:22%">PR</th></tr>';
-      for (const r of history) {
-        const pr = r.status === 'done' && r.pr_url
-          ? shortURL(r.pr_url)
-          : '<span style="color:var(--dim)">' + esc(r.error || '-') + '</span>';
-        html += '<tr><td>' + statusBadge(r.status, false) + '</td>'
-          + '<td class="mono">' + esc(r.branch) + '</td>'
-          + '<td>' + esc(r.task) + '</td>'
-          + '<td class="mono">' + (r.files_changed || '-') + '</td>'
-          + '<td class="mono">' + fmtCost(r.cost) + '</td>'
-          + '<td class="mono">' + fmtDuration(r.duration_s) + '</td>'
-          + '<td>' + pr + '</td></tr>';
-      }
-      html += '</table>';
-      document.getElementById('history-wrap').innerHTML = html;
     }
 
     // PR Watches
@@ -784,7 +981,7 @@ async function refresh() {
       document.getElementById('watches-wrap').innerHTML = html;
     }
 
-    // Config
+    // Config (collapsed by default)
     const cfgSec = document.getElementById('config-section');
     const cfg = d.config;
     if (cfg) {
@@ -801,6 +998,8 @@ async function refresh() {
         html += '<div class="info-row"><span class="lbl">Digest max spawn/hr</span><span class="val">' + cfg.digest_max_spawn_hour + '</span></div>';
       }
       document.getElementById('config-panel').innerHTML = html;
+      document.getElementById('config-panel').style.display = configExpanded ? '' : 'none';
+      document.getElementById('config-header').className = 'section-header' + (configExpanded ? '' : ' collapsed');
     } else {
       cfgSec.style.display = 'none';
     }
