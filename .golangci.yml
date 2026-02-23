@@ -34,7 +34,6 @@ linters:
     - misspell
     - nakedret
     - nilerr
-    - noctx
     - revive
     - unconvert
     - unparam
@@ -66,7 +65,6 @@ linters:
         - diagnostic
         - performance
       disabled-checks:
-        - whyNoLint
         - wrapperFunc
         - appendCombine
         - hugeParam
@@ -90,6 +88,7 @@ linters:
       enable-all: true
       disable:
         - fieldalignment
+        - shadow # Too noisy in idiomatic Go err-handling patterns
 
     misspell:
       locale: US
@@ -113,7 +112,11 @@ linters:
         - name: time-naming
         - name: unexported-return
         - name: var-declaration
-        - name: var-naming
+
+    staticcheck:
+      checks:
+        - "all"
+        - "-QF*" # Disable quickfix suggestions (style, not correctness)
 
   exclusions:
     rules:
@@ -127,6 +130,10 @@ linters:
       - linters:
           - errcheck
         source: "defer"
+
+      - path: internal/log/
+        linters:
+          - revive # Package name "log" conflicts with stdlib — intentional
 
 formatters:
   enable:

@@ -63,7 +63,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if !overwrite {
-			fmt.Println("Cancelled.")
+			fmt.Println("Canceled.")
 			return nil
 		}
 	}

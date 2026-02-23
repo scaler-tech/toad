@@ -39,7 +39,7 @@ func NewWatcher(db *state.DB, repoPath string, spawn SpawnFunc, slack *islack.Cl
 	}
 }
 
-// Run starts the polling loop. Blocks until ctx is cancelled.
+// Run starts the polling loop. Blocks until ctx is canceled.
 func (w *Watcher) Run(ctx context.Context) {
 	slog.Info("PR review watcher started", "interval", w.interval)
 	ticker := time.NewTicker(w.interval)
@@ -157,13 +157,13 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 
 	// Build fix task from review comments
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Fix review comments on PR #%d.\n\n", watch.PRNumber))
+	fmt.Fprintf(&sb, "Fix review comments on PR #%d.\n\n", watch.PRNumber)
 	sb.WriteString("Review comments to address:\n\n")
 	for _, c := range newComments {
 		if c.Path != "" {
-			sb.WriteString(fmt.Sprintf("File: %s\n", c.Path))
+			fmt.Fprintf(&sb, "File: %s\n", c.Path)
 		}
-		sb.WriteString(fmt.Sprintf("@%s: %s\n\n", c.User.Login, c.Body))
+		fmt.Fprintf(&sb, "@%s: %s\n\n", c.User.Login, c.Body)
 	}
 
 	task := tadpole.Task{

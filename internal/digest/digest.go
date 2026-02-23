@@ -138,7 +138,7 @@ func (e *Engine) Stats() DigestStats {
 	}
 }
 
-// Run starts the periodic analysis loop. Blocks until ctx is cancelled.
+// Run starts the periodic analysis loop. Blocks until ctx is canceled.
 func (e *Engine) Run(ctx context.Context) {
 	interval := time.Duration(e.cfg.BatchMinutes) * time.Minute
 	slog.Info("digest engine started", "interval", interval, "min_confidence", e.cfg.MinConfidence)
@@ -389,7 +389,7 @@ func (e *Engine) analyze(ctx context.Context, msgs []Message) ([]Opportunity, er
 	// Format messages as numbered list
 	var sb strings.Builder
 	for i, msg := range msgs {
-		sb.WriteString(fmt.Sprintf("[%d] #%s @%s: %s\n", i, msg.ChannelName, msg.User, msg.Text))
+		fmt.Fprintf(&sb, "[%d] #%s @%s: %s\n", i, msg.ChannelName, msg.User, msg.Text)
 	}
 
 	prompt := fmt.Sprintf(digestPrompt, sb.String())

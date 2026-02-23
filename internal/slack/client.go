@@ -85,7 +85,7 @@ func (c *Client) OnMessage(handler MessageHandler) {
 	c.handler = handler
 }
 
-// Run starts the Socket Mode event loop. Blocks until context is cancelled.
+// Run starts the Socket Mode event loop. Blocks until context is canceled.
 func (c *Client) Run(ctx context.Context) error {
 	// Identify ourselves so we can filter our own messages
 	authResp, err := c.api.AuthTest()

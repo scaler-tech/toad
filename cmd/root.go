@@ -268,7 +268,7 @@ func handleMessage(
 	// toad's own (bot) messages, so the fetched message will have IsBot=true.
 	if msg.IsTadpoleRequest {
 		slog.Info("handler: tadpole requested", "channel", channelName, "thread", msg.ThreadTS())
-		handleTadpoleRequest(ctx, msg, cfg, triageEngine, slackClient, stateManager, tadpolePool, channelName)
+		handleTadpoleRequest(ctx, msg, triageEngine, slackClient, stateManager, tadpolePool, channelName)
 		return
 	}
 
@@ -284,7 +284,7 @@ func handleMessage(
 			return
 		}
 
-		handleTriggered(ctx, msg, cfg, triageEngine, ribbitEngine, slackClient, stateManager, tadpolePool, channelName)
+		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, tadpolePool, channelName)
 		return
 	}
 
@@ -328,7 +328,6 @@ func handleMessage(
 func handleTriggered(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
-	cfg *config.Config,
 	triageEngine *triage.Engine,
 	ribbitEngine *ribbit.Engine,
 	slackClient *islack.Client,
@@ -520,7 +519,6 @@ func handlePassive(
 func handleTadpoleRequest(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
-	cfg *config.Config,
 	triageEngine *triage.Engine,
 	slackClient *islack.Client,
 	stateManager *state.Manager,
