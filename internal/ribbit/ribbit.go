@@ -1,3 +1,4 @@
+// Package ribbit provides codebase-aware Q&A using Claude with read-only tools.
 package ribbit
 
 import (

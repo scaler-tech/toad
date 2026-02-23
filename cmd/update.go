@@ -54,7 +54,8 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 
 	// Check if homebrew is available
-	if _, lookErr := exec.LookPath("brew"); lookErr != nil {
+	hasBrew := exec.Command("brew", "--version").Run() == nil //nolint:gosec // brew is a fixed binary
+	if !hasBrew {
 		fmt.Println("  " + dimStyle.Render("Homebrew not found. Update manually:"))
 		fmt.Println()
 		fmt.Println("  " + dimStyle.Render("  go install github.com/cdre-ai/toad@latest"))

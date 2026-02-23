@@ -1,3 +1,4 @@
+// Package log configures structured logging for toad.
 package log
 
 import (

@@ -1,3 +1,4 @@
+// Package reviewer watches PRs for review comments and spawns fix tadpoles.
 package reviewer
 
 import (

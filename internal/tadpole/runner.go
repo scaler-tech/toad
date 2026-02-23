@@ -1,3 +1,4 @@
+// Package tadpole implements autonomous coding agents that create PRs.
 package tadpole
 
 import (

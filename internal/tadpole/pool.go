@@ -66,6 +66,6 @@ func (p *Pool) Shutdown(ctx context.Context) {
 	case <-timer.C:
 		slog.Warn("tadpole shutdown timed out after grace period", "grace", grace)
 	case <-ctx.Done():
-		slog.Warn("tadpole shutdown cancelled")
+		slog.Warn("tadpole shutdown canceled")
 	}
 }

@@ -1,3 +1,4 @@
+// Package update checks for new toad releases on GitHub.
 package update
 
 import (

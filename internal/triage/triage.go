@@ -1,3 +1,4 @@
+// Package triage classifies incoming messages using Claude Haiku.
 package triage
 
 import (

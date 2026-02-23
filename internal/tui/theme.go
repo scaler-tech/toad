@@ -1,3 +1,4 @@
+// Package tui provides shared terminal UI theming for interactive prompts.
 package tui
 
 import (

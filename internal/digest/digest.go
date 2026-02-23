@@ -1,3 +1,4 @@
+// Package digest implements the Toad King batch analysis engine.
 package digest
 
 import (

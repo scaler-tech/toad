@@ -1,3 +1,4 @@
+// Package cmd implements the CLI commands for the toad daemon.
 package cmd
 
 import (
@@ -160,7 +161,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	// 9. Set up message handler — dispatch into goroutines so the event loop stays responsive
 	slackClient.OnMessage(func(ctx context.Context, msg *islack.IncomingMessage) {
-		go handleMessage(ctx, msg, cfg, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, tadpolePool, digestEngine)
+		go handleMessage(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, tadpolePool, digestEngine)
 	})
 
 	// 8. Handle graceful shutdown
@@ -251,7 +252,6 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 func handleMessage(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
-	cfg *config.Config,
 	triageEngine *triage.Engine,
 	ribbitEngine *ribbit.Engine,
 	slackClient *islack.Client,

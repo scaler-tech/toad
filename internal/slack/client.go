@@ -1,3 +1,4 @@
+// Package slack provides the Socket Mode client and event routing.
 package slack
 
 import (

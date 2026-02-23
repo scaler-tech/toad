@@ -1,3 +1,4 @@
+// Package state manages in-memory and SQLite-persisted run state.
 package state
 
 import (
