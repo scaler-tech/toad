@@ -57,6 +57,19 @@ func (c *Client) SwapReaction(channel, timestamp, remove, add string) {
 	c.React(channel, timestamp, add)
 }
 
+// GetPermalink returns a permanent URL to a specific Slack message.
+func (c *Client) GetPermalink(channel, timestamp string) (string, error) {
+	params := &slack.PermalinkParameters{
+		Channel: channel,
+		Ts:      timestamp,
+	}
+	link, err := c.api.GetPermalink(params)
+	if err != nil {
+		return "", fmt.Errorf("getting permalink: %w", err)
+	}
+	return link, nil
+}
+
 // UpdateMessage edits an existing message (for status updates).
 func (c *Client) UpdateMessage(channel, timestamp, newText string) error {
 	_, _, _, err := c.api.UpdateMessage(

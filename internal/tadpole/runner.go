@@ -186,7 +186,18 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 		prURL = "(pushed to existing PR)"
 	} else {
 		r.updateStatus(task, statusTS, ":rocket: Opening PR...")
-		prURL, err = ship(ctx, wt.Path, wt.Branch, task, r.cfg.Repo.AutoMerge)
+
+		// Fetch Slack permalink for the PR body (non-fatal on error)
+		slackLink := ""
+		if r.slack != nil && task.SlackChannel != "" && task.SlackThreadTS != "" {
+			if link, err := r.slack.GetPermalink(task.SlackChannel, task.SlackThreadTS); err == nil {
+				slackLink = link
+			} else {
+				slog.Debug("failed to fetch Slack permalink", "error", err)
+			}
+		}
+
+		prURL, err = ship(ctx, wt.Path, wt.Branch, task, r.cfg.Repo.AutoMerge, slackLink)
 		if err != nil {
 			return fail(fmt.Sprintf("shipping: %s", err))
 		}
@@ -260,7 +271,7 @@ func (r *Runner) swapReact(task Task, remove, add string) {
 	r.slack.SwapReaction(task.SlackChannel, task.SlackThreadTS, remove, add)
 }
 
-func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge bool) (string, error) {
+func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge bool, slackLink string) (string, error) {
 	// Push branch to origin
 	slog.Info("pushing branch", "branch", branch)
 	pushCmd := exec.CommandContext(ctx, "git", "push", "-u", "origin", branch)
@@ -277,8 +288,13 @@ func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge
 		title = title[:67] + "..."
 	}
 
-	body := fmt.Sprintf("## Summary\n\n%s\n\n_Category: %s | Size: %s_\n\n<details>\n<summary>Slack context</summary>\n\n%s\n\n</details>\n\n---\n:frog: Created by toad tadpole",
-		task.Summary, task.Category, task.EstSize, task.Description)
+	slackLine := ""
+	if slackLink != "" {
+		slackLine = fmt.Sprintf("[View Slack thread](%s)\n\n", slackLink)
+	}
+
+	body := fmt.Sprintf("## Summary\n\n%s\n\n%s_Category: %s | Size: %s_\n\n<details>\n<summary>Slack context</summary>\n\n%s\n\n</details>\n\n---\n:frog: Created by toad tadpole",
+		task.Summary, slackLine, task.Category, task.EstSize, task.Description)
 
 	slog.Info("creating PR", "title", title, "branch", branch)
 	prCmd := exec.CommandContext(ctx, "gh", "pr", "create",

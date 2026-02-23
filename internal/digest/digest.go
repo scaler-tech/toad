@@ -53,6 +53,9 @@ type SpawnFunc func(ctx context.Context, task tadpole.Task) error
 // NotifyFunc sends a Slack message in a thread.
 type NotifyFunc func(channel, threadTS, text string)
 
+// ReactFunc adds an emoji reaction to a message.
+type ReactFunc func(channel, timestamp, emoji string)
+
 // DigestStats holds observable digest engine metrics.
 type DigestStats struct {
 	BufferSize    int
@@ -69,6 +72,7 @@ type Engine struct {
 	spawn       SpawnFunc
 	notify      NotifyFunc
 	investigate InvestigateFunc
+	react       ReactFunc
 	db          *state.DB
 
 	mu     sync.Mutex
@@ -87,13 +91,14 @@ type Engine struct {
 }
 
 // New creates a digest engine.
-func New(cfg *config.DigestConfig, triageModel string, spawn SpawnFunc, notify NotifyFunc, investigate InvestigateFunc, db *state.DB) *Engine {
+func New(cfg *config.DigestConfig, triageModel string, spawn SpawnFunc, notify NotifyFunc, investigate InvestigateFunc, react ReactFunc, db *state.DB) *Engine {
 	return &Engine{
 		cfg:         cfg,
 		model:       triageModel,
 		spawn:       spawn,
 		notify:      notify,
 		investigate: investigate,
+		react:       react,
 		db:          db,
 	}
 }
@@ -261,14 +266,9 @@ func (e *Engine) flush(ctx context.Context) {
 			"channel", msg.ChannelName,
 		)
 
-		// Notify in Slack thread
 		threadTS := msg.ThreadTS
 		if threadTS == "" {
 			threadTS = msg.Timestamp
-		}
-		if e.notify != nil {
-			e.notify(msg.Channel, threadTS,
-				fmt.Sprintf(":crown: Toad King detected a one-shot opportunity: %s\nSpawning tadpole...", opp.Summary))
 		}
 
 		task := tadpole.Task{
@@ -288,6 +288,11 @@ func (e *Engine) flush(ctx context.Context) {
 			}
 		} else {
 			e.totalSpawns.Add(1)
+			// React on original message so people see toad is working on it.
+			// The runner handles thread replies (status message + progress updates).
+			if e.react != nil {
+				e.react(msg.Channel, msg.Timestamp, "hatching_chick")
+			}
 		}
 	}
 }

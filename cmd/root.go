@@ -151,6 +151,9 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			func(ctx context.Context, opp digest.Opportunity, msg digest.Message) (*digest.InvestigateResult, error) {
 				return investigateOpportunity(ctx, cfg, opp, msg)
 			},
+			func(channel, timestamp, emoji string) {
+				slackClient.React(channel, timestamp, emoji)
+			},
 			stateDB,
 		)
 	}
