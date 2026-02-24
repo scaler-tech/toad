@@ -38,6 +38,7 @@ type RepoConfig struct {
 	LintCommand   string          `yaml:"lint_command"`
 	DefaultBranch string          `yaml:"default_branch"`
 	AutoMerge     bool            `yaml:"auto_merge"`
+	PRLabels      []string        `yaml:"pr_labels"`
 	Services      []ServiceConfig `yaml:"services"`
 }
 
@@ -56,6 +57,7 @@ type LimitsConfig struct {
 	MaxFilesChanged int     `yaml:"max_files_changed"`
 	MaxBudgetUSD    float64 `yaml:"max_budget_usd"`
 	MaxRetries      int     `yaml:"max_retries"`
+	MaxReviewRounds int     `yaml:"max_review_rounds"`
 }
 
 type TriageConfig struct {
@@ -117,6 +119,7 @@ func defaults() *Config {
 			MaxFilesChanged: 5,
 			MaxBudgetUSD:    1.0,
 			MaxRetries:      1,
+			MaxReviewRounds: 3,
 		},
 		Triage: TriageConfig{
 			Model:     "haiku",

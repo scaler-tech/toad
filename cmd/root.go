@@ -131,7 +131,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// 7. Initialize PR review watcher
 	prWatcher := reviewer.NewWatcher(stateDB, cfg.Repo.Path, func(ctx context.Context, task tadpole.Task) error {
 		return tadpolePool.Spawn(ctx, task)
-	}, slackClient)
+	}, slackClient, cfg.Limits.MaxReviewRounds)
 
 	// Wire PR review tracking — after a successful ship, register the PR for review watching
 	tadpoleRunner.OnShip(func(prURL, branch, runID string, task tadpole.Task) {
@@ -569,7 +569,12 @@ func handleTadpoleRequest(
 	// Fetch thread context to understand the full conversation
 	threadMsgs, err := slackClient.FetchThreadMessages(msg.Channel, threadTS)
 	if err != nil {
-		slog.Warn("failed to fetch thread context for tadpole", "error", err)
+		slog.Warn("failed to fetch thread context for tadpole, retrying", "error", err)
+		time.Sleep(1 * time.Second)
+		threadMsgs, err = slackClient.FetchThreadMessages(msg.Channel, threadTS)
+	}
+	if err != nil {
+		slog.Warn("failed to fetch thread context for tadpole after retry", "error", err)
 		slackClient.ReplyInThread(msg.Channel, threadTS,
 			":x: Couldn't fetch thread context")
 		return

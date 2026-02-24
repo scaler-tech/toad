@@ -252,7 +252,7 @@ func TestDB_PRWatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	watches, err := db.OpenPRWatches()
+	watches, err := db.OpenPRWatches(3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestDB_PRWatch_ClosedExcluded(t *testing.T) {
 	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1")
 	db.ClosePRWatch(42)
 
-	watches, _ := db.OpenPRWatches()
+	watches, _ := db.OpenPRWatches(3)
 	if len(watches) != 0 {
 		t.Error("closed PR should not appear in open watches")
 	}
@@ -287,7 +287,7 @@ func TestDB_PRWatch_FixCountLimit(t *testing.T) {
 		db.UpdatePRWatchLastComment(42, i+1)
 	}
 
-	watches, _ := db.OpenPRWatches()
+	watches, _ := db.OpenPRWatches(3)
 	if len(watches) != 0 {
 		t.Error("PR at fix limit should not appear in open watches")
 	}

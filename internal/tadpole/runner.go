@@ -204,7 +204,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 			}
 		}
 
-		prURL, err = ship(ctx, wt.Path, wt.Branch, task, r.cfg.Repo.AutoMerge, slackLink)
+		prURL, err = ship(ctx, wt.Path, wt.Branch, task, r.cfg.Repo.AutoMerge, r.cfg.Repo.PRLabels, slackLink)
 		if err != nil {
 			return fail(fmt.Sprintf("shipping: %s", err))
 		}
@@ -278,7 +278,7 @@ func (r *Runner) swapReact(task Task, remove, add string) {
 	r.slack.SwapReaction(task.SlackChannel, task.SlackThreadTS, remove, add)
 }
 
-func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge bool, slackLink string) (string, error) {
+func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge bool, prLabels []string, slackLink string) (string, error) {
 	// Push branch to origin
 	slog.Info("pushing branch", "branch", branch)
 	pushCmd := exec.CommandContext(ctx, "git", "push", "-u", "origin", branch)
@@ -291,8 +291,9 @@ func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge
 
 	// Create PR via gh CLI
 	title := task.Summary
-	if len(title) > 70 {
-		title = title[:67] + "..."
+	runes := []rune(title)
+	if len(runes) > 70 {
+		title = string(runes[:67]) + "..."
 	}
 
 	slackLine := ""
@@ -307,15 +308,24 @@ func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge
 		issueLine = fmt.Sprintf("%s: %s\n\n", capitalize(task.IssueRef.Provider), task.IssueRef.ID)
 	}
 
+	slackContext := task.Description
+	if len(slackContext) > 2000 {
+		slackContext = slackContext[:2000] + "\n\n_(truncated)_"
+	}
+
 	body := fmt.Sprintf("## Summary\n\n%s\n\n%s%s_Category: %s | Size: %s_\n\n<details>\n<summary>Slack context</summary>\n\n%s\n\n</details>\n\n---\n:frog: Created by toad tadpole",
-		task.Summary, issueLine, slackLine, task.Category, task.EstSize, task.Description)
+		task.Summary, issueLine, slackLine, task.Category, task.EstSize, slackContext)
 
 	slog.Info("creating PR", "title", title, "branch", branch)
-	prCmd := exec.CommandContext(ctx, "gh", "pr", "create",
+	prArgs := []string{"pr", "create",
 		"--title", title,
 		"--body", body,
 		"--head", branch,
-	)
+	}
+	for _, label := range prLabels {
+		prArgs = append(prArgs, "--label", label)
+	}
+	prCmd := exec.CommandContext(ctx, "gh", prArgs...)
 	prCmd.Dir = worktreePath
 	var prStdout, prStderr bytes.Buffer
 	prCmd.Stdout = &prStdout

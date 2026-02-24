@@ -197,24 +197,152 @@ Quick wins from the Feb 2026 full review. All are targeted, small changes.
 
 ### Sprint 1: Critical fixes
 
-- [ ] Fix Unicode-unsafe PR title truncation — `runner.go:294` uses `len(title)` which counts bytes, not characters. Emoji or accented characters get corrupted. Use `[]rune` or `utf8.RuneCountInString`.
-- [x] Remove `--dangerously-skip-permissions` from digest analyze call — `digest.go:419` uses it for a `--max-turns 1` classification call with no tool use. Unnecessary permission escalation. Remove the flag.
-- [ ] Log ALTER TABLE migration errors — `db.go:132-133` silently swallows errors from `ADD COLUMN` calls. If these fail (disk full, permissions), toad crashes later with confusing "column doesn't exist" errors. Check and log errors.
-- [ ] Add `QueryContext` with timeouts to critical DB paths — all DB operations in `db.go` use raw `db.Query`/`db.Exec` without context. Under WAL contention or disk issues, these block the event loop. Add 10-second timeout wrappers to `SaveRun`, `CompleteRun`, `ActiveRuns`, `Stats`.
+- [ ] Fix Unicode-unsafe PR title truncation
+  - **File:** `internal/tadpole/runner.go` — `ship()` function
+  - **Bug:** `len(title) > 70` counts bytes, not characters. `title[:67]` can split a multibyte character (emoji, accented chars), producing corrupted UTF-8 in the PR title.
+  - **Fix:** Convert to runes for length check and truncation:
+    ```go
+    runes := []rune(title)
+    if len(runes) > 70 {
+        title = string(runes[:67]) + "..."
+    }
+    ```
+  - **Test:** Add test case in `runner_test.go`: title with emoji, title with accented chars, title at exact boundary.
+
+- [x] Remove `--dangerously-skip-permissions` from digest analyze call *(done in v0.1.6)*
+
+- [ ] Log ALTER TABLE migration errors
+  - **File:** `internal/state/db.go` — `migrate()` function, lines 131-134
+  - **Bug:** `db.Exec(ALTER TABLE ...)` return values are discarded. If the ALTER fails (disk full, permissions, schema corruption), toad continues and later crashes with "no such column: dismissed".
+  - **Fix:**
+    ```go
+    if count == 0 {
+        if _, err := db.Exec(`ALTER TABLE ... ADD COLUMN dismissed ...`); err != nil {
+            slog.Warn("migration: failed to add dismissed column", "error", err)
+        }
+        if _, err := db.Exec(`ALTER TABLE ... ADD COLUMN reasoning ...`); err != nil {
+            slog.Warn("migration: failed to add reasoning column", "error", err)
+        }
+    }
+    ```
+
+- [ ] Add `QueryContext` with timeouts to critical DB paths
+  - **File:** `internal/state/db.go`
+  - **Problem:** All DB methods use `db.Query`/`db.Exec` without context. If SQLite is blocked (WAL contention, disk I/O stall), the calling goroutine blocks indefinitely, which can freeze the event loop.
+  - **Fix:** Add a helper and use it in the hot-path methods:
+    ```go
+    func (d *DB) ctx() (context.Context, context.CancelFunc) {
+        return context.WithTimeout(context.Background(), 10*time.Second)
+    }
+    ```
+    Apply to: `SaveRun`, `UpdateStatus`, `CompleteRun`, `ActiveRuns`, `GetByThread`, `Stats`, `SaveDigestOpportunity`, `HasRecentOpportunity`. These are all called from the event loop or tadpole lifecycle.
+  - **Skip for:** `migrate()` (runs once at startup, can take longer), `OpenPRWatches` (runs in its own goroutine on a 2-min timer).
 
 ### Sprint 2: Robustness
 
-- [ ] Retry or warn on thread context fetch failure — `root.go:359-363` silently proceeds with empty context when `FetchThreadMessages` fails. Tadpole gets spawned with just "@toad fix!" and no idea what to fix. Add one retry with backoff, or warn the user that context is incomplete.
-- [ ] Sanitize Slack context in PR bodies — `runner.go:310` embeds raw `task.Description` (full Slack thread text) in the PR body. This can leak sensitive information (API keys in error messages, internal URLs, PII). Truncate to reasonable length and strip potential secrets.
-- [ ] Make PR review fix round limit configurable — `reviewer.go` and `db.go` hardcode `fix_count < 3`. Add `limits.max_review_rounds` to config (default: 3).
-- [ ] Make history cap configurable — `state.go:161` hardcodes 50 runs. High-throughput teams may want more. Add `limits.history_size` to config (default: 50).
+- [ ] Retry on thread context fetch failure
+  - **File:** `cmd/root.go` — `handleTriggered()` lines 357-373, `handleTadpoleRequest()` lines 569-576
+  - **Problem:** When `FetchThreadMessages` fails (network blip, Slack API timeout), toad logs a warning but proceeds with empty `ThreadContext`. Tadpoles get spawned with just "@toad fix!" — Claude has no idea what to fix.
+  - **Fix:** Add a single retry with 2s backoff in both locations. Pattern:
+    ```go
+    threadMsgs, err := slackClient.FetchThreadMessages(msg.Channel, msg.ThreadTimestamp)
+    if err != nil {
+        slog.Warn("thread context fetch failed, retrying", "error", err)
+        time.Sleep(2 * time.Second)
+        threadMsgs, err = slackClient.FetchThreadMessages(msg.Channel, msg.ThreadTimestamp)
+    }
+    if err != nil {
+        slog.Error("thread context fetch failed after retry", "error", err)
+    }
+    ```
+  - For `handleTadpoleRequest`: if both attempts fail, reply with a warning instead of spawning blind:
+    ```go
+    slackClient.ReplyInThread(msg.Channel, threadTS,
+        ":warning: Couldn't fetch thread context — spawning with limited context")
+    ```
+  - For `handleTriggered`: same retry, but still proceed (questions can work with just the trigger text).
+
+- [ ] Sanitize Slack context in PR bodies
+  - **File:** `internal/tadpole/runner.go` — `ship()` function, line 310
+  - **Problem:** `task.Description` (raw Slack thread text) is embedded verbatim in the PR body inside a `<details>` block. Can leak API keys, tokens, internal URLs, PII that appeared in error messages or Sentry alerts.
+  - **Fix:** Add a `sanitizeForPR(text string, maxLen int) string` function:
+    1. Truncate to `maxLen` (4000 chars — GitHub PR body limit is 65536, but keep it reasonable)
+    2. Redact common secret patterns: `xoxb-`, `xapp-`, `sk-`, `ghp_`, `glpat-`, `AKIA`, `Bearer `, `token=`, API key formats
+    3. Replace matches with `[REDACTED]`
+  - Apply in `ship()`:
+    ```go
+    body := fmt.Sprintf("...<details>\n<summary>Slack context</summary>\n\n%s\n\n</details>...",
+        sanitizeForPR(task.Description, 4000))
+    ```
+  - **Test:** Add test cases in `runner_test.go` for each redaction pattern and truncation.
+
+- [ ] Make PR review fix round limit configurable
+  - **Files:** `internal/config/config.go`, `internal/state/db.go`, `internal/reviewer/reviewer.go`
+  - **Problem:** `fix_count < 3` is hardcoded in the SQL query in `db.go:288` and the max round count in `reviewer.go`.
+  - **Fix:**
+    1. Add `MaxReviewRounds int` to `LimitsConfig` (default: 3)
+    2. Change `OpenPRWatches()` to accept the limit parameter:
+       ```go
+       func (d *DB) OpenPRWatches(maxFixCount int) ([]*PRWatch, error) {
+           rows, err := d.db.Query(
+               "SELECT ... FROM pr_watches WHERE closed = FALSE AND fix_count < ?",
+               maxFixCount,
+           )
+       ```
+    3. Thread the config value through `reviewer.NewWatcher` → `poll()` → `OpenPRWatches()`
+
+- [ ] Make history cap configurable
+  - **Files:** `internal/config/config.go`, `internal/state/state.go`
+  - **Problem:** `state.go:161` hardcodes `if len(m.history) > 50`. High-throughput teams want to see more history in the dashboard.
+  - **Fix:**
+    1. Add `HistorySize int` to `LimitsConfig` (default: 50)
+    2. Pass it through to `Manager` — add a `historySize` field set in `NewPersistentManager`
+    3. Use `m.historySize` instead of hardcoded 50 in `Complete()` and `NewPersistentManager` hydration call to `db.History()`
 
 ### Sprint 3: Test coverage gaps
 
-- [ ] Add tests for `internal/reviewer/` — currently zero tests. Cover: `ExtractPRNumber`, comment filtering (bots vs humans, new vs seen), fix task construction, PR state checking (mock `gh` calls).
-- [ ] Add tests for digest investigation gate — `digest.go:processOpportunities` with mock investigate func. Cover: feasible → spawn, not feasible → skip, error → skip, spawn limit enforcement.
-- [ ] Add tests for Slack event routing — `internal/slack/events.go` routing logic. Cover: self-message rejection, dedup, channel filtering, tadpole request detection.
-- [ ] Add end-to-end tadpole runner test — mock Claude + git + Slack, verify full Execute lifecycle including retry loop and status message ordering.
+- [ ] Add tests for `internal/reviewer/`
+  - **File:** new `internal/reviewer/reviewer_test.go`
+  - Currently zero tests. Cover:
+    - `ExtractPRNumber`: valid PR URLs, trailing slash, non-PR URLs, malformed URLs
+    - Comment filtering logic: extract a helper or test via `checkPR` with mocked `gh` output. Verify: bot comments skipped, comments with `id <= lastCommentID` skipped, new human comments included.
+    - Fix task construction: verify the task description format includes file paths and comment bodies.
+  - **Approach:** `ExtractPRNumber` is pure and testable as-is. For `checkPR`, either extract the filtering logic into a testable function or use `exec.Command` override pattern (test helper that sets PATH to a fake `gh` script).
+
+- [ ] Add tests for digest investigation gate
+  - **File:** new test cases in `internal/digest/digest_test.go`
+  - Test `processOpportunities` with mock functions:
+    - `investigate` returns feasible → verify `spawn` is called with the refined task spec
+    - `investigate` returns not feasible → verify `spawn` is NOT called, opportunity persisted as dismissed
+    - `investigate` returns error → verify `spawn` is NOT called, opportunity persisted as dismissed
+    - Spawn limit: call `trySpawn()` until limit, verify next opportunity is skipped
+    - Cross-batch dedup: persist an opportunity, then call again with same keywords, verify skipped
+  - **Setup:** Create engine with mock spawn/notify/investigate/react funcs and in-memory DB (`:memory:` SQLite).
+
+- [ ] Add tests for Slack event routing
+  - **File:** new `internal/slack/events_test.go` (or extend `client_test.go`)
+  - The event handlers in `events.go` have several filtering rules that should be tested:
+    - Self-message rejection: message with `User == botUserID` is skipped
+    - Dedup: same timestamp dispatched twice, second is skipped (`markSeen`)
+    - Channel filtering: when `channels` is configured, events from other channels are dropped
+    - Tadpole request detection: `:frog:` reaction on a toad reply sets `IsTadpoleRequest=true`
+    - Bot message filtering: messages with `BotID` or subtypes are skipped (except tadpole requests)
+  - **Approach:** Create a `Client` with mock Slack API, simulate incoming events, verify which messages reach the `OnMessage` callback.
+
+- [ ] Add end-to-end tadpole runner test
+  - **File:** new test cases in `internal/tadpole/runner_test.go`
+  - Test the full `Execute` lifecycle with mocked externals:
+    - Mock `CreateWorktree` / `RemoveWorktree` (use temp dirs)
+    - Mock `RunClaude` (return canned output)
+    - Mock `Validate` (return pass/fail)
+    - Mock Slack client (collect posted messages and reactions)
+    - Mock `ship` (return fake PR URL)
+  - **Scenarios:**
+    - Happy path: worktree → claude → validate passes → ship → done
+    - Validation failure + retry: first validate fails, retry claude + validate passes → ship
+    - Validation failure exhausts retries: verify fail status, correct Slack reactions
+    - Claude error: verify fail status, worktree cleanup
+  - **Approach:** This requires making `CreateWorktree`, `RunClaude`, `Validate`, `ship` injectable (interfaces or function fields on `Runner`). Currently they're direct function calls. Consider adding a `runnerDeps` struct or making them fields on `Runner` with production defaults.
 
 ## Phase 4: Toad King as Default Experience
 

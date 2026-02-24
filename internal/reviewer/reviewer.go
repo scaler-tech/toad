@@ -22,21 +22,26 @@ type SpawnFunc func(ctx context.Context, task tadpole.Task) error
 
 // Watcher polls toad PRs for new review comments and spawns fix tadpoles.
 type Watcher struct {
-	db       *state.DB
-	repoPath string
-	spawn    SpawnFunc
-	slack    *islack.Client
-	interval time.Duration
+	db              *state.DB
+	repoPath        string
+	spawn           SpawnFunc
+	slack           *islack.Client
+	interval        time.Duration
+	maxReviewRounds int
 }
 
 // NewWatcher creates a PR review watcher.
-func NewWatcher(db *state.DB, repoPath string, spawn SpawnFunc, slack *islack.Client) *Watcher {
+func NewWatcher(db *state.DB, repoPath string, spawn SpawnFunc, slack *islack.Client, maxReviewRounds int) *Watcher {
+	if maxReviewRounds <= 0 {
+		maxReviewRounds = 3
+	}
 	return &Watcher{
-		db:       db,
-		repoPath: repoPath,
-		spawn:    spawn,
-		slack:    slack,
-		interval: 2 * time.Minute,
+		db:              db,
+		repoPath:        repoPath,
+		spawn:           spawn,
+		slack:           slack,
+		interval:        2 * time.Minute,
+		maxReviewRounds: maxReviewRounds,
 	}
 }
 
@@ -67,7 +72,7 @@ func (w *Watcher) TrackPR(prNumber int, prURL, branch, runID, channel, thread st
 }
 
 func (w *Watcher) poll(ctx context.Context) {
-	watches, err := w.db.OpenPRWatches()
+	watches, err := w.db.OpenPRWatches(w.maxReviewRounds)
 	if err != nil {
 		slog.Error("failed to get open PR watches", "error", err)
 		return

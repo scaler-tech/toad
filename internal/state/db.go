@@ -129,8 +129,12 @@ func migrate(db *sql.DB) error {
 	var count int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('digest_opportunities') WHERE name = 'dismissed'`).Scan(&count)
 	if count == 0 {
-		db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN dismissed BOOLEAN NOT NULL DEFAULT FALSE`)
-		db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`)
+		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN dismissed BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
+			slog.Warn("migration: failed to add dismissed column", "error", err)
+		}
+		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`); err != nil {
+			slog.Warn("migration: failed to add reasoning column", "error", err)
+		}
 	}
 
 	return nil
@@ -283,9 +287,10 @@ func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slack
 }
 
 // OpenPRWatches returns all PRs being monitored (not closed, under fix limit).
-func (d *DB) OpenPRWatches() ([]*PRWatch, error) {
+func (d *DB) OpenPRWatches(maxReviewRounds int) ([]*PRWatch, error) {
 	rows, err := d.db.Query(
-		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count FROM pr_watches WHERE closed = FALSE AND fix_count < 3",
+		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count FROM pr_watches WHERE closed = FALSE AND fix_count < ?",
+		maxReviewRounds,
 	)
 	if err != nil {
 		return nil, err

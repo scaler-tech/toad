@@ -181,7 +181,7 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		watches, err := db.OpenPRWatches()
+		watches, err := db.OpenPRWatches(100)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
