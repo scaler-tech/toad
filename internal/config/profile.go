@@ -212,6 +212,16 @@ func FormatForPrompt(profiles []RepoProfile) string {
 	return sb.String()
 }
 
+// DetectStack exports the stack detection logic for use by the init wizard.
+func DetectStack(repoPath string) (stack, module string) {
+	return detectStack(repoPath)
+}
+
+// ReadREADMEFirstParagraph exports the README reader for use by the init wizard.
+func ReadREADMEFirstParagraph(repoPath string) string {
+	return readREADMEFirstParagraph(repoPath)
+}
+
 // --- helpers ---
 
 func readFirstLine(path string) string {
