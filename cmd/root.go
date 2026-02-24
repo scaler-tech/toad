@@ -726,7 +726,7 @@ func investigateOpportunity(ctx context.Context, cfg *config.Config, opp digest.
 		"-p", prompt,
 	}
 
-	investigateCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	investigateCtx, cancel := context.WithTimeout(ctx, 7*time.Minute)
 	defer cancel()
 
 	cmd := exec.CommandContext(investigateCtx, "claude", args...)

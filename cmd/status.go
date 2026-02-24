@@ -18,6 +18,7 @@ import (
 
 	"github.com/hergen/toad/internal/config"
 	"github.com/hergen/toad/internal/state"
+	"github.com/hergen/toad/internal/update"
 )
 
 var statusPort int
@@ -109,6 +110,8 @@ type apiDaemon struct {
 	DigestProcessed  int64            `json:"digest_processed"`
 	DigestOpps       int64            `json:"digest_opportunities"`
 	DigestSpawns     int64            `json:"digest_spawns"`
+	UpdateAvailable  bool             `json:"update_available,omitempty"`
+	LatestVersion    string           `json:"latest_version,omitempty"`
 }
 
 type apiRun struct {
@@ -219,6 +222,10 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 			daemon.DigestProcessed = daemonStats.DigestProcessed
 			daemon.DigestOpps = daemonStats.DigestOpps
 			daemon.DigestSpawns = daemonStats.DigestSpawns
+		}
+		if info := checkVersion(); info != nil && info.Available {
+			daemon.UpdateAvailable = true
+			daemon.LatestVersion = info.Latest
 		}
 		resp.Daemon = daemon
 
@@ -381,6 +388,30 @@ var (
 	ccUsageMu      sync.Mutex
 )
 
+var (
+	versionCache   *update.Info
+	versionCacheAt time.Time
+	versionMu      sync.Mutex
+)
+
+func checkVersion() *update.Info {
+	versionMu.Lock()
+	defer versionMu.Unlock()
+
+	if time.Since(versionCacheAt) < 4*time.Hour {
+		return versionCache
+	}
+	defer func() { versionCacheAt = time.Now() }()
+
+	info, err := update.Check(Version)
+	if err != nil || info == nil {
+		versionCache = nil
+		return nil
+	}
+	versionCache = info
+	return info
+}
+
 func fetchCCUsage() *apiCCUsage {
 	ccUsageMu.Lock()
 	defer ccUsageMu.Unlock()
@@ -519,6 +550,11 @@ const dashboardHTML = `<!DOCTYPE html>
   }
   .daemon-badge.online .indicator { animation: pulse 2s ease-in-out infinite; }
   .refresh-info { color: var(--dim); font-size: 12px; }
+  .update-badge {
+    display: none; font-size: 12px; font-weight: 500;
+    padding: 3px 10px; border-radius: 12px;
+    background: rgba(255,193,7,0.15); color: var(--amber);
+  }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
   /* Integrations row */
@@ -705,6 +741,7 @@ const dashboardHTML = `<!DOCTYPE html>
 <header>
   <h1>&#x1f438; toad dashboard</h1>
   <div class="header-right">
+    <span class="update-badge" id="update-badge"></span>
     <span class="daemon-badge offline" id="daemon-badge">
       <span class="indicator"></span> <span id="daemon-text">Offline</span>
     </span>
@@ -882,6 +919,15 @@ async function refresh() {
     } else {
       badge.className = 'daemon-badge offline';
       dtxt.textContent = 'Offline' + (ver ? ' \u00b7 ' + ver : '');
+    }
+
+    // Update available indicator
+    const updateEl = document.getElementById('update-badge');
+    if (dm.update_available && dm.latest_version) {
+      updateEl.textContent = 'v' + dm.latest_version + ' available';
+      updateEl.style.display = '';
+    } else {
+      updateEl.style.display = 'none';
     }
 
     // Integrations pills
