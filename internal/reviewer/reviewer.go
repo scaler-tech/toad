@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hergen/toad/internal/config"
 	islack "github.com/hergen/toad/internal/slack"
 	"github.com/hergen/toad/internal/state"
 	"github.com/hergen/toad/internal/tadpole"
@@ -23,7 +24,7 @@ type SpawnFunc func(ctx context.Context, task tadpole.Task) error
 // Watcher polls toad PRs for new review comments and spawns fix tadpoles.
 type Watcher struct {
 	db              *state.DB
-	repoPath        string
+	repos           []config.RepoConfig
 	spawn           SpawnFunc
 	slack           *islack.Client
 	interval        time.Duration
@@ -33,7 +34,7 @@ type Watcher struct {
 }
 
 // NewWatcher creates a PR review watcher.
-func NewWatcher(db *state.DB, repoPath string, spawn SpawnFunc, slack *islack.Client, maxReviewRounds, maxCIFixRounds int, triageModel string) *Watcher {
+func NewWatcher(db *state.DB, repos []config.RepoConfig, spawn SpawnFunc, slack *islack.Client, maxReviewRounds, maxCIFixRounds int, triageModel string) *Watcher {
 	if maxReviewRounds <= 0 {
 		maxReviewRounds = 3
 	}
@@ -42,7 +43,7 @@ func NewWatcher(db *state.DB, repoPath string, spawn SpawnFunc, slack *islack.Cl
 	}
 	return &Watcher{
 		db:              db,
-		repoPath:        repoPath,
+		repos:           repos,
 		spawn:           spawn,
 		slack:           slack,
 		interval:        2 * time.Minute,
@@ -70,11 +71,11 @@ func (w *Watcher) Run(ctx context.Context) {
 }
 
 // TrackPR registers a PR for review comment monitoring.
-func (w *Watcher) TrackPR(prNumber int, prURL, branch, runID, channel, thread string) {
-	if err := w.db.SavePRWatch(prNumber, prURL, branch, runID, channel, thread); err != nil {
+func (w *Watcher) TrackPR(prNumber int, prURL, branch, runID, channel, thread, repoPath string) {
+	if err := w.db.SavePRWatch(prNumber, prURL, branch, runID, channel, thread, repoPath); err != nil {
 		slog.Error("failed to track PR for review", "pr", prNumber, "error", err)
 	} else {
-		slog.Info("tracking PR for review comments", "pr", prNumber, "branch", branch)
+		slog.Info("tracking PR for review comments", "pr", prNumber, "branch", branch, "repo", repoPath)
 	}
 }
 
@@ -126,7 +127,7 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 	}
 
 	// 1. Check PR state — close the watch if merged/closed
-	prState, err := w.getPRState(ctx, watch.PRNumber)
+	prState, err := w.getPRState(ctx, watch.PRNumber, watch.RepoPath)
 	if err != nil {
 		return fmt.Errorf("getting PR state: %w", err)
 	}
@@ -162,11 +163,11 @@ func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch)
 	// Fetch both inline review comments AND conversation comments.
 	// GitHub has two separate APIs: pulls/{n}/comments for inline code review
 	// comments, and issues/{n}/comments for conversation-tab comments.
-	reviewComments, err := w.getReviewComments(ctx, watch.PRNumber)
+	reviewComments, err := w.getReviewComments(ctx, watch.PRNumber, watch.RepoPath)
 	if err != nil {
 		slog.Warn("failed to get review comments, continuing", "pr", watch.PRNumber, "error", err)
 	}
-	issueComments, err := w.getIssueComments(ctx, watch.PRNumber)
+	issueComments, err := w.getIssueComments(ctx, watch.PRNumber, watch.RepoPath)
 	if err != nil {
 		slog.Warn("failed to get issue comments, continuing", "pr", watch.PRNumber, "error", err)
 	}
@@ -237,6 +238,7 @@ func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch)
 		SlackChannel:   watch.SlackChannel,
 		SlackThreadTS:  watch.SlackThread,
 		ExistingBranch: watch.Branch,
+		Repo:           config.RepoByPath(w.repos, watch.RepoPath),
 	}
 
 	// Notify in Slack
@@ -273,12 +275,12 @@ type ghCheck struct {
 }
 
 // getCIStatus checks the CI status for a PR using `gh pr checks`.
-func (w *Watcher) getCIStatus(ctx context.Context, prNumber int) (*ciStatus, error) {
+func (w *Watcher) getCIStatus(ctx context.Context, prNumber int, repoPath string) (*ciStatus, error) {
 	cmd := exec.CommandContext(ctx, "gh", "pr", "checks",
 		strconv.Itoa(prNumber),
 		"--json", "name,state,link",
 	)
-	cmd.Dir = w.repoPath
+	cmd.Dir = repoPath
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -350,14 +352,14 @@ func extractRunID(detailsURL string) string {
 }
 
 // getCIFailureLogs fetches failed CI logs using `gh run view --log-failed`.
-func (w *Watcher) getCIFailureLogs(ctx context.Context, failedRunIDs []string) string {
+func (w *Watcher) getCIFailureLogs(ctx context.Context, failedRunIDs []string, repoPath string) string {
 	const maxPerRun = 8192
 	const maxTotal = 15360
 
 	var allLogs strings.Builder
 	for _, runID := range failedRunIDs {
 		cmd := exec.CommandContext(ctx, "gh", "run", "view", runID, "--log-failed")
-		cmd.Dir = w.repoPath
+		cmd.Dir = repoPath
 
 		output, err := cmd.Output()
 		if err != nil {
@@ -393,7 +395,7 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 		return false, nil
 	}
 
-	ci, err := w.getCIStatus(ctx, watch.PRNumber)
+	ci, err := w.getCIStatus(ctx, watch.PRNumber, watch.RepoPath)
 	if err != nil {
 		slog.Warn("failed to get CI status", "pr", watch.PRNumber, "error", err)
 		return false, nil
@@ -419,7 +421,7 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 		return false, fmt.Errorf("incrementing CI fix count: %w", err)
 	}
 
-	logs := w.getCIFailureLogs(ctx, ci.FailedIDs)
+	logs := w.getCIFailureLogs(ctx, ci.FailedIDs, watch.RepoPath)
 
 	var taskDesc strings.Builder
 	fmt.Fprintf(&taskDesc, "Fix CI failures on PR #%d.\n\n", watch.PRNumber)
@@ -441,6 +443,7 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 		SlackChannel:   watch.SlackChannel,
 		SlackThreadTS:  watch.SlackThread,
 		ExistingBranch: watch.Branch,
+		Repo:           config.RepoByPath(w.repos, watch.RepoPath),
 	}
 
 	// Notify in Slack
@@ -553,12 +556,12 @@ func extractResultText(output []byte) string {
 	return strings.TrimSpace(string(output))
 }
 
-func (w *Watcher) getReviewComments(ctx context.Context, prNumber int) ([]ghComment, error) {
+func (w *Watcher) getReviewComments(ctx context.Context, prNumber int, repoPath string) ([]ghComment, error) {
 	cmd := exec.CommandContext(ctx, "gh", "api",
 		fmt.Sprintf("repos/{owner}/{repo}/pulls/%d/comments", prNumber),
 		"--jq", ".",
 	)
-	cmd.Dir = w.repoPath
+	cmd.Dir = repoPath
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -576,12 +579,12 @@ func (w *Watcher) getReviewComments(ctx context.Context, prNumber int) ([]ghComm
 }
 
 
-func (w *Watcher) getIssueComments(ctx context.Context, prNumber int) ([]ghComment, error) {
+func (w *Watcher) getIssueComments(ctx context.Context, prNumber int, repoPath string) ([]ghComment, error) {
 	cmd := exec.CommandContext(ctx, "gh", "api",
 		fmt.Sprintf("repos/{owner}/{repo}/issues/%d/comments", prNumber),
 		"--jq", ".",
 	)
-	cmd.Dir = w.repoPath
+	cmd.Dir = repoPath
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -598,12 +601,12 @@ func (w *Watcher) getIssueComments(ctx context.Context, prNumber int) ([]ghComme
 	return comments, nil
 }
 
-func (w *Watcher) getPRState(ctx context.Context, prNumber int) (*ghPR, error) {
+func (w *Watcher) getPRState(ctx context.Context, prNumber int, repoPath string) (*ghPR, error) {
 	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
 		strconv.Itoa(prNumber),
 		"--json", "state",
 	)
-	cmd.Dir = w.repoPath
+	cmd.Dir = repoPath
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

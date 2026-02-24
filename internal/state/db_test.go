@@ -248,7 +248,7 @@ func TestDB_PruneThreadMemory(t *testing.T) {
 func TestDB_PRWatch(t *testing.T) {
 	db := openTestDB(t)
 
-	if err := db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1"); err != nil {
+	if err := db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -269,7 +269,7 @@ func TestDB_PRWatch(t *testing.T) {
 
 func TestDB_PRWatch_ClosedExcluded(t *testing.T) {
 	db := openTestDB(t)
-	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1")
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
 	db.ClosePRWatch(42)
 
 	watches, _ := db.OpenPRWatches(3, 3)
@@ -280,7 +280,7 @@ func TestDB_PRWatch_ClosedExcluded(t *testing.T) {
 
 func TestDB_PRWatch_FixCountLimit(t *testing.T) {
 	db := openTestDB(t)
-	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1")
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
 
 	// Increment review fix count 3 times
 	for i := 0; i < 3; i++ {
@@ -306,7 +306,7 @@ func TestDB_PRWatch_FixCountLimit(t *testing.T) {
 
 func TestDB_PRWatch_CIFixCount(t *testing.T) {
 	db := openTestDB(t)
-	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1")
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
 
 	// Increment CI fix count
 	if err := db.IncrementCIFixCount(42); err != nil {

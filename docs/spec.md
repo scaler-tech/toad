@@ -13,7 +13,7 @@ Toad is a Go CLI daemon that monitors Slack channels, triages messages for code-
 - **Monitoring**: Passive (all messages) + active (@toad / reaction triggers)
 - **Routing**: Triage classifies every triggered message; bugs/features auto-spawn tadpoles, questions go to ribbit
 - **Spawned agents**: Called "tadpoles"
-- **Repo scope**: Single repo (runs from within a repo directory)
+- **Repo scope**: Multi-repo — one or more repos configured, triage routes messages to the right one
 - **Permissions**: `--dangerously-skip-permissions` for tadpoles (isolation via worktrees), `--allowedTools Read,Glob,Grep` for ribbit (read-only)
 - **State persistence**: SQLite via `modernc.org/sqlite` (pure Go, no CGo) at `~/.toad/state.db`
 - **PR monitoring**: Polling via `gh` CLI (no webhook server)
@@ -299,29 +299,31 @@ slack:
       - "toad fix"
       - "toad help"
 
-repo:
-  default_branch: "main"
-  # Root-level commands (fallback for files not matching any service)
-  # test_command: "go test ./..."
-  # lint_command: "golangci-lint run"
-  #
-  # Per-service lint/test — tadpole detects which services were changed
-  # and runs only the relevant commands from each service directory
-  services:
-    - path: "web-app"
-      test_command: "make test"
-      lint_command: "make stan && make cs"
-    - path: "esg-api"
-      test_command: "make tests"
-      lint_command: "make lint"
-    - path: "audit-service"
-      lint_command: "make stan && make cs"
-    - path: "excel-service"
-      test_command: "make test"
-      lint_command: "make stan && make cs"
-    - path: "estimations-service"
-      test_command: "make test"
-      lint_command: "make lint"
+repos:
+  - name: "my-platform"
+    path: "/path/to/repo"
+    default_branch: "main"
+    # Root-level commands (fallback for files not matching any service)
+    # test_command: "go test ./..."
+    # lint_command: "golangci-lint run"
+    #
+    # Per-service lint/test — tadpole detects which services were changed
+    # and runs only the relevant commands from each service directory
+    services:
+      - path: "web-app"
+        test_command: "make test"
+        lint_command: "make stan && make cs"
+      - path: "esg-api"
+        test_command: "make tests"
+        lint_command: "make lint"
+      - path: "audit-service"
+        lint_command: "make stan && make cs"
+      - path: "excel-service"
+        test_command: "make test"
+        lint_command: "make stan && make cs"
+      - path: "estimations-service"
+        test_command: "make test"
+        lint_command: "make lint"
 
 limits:
   max_concurrent: 2

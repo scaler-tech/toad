@@ -114,6 +114,7 @@ Spawn a tadpole directly from the command line without Slack:
 
 ```bash
 toad run "Fix the login bug in auth.go"
+toad run --repo frontend "Fix the login bug"  # multi-repo: specify which repo
 ```
 
 ### 📊 Monitoring dashboard
@@ -146,15 +147,19 @@ slack:
     emoji: frog
     keywords: ["toad fix", "toad help"]
 
-repo:
-  path: /path/to/your/repo
-  default_branch: main
-  test_command: go test ./...
-  lint_command: go vet ./...
-  services:  # optional: per-service validation
-    - path: web-app
-      test_command: make test
-      lint_command: make stan && make cs
+repos:
+  - name: my-app
+    path: /path/to/your/repo       # absolute or relative (resolved to absolute)
+    default_branch: main
+    test_command: go test ./...
+    lint_command: go vet ./...
+    services:  # optional: per-service validation
+      - path: web-app
+        test_command: make test
+        lint_command: make stan && make cs
+  # - name: another-repo           # add more repos for multi-repo setups
+  #   path: /path/to/another/repo
+  #   primary: true                 # designate one as primary fallback
 
 limits:
   max_concurrent: 2       # concurrent tadpoles
@@ -239,14 +244,16 @@ digest:
 For monorepos with multiple services, configure per-service test/lint commands:
 
 ```yaml
-repo:
-  services:
-    - path: web-app
-      test_command: make test
-      lint_command: make stan && make cs
-    - path: api
-      test_command: pytest
-      lint_command: ruff check .
+repos:
+  - name: my-monorepo
+    path: /path/to/repo
+    services:
+      - path: web-app
+        test_command: make test
+        lint_command: make stan && make cs
+      - path: api
+        test_command: pytest
+        lint_command: ruff check .
 ```
 
 When a tadpole changes files, toad matches them to services by path prefix and runs each service's commands from its subdirectory. Unmatched files fall back to root-level commands.

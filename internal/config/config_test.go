@@ -5,14 +5,19 @@ import (
 	"testing"
 )
 
+// validTestCfg returns a defaults config with a valid repo for validation tests.
+func validTestCfg() *Config {
+	cfg := defaults()
+	dir, _ := os.Getwd()
+	cfg.Repos = []RepoConfig{{Name: "test", Path: dir, Primary: true}}
+	return cfg
+}
+
 func TestDefaults(t *testing.T) {
 	cfg := defaults()
 
 	if cfg.Slack.Triggers.Emoji != "frog" {
 		t.Errorf("default emoji should be 'frog', got %q", cfg.Slack.Triggers.Emoji)
-	}
-	if cfg.Repo.DefaultBranch != "main" {
-		t.Errorf("default branch should be 'main', got %q", cfg.Repo.DefaultBranch)
 	}
 	if cfg.Limits.MaxConcurrent != 2 {
 		t.Errorf("default max_concurrent should be 2, got %d", cfg.Limits.MaxConcurrent)
@@ -41,9 +46,8 @@ func TestDefaults(t *testing.T) {
 }
 
 func TestValidate_MissingAppToken(t *testing.T) {
-	cfg := defaults()
+	cfg := validTestCfg()
 	cfg.Slack.BotToken = "xoxb-test"
-	cfg.Slack.Channels = []string{"C123"}
 	err := Validate(cfg)
 	if err == nil {
 		t.Error("expected error for missing app_token")
@@ -51,9 +55,8 @@ func TestValidate_MissingAppToken(t *testing.T) {
 }
 
 func TestValidate_MissingBotToken(t *testing.T) {
-	cfg := defaults()
+	cfg := validTestCfg()
 	cfg.Slack.AppToken = "xapp-test"
-	cfg.Slack.Channels = []string{"C123"}
 	err := Validate(cfg)
 	if err == nil {
 		t.Error("expected error for missing bot_token")
@@ -61,25 +64,33 @@ func TestValidate_MissingBotToken(t *testing.T) {
 }
 
 func TestValidate_NoChannels(t *testing.T) {
-	cfg := defaults()
+	cfg := validTestCfg()
 	cfg.Slack.AppToken = "xapp-test"
 	cfg.Slack.BotToken = "xoxb-test"
 	cfg.Slack.Channels = nil
 	err := Validate(cfg)
 	if err != nil {
-		t.Error("empty channels should be valid (auto-join mode)")
+		t.Errorf("empty channels should be valid (auto-join mode): %v", err)
 	}
 }
 
 func TestValidate_Valid(t *testing.T) {
-	cfg := defaults()
+	cfg := validTestCfg()
 	cfg.Slack.AppToken = "xapp-test"
 	cfg.Slack.BotToken = "xoxb-test"
-	cfg.Slack.Channels = []string{"C123"}
-	// Repo.Path defaults to cwd which exists
 	err := Validate(cfg)
 	if err != nil {
 		t.Errorf("unexpected validation error: %v", err)
+	}
+}
+
+func TestValidate_NoRepos(t *testing.T) {
+	cfg := defaults()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	err := Validate(cfg)
+	if err == nil {
+		t.Error("expected error for missing repos")
 	}
 }
 
@@ -115,7 +126,7 @@ func TestApplyEnv_LinearToken(t *testing.T) {
 }
 
 func TestValidate_IssueTrackerCreateMissingToken(t *testing.T) {
-	cfg := defaults()
+	cfg := validTestCfg()
 	cfg.Slack.AppToken = "xapp-test"
 	cfg.Slack.BotToken = "xoxb-test"
 	cfg.IssueTracker.Enabled = true
@@ -129,7 +140,7 @@ func TestValidate_IssueTrackerCreateMissingToken(t *testing.T) {
 }
 
 func TestValidate_IssueTrackerCreateMissingTeamID(t *testing.T) {
-	cfg := defaults()
+	cfg := validTestCfg()
 	cfg.Slack.AppToken = "xapp-test"
 	cfg.Slack.BotToken = "xoxb-test"
 	cfg.IssueTracker.Enabled = true
@@ -143,7 +154,7 @@ func TestValidate_IssueTrackerCreateMissingTeamID(t *testing.T) {
 }
 
 func TestValidate_IssueTrackerDetectOnlyNoValidation(t *testing.T) {
-	cfg := defaults()
+	cfg := validTestCfg()
 	cfg.Slack.AppToken = "xapp-test"
 	cfg.Slack.BotToken = "xoxb-test"
 	cfg.IssueTracker.Enabled = true
@@ -165,5 +176,61 @@ func TestDefaults_IssueTracker(t *testing.T) {
 	}
 	if cfg.IssueTracker.CreateIssues {
 		t.Error("create_issues should be false by default")
+	}
+}
+
+func TestPrimaryRepo_Single(t *testing.T) {
+	repos := []RepoConfig{{Name: "only", Path: "/tmp/only"}}
+	p := PrimaryRepo(repos)
+	if p == nil || p.Name != "only" {
+		t.Error("single repo should be returned as primary")
+	}
+}
+
+func TestPrimaryRepo_ExplicitPrimary(t *testing.T) {
+	repos := []RepoConfig{
+		{Name: "a", Path: "/tmp/a"},
+		{Name: "b", Path: "/tmp/b", Primary: true},
+	}
+	p := PrimaryRepo(repos)
+	if p == nil || p.Name != "b" {
+		t.Error("should return the explicitly primary repo")
+	}
+}
+
+func TestPrimaryRepo_NoPrimary(t *testing.T) {
+	repos := []RepoConfig{
+		{Name: "a", Path: "/tmp/a"},
+		{Name: "b", Path: "/tmp/b"},
+	}
+	p := PrimaryRepo(repos)
+	if p != nil {
+		t.Error("should return nil when no primary and multiple repos")
+	}
+}
+
+func TestValidateRepos_DuplicateNames(t *testing.T) {
+	dir := t.TempDir()
+	cfg := defaults()
+	cfg.Repos = []RepoConfig{
+		{Name: "dup", Path: dir},
+		{Name: "dup", Path: dir},
+	}
+	err := ValidateRepos(cfg)
+	if err == nil {
+		t.Error("expected error for duplicate repo names")
+	}
+}
+
+func TestValidateRepos_MultiplePrimary(t *testing.T) {
+	dir := t.TempDir()
+	cfg := defaults()
+	cfg.Repos = []RepoConfig{
+		{Name: "a", Path: dir, Primary: true},
+		{Name: "b", Path: dir, Primary: true},
+	}
+	err := ValidateRepos(cfg)
+	if err == nil {
+		t.Error("expected error for multiple primary repos")
 	}
 }

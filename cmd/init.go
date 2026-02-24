@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,15 +27,21 @@ func init() {
 }
 
 // outputConfig is a purpose-built struct for marshaling .toad.yaml.
-// It omits repo.path and log.file so runtime defaults apply.
+// It omits log.file so runtime defaults apply.
 type outputConfig struct {
 	Slack outputSlackConfig `yaml:"slack"`
+	Repos []outputRepoConfig `yaml:"repos"`
 }
 
 type outputSlackConfig struct {
 	AppToken string   `yaml:"app_token"`
 	BotToken string   `yaml:"bot_token"`
 	Channels []string `yaml:"channels,omitempty"`
+}
+
+type outputRepoConfig struct {
+	Name string `yaml:"name"`
+	Path string `yaml:"path"`
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -68,8 +75,13 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Form 2: Slack setup guide → token inputs
+	// Form 2: Slack setup guide → token inputs → repo config
 	var appToken, botToken string
+
+	// Default repo path to cwd
+	cwd, _ := os.Getwd()
+	repoPath := cwd
+	repoName := filepath.Base(cwd)
 
 	err := huh.NewForm(
 		huh.NewGroup(
@@ -125,6 +137,37 @@ For private channels, use /invite @YourBot.`).
 					return nil
 				}),
 		),
+		huh.NewGroup(
+			huh.NewNote().
+				Title("Repository").
+				Description("Configure the repo toad will monitor and fix.\nYou can add more repos later in .toad.yaml.").
+				Next(true).
+				NextLabel("Continue"),
+			huh.NewInput().
+				Title("Repo name").
+				Description("A short name to identify this repo").
+				Value(&repoName).
+				Validate(func(s string) error {
+					if strings.TrimSpace(s) == "" {
+						return fmt.Errorf("name is required")
+					}
+					return nil
+				}),
+			huh.NewInput().
+				Title("Repo path").
+				Description("Absolute path to the git repository").
+				Value(&repoPath).
+				Validate(func(s string) error {
+					abs, err := filepath.Abs(s)
+					if err != nil {
+						return fmt.Errorf("invalid path: %w", err)
+					}
+					if _, err := os.Stat(abs); os.IsNotExist(err) {
+						return fmt.Errorf("path does not exist: %s", abs)
+					}
+					return nil
+				}),
+		),
 	).
 		WithProgramOptions(formOpts...).
 		WithTheme(theme).
@@ -140,11 +183,17 @@ For private channels, use /invite @YourBot.`).
 		return fmt.Errorf("token validation failed: %w", err)
 	}
 
-	// Write config (no channels — toad auto-joins all public channels)
+	// Normalize repo path to absolute
+	absRepoPath, _ := filepath.Abs(repoPath)
+
+	// Write config
 	out := outputConfig{
 		Slack: outputSlackConfig{
 			AppToken: appToken,
 			BotToken: botToken,
+		},
+		Repos: []outputRepoConfig{
+			{Name: strings.TrimSpace(repoName), Path: absRepoPath},
 		},
 	}
 

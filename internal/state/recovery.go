@@ -14,7 +14,7 @@ type RecoverResult struct {
 
 // RecoverOnStartup finds runs left in active states from a previous crash,
 // marks them failed, and cleans up any orphaned worktrees.
-func RecoverOnStartup(db *DB, repoPath string) (*RecoverResult, error) {
+func RecoverOnStartup(db *DB) (*RecoverResult, error) {
 	result := &RecoverResult{}
 
 	// 1. Find active runs (starting/running/validating/shipping) and mark them failed

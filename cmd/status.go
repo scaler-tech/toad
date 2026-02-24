@@ -119,6 +119,7 @@ type apiRun struct {
 	Status       string  `json:"status"`
 	Branch       string  `json:"branch"`
 	Task         string  `json:"task"`
+	RepoName     string  `json:"repo_name,omitempty"`
 	StartedAt    int64   `json:"started_at"`
 	Cost         float64 `json:"cost,omitempty"`
 	Duration     float64 `json:"duration_s,omitempty"`
@@ -134,16 +135,20 @@ type apiWatch struct {
 	FixCount int    `json:"fix_count"`
 }
 
+type apiConfigRepo struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
 type apiConfig struct {
-	RepoPath       string  `json:"repo_path"`
-	DefaultBranch  string  `json:"default_branch"`
-	MaxConcurrent  int     `json:"max_concurrent"`
-	MaxBudget      float64 `json:"max_budget_usd"`
-	MaxRetries     int     `json:"max_retries"`
-	TimeoutMinutes int     `json:"timeout_minutes"`
-	DigestEnabled  bool    `json:"digest_enabled"`
-	DigestInterval int     `json:"digest_interval_min,omitempty"`
-	DigestMaxSpawn int     `json:"digest_max_spawn_hour,omitempty"`
+	Repos          []apiConfigRepo `json:"repos"`
+	MaxConcurrent  int             `json:"max_concurrent"`
+	MaxBudget      float64         `json:"max_budget_usd"`
+	MaxRetries     int             `json:"max_retries"`
+	TimeoutMinutes int             `json:"timeout_minutes"`
+	DigestEnabled  bool            `json:"digest_enabled"`
+	DigestInterval int             `json:"digest_interval_min,omitempty"`
+	DigestMaxSpawn int             `json:"digest_max_spawn_hour,omitempty"`
 }
 
 type apiCCUsage struct {
@@ -296,6 +301,7 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 				Status:    r.Status,
 				Branch:    r.Branch,
 				Task:      r.Task,
+				RepoName:  r.RepoName,
 				StartedAt: r.StartedAt.Unix(),
 			})
 		}
@@ -306,6 +312,7 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 				Status:    r.Status,
 				Branch:    r.Branch,
 				Task:      r.Task,
+				RepoName:  r.RepoName,
 				StartedAt: r.StartedAt.Unix(),
 			}
 			if r.Result != nil {
@@ -343,13 +350,14 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 
 		if cfg != nil {
 			ac := &apiConfig{
-				RepoPath:       cfg.Repo.Path,
-				DefaultBranch:  cfg.Repo.DefaultBranch,
 				MaxConcurrent:  cfg.Limits.MaxConcurrent,
 				MaxBudget:      cfg.Limits.MaxBudgetUSD,
 				MaxRetries:     cfg.Limits.MaxRetries,
 				TimeoutMinutes: cfg.Limits.TimeoutMinutes,
 				DigestEnabled:  cfg.Digest.Enabled,
+			}
+			for _, r := range cfg.Repos {
+				ac.Repos = append(ac.Repos, apiConfigRepo{Name: r.Name, Path: r.Path})
 			}
 			if cfg.Digest.Enabled {
 				ac.DigestInterval = cfg.Digest.BatchMinutes
@@ -1139,8 +1147,11 @@ async function refresh() {
     if (cfg) {
       cfgSec.style.display = '';
       let html = '';
-      html += '<div class="info-row"><span class="lbl">Repo</span><span class="val mono">' + esc(cfg.repo_path) + '</span></div>';
-      html += '<div class="info-row"><span class="lbl">Default branch</span><span class="val">' + esc(cfg.default_branch) + '</span></div>';
+      if (cfg.repos && cfg.repos.length > 0) {
+        for (const r of cfg.repos) {
+          html += '<div class="info-row"><span class="lbl">Repo: ' + esc(r.name) + '</span><span class="val mono">' + esc(r.path) + '</span></div>';
+        }
+      }
       html += '<div class="info-row"><span class="lbl">Max concurrent</span><span class="val">' + cfg.max_concurrent + '</span></div>';
       html += '<div class="info-row"><span class="lbl">Max budget</span><span class="val">' + fmtCost(cfg.max_budget_usd) + '/run</span></div>';
       html += '<div class="info-row"><span class="lbl">Max retries</span><span class="val">' + cfg.max_retries + '</span></div>';

@@ -364,15 +364,19 @@ The competitive landscape has shifted (Feb 2026). Copilot Coding Agent is GA, De
 
 ## Phase 5: Multi-repo, Code Owners & MCP
 
-**Status: Planned**
+**Status: In progress**
 
 ### Multi-repo support
 
-- [ ] Support multiple repos in a single toad instance
+- [x] Support multiple repos in a single toad instance
   - Config: `repos:` list with per-repo path, default_branch, services, test/lint commands
-  - Triage/digest must resolve which repo a message refers to (keywords, file hints, channel mapping)
-  - Worktrees scoped per repo (`~/.toad/worktrees/<repo-slug>/`)
-  - State DB: add `repo` column to runs table
+  - Triage/digest resolve which repo a message refers to via repo profiles (auto-detected stack, module, top dirs) + file-existence stat verification
+  - State DB: `repo_name` on runs, `repo_path` on pr_watches
+  - `toad run --repo <name>` for CLI multi-repo targeting
+  - `toad init` collects repo name and path
+  - Cross-repo read-only awareness for tadpoles and ribbits
+- [ ] Worktrees scoped per repo (`~/.toad/worktrees/<repo-slug>/`) — currently flat
+- [ ] Channel-to-repo mapping (e.g. #frontend-bugs → frontend repo)
 
 ### Code owner tagging
 

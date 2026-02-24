@@ -18,18 +18,22 @@ slack:
       - "toad fix"
       - "toad help"
 
-repo:
-  # Defaults to current working directory
-  # path: "/path/to/repo"
-  test_command: "go test ./..."
-  lint_command: "golangci-lint run"
-  default_branch: "main"
-  auto_merge: false              # Enable auto-merge on PRs (requires repo setting)
-  # Per-service validation for monorepos
-  # services:
-  #   - path: "web-app"
-  #     test_command: "make test"
-  #     lint_command: "make stan && make cs"
+repos:
+  - name: "my-app"                 # Short name to identify this repo
+    path: "/path/to/repo"          # Absolute or relative path (resolved to absolute)
+    test_command: "go test ./..."
+    lint_command: "golangci-lint run"
+    default_branch: "main"
+    auto_merge: false              # Enable auto-merge on PRs (requires repo setting)
+    # Per-service validation for monorepos
+    # services:
+    #   - path: "web-app"
+    #     test_command: "make test"
+    #     lint_command: "make stan && make cs"
+  # Add more repos:
+  # - name: "frontend"
+  #   path: "/path/to/frontend"
+  #   primary: true                # Designate one as fallback when repo can't be determined
 
 limits:
   max_concurrent: 2            # Max parallel tadpoles

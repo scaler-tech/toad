@@ -16,6 +16,7 @@ type Run struct {
 	Branch        string
 	WorktreePath  string
 	Task          string
+	RepoName      string
 	StartedAt     time.Time
 	Result        *RunResult
 }

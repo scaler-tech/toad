@@ -11,7 +11,7 @@ import (
 
 type Config struct {
 	Slack        SlackConfig        `yaml:"slack"`
-	Repo         RepoConfig         `yaml:"repo"`
+	Repos        []RepoConfig       `yaml:"repos"`
 	Limits       LimitsConfig       `yaml:"limits"`
 	Triage       TriageConfig       `yaml:"triage"`
 	Claude       ClaudeConfig       `yaml:"claude"`
@@ -33,7 +33,10 @@ type Triggers struct {
 }
 
 type RepoConfig struct {
+	Name          string          `yaml:"name"`
 	Path          string          `yaml:"path"`
+	Description   string          `yaml:"description"`
+	Primary       bool            `yaml:"primary"`
 	TestCommand   string          `yaml:"test_command"`
 	LintCommand   string          `yaml:"lint_command"`
 	DefaultBranch string          `yaml:"default_branch"`
@@ -99,7 +102,6 @@ type LogConfig struct {
 }
 
 func defaults() *Config {
-	cwd, _ := os.Getwd()
 	homeDir, _ := os.UserHomeDir()
 
 	return &Config{
@@ -108,10 +110,6 @@ func defaults() *Config {
 				Emoji:    "frog",
 				Keywords: []string{"toad fix", "toad help"},
 			},
-		},
-		Repo: RepoConfig{
-			Path:          cwd,
-			DefaultBranch: "main",
 		},
 		Limits: LimitsConfig{
 			MaxConcurrent:   2,
@@ -152,7 +150,7 @@ func defaults() *Config {
 }
 
 // Load reads configuration from YAML files and environment variables.
-// Loading order: defaults → ~/.toad/config.yaml → .toad.yaml → env vars
+// Loading order: defaults → ~/.toad/config.yaml → .toad.yaml → env vars → apply repo defaults
 func Load() (*Config, error) {
 	cfg := defaults()
 
@@ -167,6 +165,16 @@ func Load() (*Config, error) {
 	}
 
 	applyEnv(cfg)
+
+	// Apply defaults and normalize paths for individual repos
+	for i := range cfg.Repos {
+		if cfg.Repos[i].DefaultBranch == "" {
+			cfg.Repos[i].DefaultBranch = "main"
+		}
+		if cfg.Repos[i].Path != "" {
+			cfg.Repos[i].Path, _ = filepath.Abs(cfg.Repos[i].Path)
+		}
+	}
 
 	return cfg, nil
 }
@@ -192,6 +200,7 @@ func applyEnv(cfg *Config) {
 }
 
 // Validate checks that required configuration is present.
+// It ensures repos are normalized before validation.
 func Validate(cfg *Config) error {
 	if cfg.Slack.AppToken == "" {
 		return fmt.Errorf("slack app_token is required (set in .toad.yaml or TOAD_SLACK_APP_TOKEN env)")
@@ -199,11 +208,8 @@ func Validate(cfg *Config) error {
 	if cfg.Slack.BotToken == "" {
 		return fmt.Errorf("slack bot_token is required (set in .toad.yaml or TOAD_SLACK_BOT_TOKEN env)")
 	}
-	if cfg.Repo.Path == "" {
-		return fmt.Errorf("repo path is required")
-	}
-	if _, err := os.Stat(cfg.Repo.Path); os.IsNotExist(err) {
-		return fmt.Errorf("repo path does not exist: %s", cfg.Repo.Path)
+	if err := ValidateRepos(cfg); err != nil {
+		return err
 	}
 	if cfg.IssueTracker.Enabled && cfg.IssueTracker.CreateIssues {
 		if cfg.IssueTracker.APIToken == "" {
@@ -211,6 +217,71 @@ func Validate(cfg *Config) error {
 		}
 		if cfg.IssueTracker.TeamID == "" {
 			return fmt.Errorf("issue_tracker.team_id is required when create_issues is enabled")
+		}
+	}
+	return nil
+}
+
+// ValidateRepos checks that repos configuration is valid.
+func ValidateRepos(cfg *Config) error {
+	if len(cfg.Repos) == 0 {
+		return fmt.Errorf("at least one repo is required")
+	}
+	names := make(map[string]bool)
+	primaryCount := 0
+	for _, r := range cfg.Repos {
+		if r.Path == "" {
+			return fmt.Errorf("repo %q: path is required", r.Name)
+		}
+		if _, err := os.Stat(r.Path); os.IsNotExist(err) {
+			return fmt.Errorf("repo path does not exist: %s", r.Path)
+		}
+		if r.Name == "" {
+			return fmt.Errorf("repo at %s: name is required", r.Path)
+		}
+		if names[r.Name] {
+			return fmt.Errorf("duplicate repo name: %q", r.Name)
+		}
+		names[r.Name] = true
+		if r.Primary {
+			primaryCount++
+		}
+	}
+	if primaryCount > 1 {
+		return fmt.Errorf("at most one repo can be marked primary")
+	}
+	return nil
+}
+
+// PrimaryRepo returns the primary repo, or the single repo if there's only one,
+// or nil if there's no primary and multiple repos.
+func PrimaryRepo(repos []RepoConfig) *RepoConfig {
+	if len(repos) == 1 {
+		return &repos[0]
+	}
+	for i := range repos {
+		if repos[i].Primary {
+			return &repos[i]
+		}
+	}
+	return nil
+}
+
+// RepoByName returns the repo with the given name, or nil if not found.
+func RepoByName(repos []RepoConfig, name string) *RepoConfig {
+	for i := range repos {
+		if repos[i].Name == name {
+			return &repos[i]
+		}
+	}
+	return nil
+}
+
+// RepoByPath returns the repo with the given path, or nil if not found.
+func RepoByPath(repos []RepoConfig, path string) *RepoConfig {
+	for i := range repos {
+		if repos[i].Path == path {
+			return &repos[i]
 		}
 	}
 	return nil

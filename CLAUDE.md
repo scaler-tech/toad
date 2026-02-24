@@ -25,7 +25,9 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 
 **Tadpole lifecycle:** `CreateWorktree` -> `RunClaude` (CLI subprocess) -> `Validate` (test+lint+file count) -> retry loop -> `ship` (push + `gh pr create`) -> `RemoveWorktree`
 
-**Service-aware validation:** When `repo.services` is configured, `resolveChecks()` in `validate.go` matches changed files to services by path prefix and runs each service's lint/test commands from its subdirectory. Unmatched files fall back to root-level commands. This ensures tadpole PRs pass per-service CI (e.g. PHP services use `make stan && make cs`, Python services use `make lint`).
+**Multi-repo routing:** Config supports multiple repos via `repos:` list. At startup, `BuildProfiles` auto-detects each repo's stack/module from manifest files. Triage and digest prompts include repo profiles so Haiku can suggest a `"repo"` name. The `Resolver` verifies with file-existence stat checks (`resolver.go`), falling back to triage hint, then `primary` repo.
+
+**Service-aware validation:** When `repos[].services` is configured, `resolveChecks()` in `validate.go` matches changed files to services by path prefix and runs each service's lint/test commands from its subdirectory. Unmatched files fall back to root-level commands. This ensures tadpole PRs pass per-service CI (e.g. PHP services use `make stan && make cs`, Python services use `make lint`).
 
 **Key patterns:**
 - **Write-through state**: `state.Manager` caches runs in-memory maps, writes through to SQLite on every mutation. `NewManager()` is in-memory only (tests), `NewPersistentManager(db)` hydrates from DB.
@@ -42,7 +44,7 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 - `internal/state/` — In-memory + SQLite state, crash recovery
 - `internal/reviewer/` — Poll GitHub for PR review comments, spawn fix tadpoles
 - `internal/digest/` — Toad King: batch messages, Haiku analysis, auto-spawn with guardrails
-- `internal/config/` — YAML config loading with cascading defaults
+- `internal/config/` — YAML config loading with cascading defaults, multi-repo profiles and resolver
 - `internal/tui/` — Shared huh theme for init wizard
 
 ## Important Details

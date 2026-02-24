@@ -13,6 +13,8 @@ import (
 	"github.com/hergen/toad/internal/tadpole"
 )
 
+var repoFlag string
+
 var runCmd = &cobra.Command{
 	Use:   "run [task description]",
 	Short: "Run a tadpole to fix an issue (CLI mode, no Slack)",
@@ -22,6 +24,7 @@ var runCmd = &cobra.Command{
 }
 
 func init() {
+	runCmd.Flags().StringVar(&repoFlag, "repo", "", "repo name to target (required when multiple repos configured)")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -45,17 +48,30 @@ func runTadpole(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Resolve target repo
+	repo, err := resolveRepoForCLI(cfg, repoFlag)
+	if err != nil {
+		return err
+	}
+
 	taskDesc := strings.Join(args, " ")
 	fmt.Printf(":frog: Starting tadpole: %s\n\n", taskDesc)
 
 	sm := state.NewManager()
 	runner := tadpole.NewRunner(cfg, nil, sm)
 
+	allRepoPaths := make([]string, len(cfg.Repos))
+	for i, r := range cfg.Repos {
+		allRepoPaths[i] = r.Path
+	}
+
 	task := tadpole.Task{
-		Description: taskDesc,
-		Summary:     taskDesc,
-		Category:    "manual",
-		EstSize:     "unknown",
+		Description:  taskDesc,
+		Summary:      taskDesc,
+		Category:     "manual",
+		EstSize:      "unknown",
+		Repo:         repo,
+		AllRepoPaths: allRepoPaths,
 	}
 
 	ctx := context.Background()
@@ -67,8 +83,31 @@ func runTadpole(cmd *cobra.Command, args []string) error {
 }
 
 func validateForCLI(cfg *config.Config) error {
-	if cfg.Repo.Path == "" {
-		return fmt.Errorf("repo path is required")
+	if len(cfg.Repos) == 0 {
+		return fmt.Errorf("at least one repo is required")
 	}
 	return nil
+}
+
+func resolveRepoForCLI(cfg *config.Config, name string) (*config.RepoConfig, error) {
+	if len(cfg.Repos) == 1 {
+		return &cfg.Repos[0], nil
+	}
+	if name != "" {
+		repo := config.RepoByName(cfg.Repos, name)
+		if repo == nil {
+			names := make([]string, len(cfg.Repos))
+			for i, r := range cfg.Repos {
+				names[i] = r.Name
+			}
+			return nil, fmt.Errorf("unknown repo %q — available: %s", name, strings.Join(names, ", "))
+		}
+		return repo, nil
+	}
+	// Multiple repos, no flag
+	names := make([]string, len(cfg.Repos))
+	for i, r := range cfg.Repos {
+		names[i] = r.Name
+	}
+	return nil, fmt.Errorf("multiple repos configured — use --repo to specify: %s", strings.Join(names, ", "))
 }

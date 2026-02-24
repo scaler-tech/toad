@@ -71,6 +71,7 @@ func migrate(db *sql.DB) error {
 			branch        TEXT,
 			worktree_path TEXT,
 			task          TEXT,
+			repo_name     TEXT DEFAULT '',
 			started_at    DATETIME NOT NULL,
 			result_json   TEXT,
 			updated_at    DATETIME NOT NULL
@@ -96,6 +97,7 @@ func migrate(db *sql.DB) error {
 			last_comment_id INTEGER DEFAULT 0,
 			fix_count       INTEGER DEFAULT 0,
 			ci_fix_count    INTEGER DEFAULT 0,
+			repo_path       TEXT DEFAULT '',
 			created_at      DATETIME NOT NULL,
 			closed          BOOLEAN DEFAULT FALSE
 		);
@@ -162,10 +164,10 @@ func (d *DB) SaveRun(run *Run) error {
 	}
 
 	_, err := d.db.Exec(`
-		INSERT OR REPLACE INTO runs (id, status, slack_channel, slack_thread, branch, worktree_path, task, started_at, result_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT OR REPLACE INTO runs (id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, started_at, result_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.ID, run.Status, run.SlackChannel, run.SlackThreadTS,
-		run.Branch, run.WorktreePath, run.Task, run.StartedAt,
+		run.Branch, run.WorktreePath, run.Task, run.RepoName, run.StartedAt,
 		string(resultJSON), time.Now(),
 	)
 	return err
@@ -203,7 +205,7 @@ func (d *DB) CompleteRun(runID string, result *RunResult) error {
 // Returns nil if not found.
 func (d *DB) GetByThread(threadTS string) (*Run, error) {
 	row := d.db.QueryRow(
-		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, started_at, result_json FROM runs WHERE slack_thread = ? AND status NOT IN ('done', 'failed') LIMIT 1",
+		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, started_at, result_json FROM runs WHERE slack_thread = ? AND status NOT IN ('done', 'failed') LIMIT 1",
 		threadTS,
 	)
 	return scanRun(row)
@@ -212,7 +214,7 @@ func (d *DB) GetByThread(threadTS string) (*Run, error) {
 // ActiveRuns returns all runs in active states.
 func (d *DB) ActiveRuns() ([]*Run, error) {
 	rows, err := d.db.Query(
-		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, started_at, result_json FROM runs WHERE status NOT IN ('done', 'failed') ORDER BY started_at",
+		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, started_at, result_json FROM runs WHERE status NOT IN ('done', 'failed') ORDER BY started_at",
 	)
 	if err != nil {
 		return nil, err
@@ -224,7 +226,7 @@ func (d *DB) ActiveRuns() ([]*Run, error) {
 // History returns completed runs, most recent first.
 func (d *DB) History(limit int) ([]*Run, error) {
 	rows, err := d.db.Query(
-		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, started_at, result_json FROM runs WHERE status IN ('done', 'failed') ORDER BY started_at DESC LIMIT ?",
+		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, started_at, result_json FROM runs WHERE status IN ('done', 'failed') ORDER BY started_at DESC LIMIT ?",
 		limit,
 	)
 	if err != nil {
@@ -287,11 +289,11 @@ func (d *DB) PruneThreadMemory(olderThan time.Duration) (int, error) {
 }
 
 // SavePRWatch registers a PR for review comment monitoring.
-func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slackThread string) error {
+func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slackThread, repoPath string) error {
 	_, err := d.db.Exec(`
-		INSERT OR REPLACE INTO pr_watches (pr_number, pr_url, branch, run_id, slack_channel, slack_thread, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		prNumber, prURL, branch, runID, slackChannel, slackThread, time.Now(),
+		INSERT OR REPLACE INTO pr_watches (pr_number, pr_url, branch, run_id, slack_channel, slack_thread, repo_path, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		prNumber, prURL, branch, runID, slackChannel, slackThread, repoPath, time.Now(),
 	)
 	return err
 }
@@ -299,7 +301,7 @@ func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slack
 // OpenPRWatches returns all PRs being monitored (not closed, under either fix limit).
 func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, error) {
 	rows, err := d.db.Query(
-		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count FROM pr_watches WHERE closed = FALSE AND (fix_count < ? OR ci_fix_count < ?)",
+		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count, repo_path FROM pr_watches WHERE closed = FALSE AND (fix_count < ? OR ci_fix_count < ?)",
 		maxReviewRounds, maxCIFixRounds,
 	)
 	if err != nil {
@@ -310,7 +312,7 @@ func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, err
 	var watches []*PRWatch
 	for rows.Next() {
 		var w PRWatch
-		if err := rows.Scan(&w.PRNumber, &w.PRURL, &w.Branch, &w.RunID, &w.SlackChannel, &w.SlackThread, &w.LastCommentID, &w.FixCount, &w.CIFixCount); err != nil {
+		if err := rows.Scan(&w.PRNumber, &w.PRURL, &w.Branch, &w.RunID, &w.SlackChannel, &w.SlackThread, &w.LastCommentID, &w.FixCount, &w.CIFixCount, &w.RepoPath); err != nil {
 			return nil, err
 		}
 		watches = append(watches, &w)
@@ -599,6 +601,7 @@ type PRWatch struct {
 	LastCommentID int
 	FixCount      int
 	CIFixCount    int
+	RepoPath      string
 }
 
 // ThreadMemory holds cached context for a Slack thread.
@@ -618,7 +621,7 @@ func scanRun(row *sql.Row) (*Run, error) {
 	var resultJSON sql.NullString
 	err := row.Scan(
 		&run.ID, &run.Status, &run.SlackChannel, &run.SlackThreadTS,
-		&run.Branch, &run.WorktreePath, &run.Task, &run.StartedAt, &resultJSON,
+		&run.Branch, &run.WorktreePath, &run.Task, &run.RepoName, &run.StartedAt, &resultJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -642,7 +645,7 @@ func scanRuns(rows *sql.Rows) ([]*Run, error) {
 		var resultJSON sql.NullString
 		if err := rows.Scan(
 			&run.ID, &run.Status, &run.SlackChannel, &run.SlackThreadTS,
-			&run.Branch, &run.WorktreePath, &run.Task, &run.StartedAt, &resultJSON,
+			&run.Branch, &run.WorktreePath, &run.Task, &run.RepoName, &run.StartedAt, &resultJSON,
 		); err != nil {
 			return nil, err
 		}
