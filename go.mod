@@ -3,7 +3,8 @@ module github.com/hergen/toad
 go 1.25.0
 
 require (
-	charm.land/huh/v2 v2.0.0-20260105203756-d8977490d20c
+	charm.land/bubbles/v2 v2.0.0-rc.1
+	charm.land/bubbletea/v2 v2.0.0
 	charm.land/lipgloss/v2 v2.0.0
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/slack-go/slack v0.18.0
@@ -13,16 +14,10 @@ require (
 )
 
 require (
-	charm.land/bubbles/v2 v2.0.0-rc.1 // indirect
-	charm.land/bubbletea/v2 v2.0.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
-	github.com/catppuccin/go v0.3.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.2 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260205113103-524a6607adb8 // indirect
 	github.com/charmbracelet/x/ansi v0.11.6 // indirect
-	github.com/charmbracelet/x/cellbuf v0.0.14 // indirect
-	github.com/charmbracelet/x/exp/ordered v0.1.0 // indirect
-	github.com/charmbracelet/x/exp/strings v0.0.0-20240722160745-212f7b056ed0 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
@@ -34,7 +29,6 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.19 // indirect
-	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

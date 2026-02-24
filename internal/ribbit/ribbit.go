@@ -105,9 +105,9 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 		triageCtx += fmt.Sprintf("\n\nPrevious conversation in this thread:\n- Toad understood: %s\n- Toad's response: %s\nThe user is following up. Use the prior context for a coherent continuation.", prior.Summary, prior.Response)
 	}
 
-	// Add cross-repo awareness
+	// Add cross-repo awareness (names only — paths are provided via --add-dir)
 	if len(allRepoPaths) > 1 {
-		triageCtx += "\n\nYou have access to multiple codebases. Search across them as needed using absolute paths:\n"
+		triageCtx += "\n\nYou have access to multiple codebases. Use absolute paths to search across them:\n"
 		for _, p := range allRepoPaths {
 			triageCtx += "- " + p + "\n"
 		}
@@ -123,8 +123,14 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 		"--output-format", "json",
 		"--model", e.model,
 		"--allowedTools", "Read,Glob,Grep",
-		"-p", prompt,
 	}
+
+	// Restrict file access to configured repo paths only
+	for _, p := range allRepoPaths {
+		args = append(args, "--add-dir", p)
+	}
+
+	args = append(args, "-p", prompt)
 
 	timeout := time.Duration(e.timeoutMinutes) * time.Minute
 	ribbitCtx, cancel := context.WithTimeout(ctx, timeout)

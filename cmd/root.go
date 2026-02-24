@@ -798,8 +798,14 @@ func investigateOpportunity(ctx context.Context, cfg *config.Config, opp digest.
 		"--output-format", "json",
 		"--model", cfg.Claude.Model,
 		"--allowedTools", "Read,Glob,Grep",
-		"-p", prompt,
 	}
+
+	// Restrict file access to configured repo paths only
+	for _, r := range cfg.Repos {
+		args = append(args, "--add-dir", r.Path)
+	}
+
+	args = append(args, "-p", prompt)
 
 	investigateCtx, cancel := context.WithTimeout(ctx, 7*time.Minute)
 	defer cancel()

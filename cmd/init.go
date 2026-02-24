@@ -6,8 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"charm.land/huh/v2"
-	"github.com/slack-go/slack"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/hergen/toad/internal/tui"
@@ -24,380 +25,701 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 }
 
-const toadASCII = `
-      @..@
-     (----)
-    ( >__< )
-    ^^ ~~ ^^
-`
+// ── Steps ────────────────────────────────────────────
 
-func runInit(cmd *cobra.Command, args []string) error {
-	const configFile = ".toad.yaml"
-	theme := tui.ToadTheme()
+type wizardStep int
 
-	// ── Overwrite check ─────────────────────────────
+const (
+	stepWelcome wizardStep = iota
+	stepSlack
+	stepRepo
+	stepRepoCommands
+	stepToadKing
+	stepAdvancedAsk
+	stepAdvanced
+	stepSummary
+	stepDone
+)
 
-	if _, err := os.Stat(configFile); err == nil {
-		var overwrite bool
-		err := huh.NewForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(".toad.yaml already exists").
-					Description("Overwrite it with a new configuration?").
-					Affirmative("Overwrite").
-					Negative("Cancel").
-					Value(&overwrite),
-			),
-		).WithTheme(theme).Run()
-		if err != nil {
-			return err
-		}
-		if !overwrite {
-			fmt.Println("Canceled.")
-			return nil
-		}
+var stepNames = []string{"Slack", "Repo", "Toad King", "Finish"}
+
+func stepIndex(s wizardStep) int {
+	switch s {
+	case stepWelcome, stepSlack:
+		return 0
+	case stepRepo, stepRepoCommands:
+		return 1
+	case stepToadKing:
+		return 2
+	default:
+		return 3
 	}
+}
 
-	// ── Essential setup (4 screens) ─────────────────
+// ── Model ────────────────────────────────────────────
 
-	var appToken, botToken string
+type wizardModel struct {
+	step     wizardStep
+	cursor   int
+	width    int
+	height   int
+	quitting bool
+	err      string
 
-	// Screen 1: Welcome + Screen 2: Slack instructions
-	err := huh.NewForm(
-		huh.NewGroup(
-			huh.NewNote().
-				Title("Welcome to Toad").
-				Description(toadASCII+`
-Toad is an AI-powered coding assistant that lives in Slack.
-It monitors your channels, triages messages, answers questions,
-and autonomously fixes bugs by creating pull requests.
+	// Slack
+	appTokenInput textinput.Model
+	botTokenInput textinput.Model
+	focusedInput  int // 0=app, 1=bot
 
-This wizard will get you up and running in under 2 minutes.`).
-				Next(true).
-				NextLabel("Let's go"),
-		),
+	// Repo
+	repoPathInput textinput.Model
+	repoNameInput textinput.Model
+	detected      repoDefaults
 
-		huh.NewGroup(
-			huh.NewNote().
-				Title("Step 1 · Slack App").
-				Description(`Create a Slack app before continuing:
+	// Repo commands
+	testCmdInput    textinput.Model
+	lintCmdInput    textinput.Model
+	branchOptions   []string
+	branchCursor    int
+	cmdFocusedField int // 0=test, 1=lint, 2=branch
 
-1. Go to https://api.slack.com/apps → "From scratch"
-2. Enable Socket Mode (Settings → Socket Mode → toggle on)
-3. Generate an App-Level Token with scope connections:write
-   (Settings → Basic Information → App-Level Tokens)
-   It starts with xapp-
-4. Add Bot Token Scopes (OAuth & Permissions → Scopes):
-   • app_mentions:read    • channels:history
-   • channels:join        • channels:read
-   • chat:write           • groups:history
-   • groups:read          • reactions:read
-   • reactions:write      • users:read
-5. Subscribe to events (Event Subscriptions → toggle on):
-   • app_mention          • message.channels
-   • message.groups       • reaction_added
-6. Install the app to your workspace
-   Copy the Bot User OAuth Token (starts with xoxb-)`).
-				Next(true).
-				NextLabel("I've got my tokens"),
-		),
+	// Toad King
+	toadKingCursor int // 0=dry-run, 1=live, 2=off
 
-		huh.NewGroup(
-			huh.NewInput().
-				Title("App-Level Token").
-				Description("From Basic Information → App-Level Tokens").
-				Placeholder("xapp-1-...").
-				Value(&appToken).
-				Validate(func(s string) error {
-					if !strings.HasPrefix(s, "xapp-") {
-						return fmt.Errorf("must start with xapp-")
-					}
-					return nil
-				}),
-			huh.NewInput().
-				Title("Bot User OAuth Token").
-				Description("From OAuth & Permissions → Bot User OAuth Token").
-				Placeholder("xoxb-...").
-				EchoMode(huh.EchoModePassword).
-				Value(&botToken).
-				Validate(func(s string) error {
-					if !strings.HasPrefix(s, "xoxb-") {
-						return fmt.Errorf("must start with xoxb-")
-					}
-					return nil
-				}),
-		),
-	).WithTheme(theme).Run()
-	if err != nil {
-		return err
-	}
+	// Advanced ask
+	advancedCursor int // 0=no, 1=yes
 
-	// Validate token immediately — don't waste the user's time
-	fmt.Print(tui.StyledMessage("Validating bot token..."))
-	if err := validateBotToken(botToken); err != nil {
-		return fmt.Errorf("token validation failed: %w", err)
-	}
-	fmt.Print(tui.StyledMessage("Token valid!"))
+	// Advanced settings
+	advSection    int // which advanced section
+	advCursor     int // cursor within section
+	channelsInput textinput.Model
+	emojiInput    textinput.Model
+	keywordsInput textinput.Model
+	claudeModel   int // 0=sonnet, 1=opus, 2=haiku
+	triageModel   int // 0=haiku, 1=sonnet
+	autoSpawn     bool
+	autoMerge     bool
+	labelsInput   textinput.Model
+	logLevel      int // 0=debug, 1=info, 2=warn, 3=error
 
-	// ── Screen 3: Repo with auto-detection ──────────
+	// Result
+	configWritten bool
+}
 
+func newTextInput(placeholder string, width int) textinput.Model {
+	ti := textinput.New()
+	ti.Prompt = ""
+	ti.Placeholder = placeholder
+	ti.SetWidth(width)
+	ti.CharLimit = 500
+	return ti
+}
+
+func newWizardModel() wizardModel {
 	cwd, _ := os.Getwd()
-	repoPath := cwd
-	repoName := filepath.Base(cwd)
 
-	err = huh.NewForm(
-		huh.NewGroup(
-			huh.NewNote().
-				Title("Step 2 · Repository").
-				Description("Configure the repo Toad will work on.\nYou can add more repos later.").
-				Next(true).
-				NextLabel("Continue"),
-			huh.NewInput().
-				Title("Repo path").
-				Description("Absolute path to the git repository").
-				Value(&repoPath).
-				Validate(validateRepoPath),
-			huh.NewInput().
-				Title("Repo name").
-				Description("Short name to identify this repo").
-				Value(&repoName).
-				Validate(huh.ValidateNotEmpty()),
-		),
-	).WithTheme(theme).Run()
-	if err != nil {
-		return err
+	appToken := newTextInput("xapp-1-...", 60)
+	botToken := newTextInput("xoxb-...", 60)
+	botToken.EchoMode = textinput.EchoPassword
+
+	repoPath := newTextInput(cwd, 60)
+	repoPath.SetValue(cwd)
+
+	repoName := newTextInput(filepath.Base(cwd), 40)
+	repoName.SetValue(filepath.Base(cwd))
+
+	testCmd := newTextInput("e.g. go test ./...", 60)
+	lintCmd := newTextInput("e.g. golangci-lint run", 60)
+
+	channels := newTextInput("C0123456789, C9876543210 (leave empty for all)", 60)
+
+	emoji := newTextInput("frog", 30)
+	emoji.SetValue("frog")
+
+	keywords := newTextInput("toad fix, toad help", 60)
+	keywords.SetValue("toad fix, toad help")
+
+	labels := newTextInput("toad, automated", 40)
+
+	return wizardModel{
+		step:          stepWelcome,
+		width:         80,
+		height:        24,
+		appTokenInput: appToken,
+		botTokenInput: botToken,
+		repoPathInput: repoPath,
+		repoNameInput: repoName,
+		testCmdInput:  testCmd,
+		lintCmdInput:  lintCmd,
+		channelsInput: channels,
+		emojiInput:    emoji,
+		keywordsInput: keywords,
+		labelsInput:   labels,
+		logLevel:      1, // info
 	}
+}
 
-	// Auto-detect stack, commands, branch
-	absRepoPath, _ := filepath.Abs(repoPath)
-	detected := detectRepoDefaults(absRepoPath)
+// ── Init ─────────────────────────────────────────────
 
-	testCommand := detected.TestCommand
-	lintCommand := detected.LintCommand
-	defaultBranch := detected.DefaultBranch
+func (m wizardModel) Init() tea.Cmd {
+	return nil
+}
 
-	// Build the detection summary
-	detectedInfo := "Confirm the commands Toad should use to validate changes."
-	if detected.Stack != "" {
-		detectedInfo = fmt.Sprintf("Detected %s project", detected.Stack)
-		if detected.Module != "" {
-			detectedInfo += fmt.Sprintf(" (%s)", detected.Module)
+// ── Update ───────────────────────────────────────────
+
+func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+
+	case tea.KeyMsg:
+		// Global quit
+		if msg.String() == "ctrl+c" {
+			m.quitting = true
+			return m, tea.Quit
 		}
-		detectedInfo += ".\nConfirm or adjust the suggested commands."
-	}
 
-	// Build branch options — include detected branch if it's non-standard
-	branchOptions := []huh.Option[string]{
-		huh.NewOption("main", "main"),
-		huh.NewOption("master", "master"),
-		huh.NewOption("develop", "develop"),
-	}
-	if defaultBranch != "main" && defaultBranch != "master" && defaultBranch != "develop" {
-		branchOptions = append([]huh.Option[string]{
-			huh.NewOption(defaultBranch+" (detected)", defaultBranch),
-		}, branchOptions...)
-	}
+		m.err = ""
 
-	err = huh.NewForm(
-		huh.NewGroup(
-			huh.NewNote().
-				Title("Step 2 · "+strings.TrimSpace(repoName)).
-				Description(detectedInfo).
-				Next(true).
-				NextLabel("Continue"),
-			huh.NewInput().
-				Title("Test command").
-				Placeholder("e.g. go test ./...").
-				Value(&testCommand),
-			huh.NewInput().
-				Title("Lint command").
-				Placeholder("e.g. golangci-lint run").
-				Value(&lintCommand),
-			huh.NewSelect[string]().
-				Title("Default branch").
-				Options(branchOptions...).
-				Value(&defaultBranch),
-		),
-	).WithTheme(theme).Run()
-	if err != nil {
-		return err
-	}
-
-	// ── Screen 4: Toad King ─────────────────────────
-
-	toadKingMode := "dry-run"
-
-	err = huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Step 3 · Toad King").
-				Description("Toad King passively monitors your Slack channels and\n"+
-					"identifies bugs that could be fixed automatically.\n\n"+
-					"Dry-run mode shows opportunities in the dashboard\n"+
-					"without acting. Live mode auto-spawns fixes.").
-				Options(
-					huh.NewOption("Dry-run — monitor and report (recommended)", "dry-run"),
-					huh.NewOption("Live — auto-fix high-confidence bugs", "live"),
-					huh.NewOption("Off — disable passive monitoring", "off"),
-				).
-				Value(&toadKingMode),
-		),
-	).WithTheme(theme).Run()
-	if err != nil {
-		return err
-	}
-
-	// ── Advanced settings (optional) ────────────────
-
-	var customize bool
-	err = huh.NewForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Customize advanced settings?").
-				Description("Channels, triggers, AI models, limits, issue tracker.\nDefaults work great for most setups.").
-				Affirmative("Yes, customize").
-				Negative("No, use defaults").
-				Value(&customize),
-		),
-	).WithTheme(theme).Run()
-	if err != nil {
-		return err
-	}
-
-	// Defaults
-	var channelsRaw string
-	triggerEmoji := "frog"
-	triggerKeywordsRaw := "toad fix, toad help"
-	claudeModel := "sonnet"
-	triageModel := "haiku"
-	var autoSpawn bool
-	maxConcurrentStr := "2"
-	maxTurnsStr := "30"
-	timeoutStr := "10"
-	maxFilesStr := "5"
-	maxRetriesStr := "1"
-	var autoMerge bool
-	var prLabelsRaw string
-	var issueEnabled bool
-	issueProvider := "linear"
-	var issueAPIToken, issueTeamID string
-	var issueCreate bool
-	logLevel := "info"
-
-	if customize {
-		err = runAdvancedSetup(theme,
-			&channelsRaw, &triggerEmoji, &triggerKeywordsRaw,
-			&claudeModel, &triageModel, &autoSpawn,
-			&maxConcurrentStr, &maxTurnsStr, &timeoutStr, &maxFilesStr, &maxRetriesStr,
-			&autoMerge, &prLabelsRaw,
-			&issueEnabled, &issueProvider, &issueAPIToken, &issueTeamID, &issueCreate,
-			&logLevel,
-		)
-		if err != nil {
-			return err
+		switch m.step {
+		case stepWelcome:
+			return m.updateWelcome(msg)
+		case stepSlack:
+			return m.updateSlack(msg)
+		case stepRepo:
+			return m.updateRepo(msg)
+		case stepRepoCommands:
+			return m.updateRepoCommands(msg)
+		case stepToadKing:
+			return m.updateToadKing(msg)
+		case stepAdvancedAsk:
+			return m.updateAdvancedAsk(msg)
+		case stepAdvanced:
+			return m.updateAdvanced(msg)
+		case stepSummary:
+			return m.updateSummary(msg)
 		}
 	}
 
-	// ── Multi-repo loop ─────────────────────────────
+	return m, nil
+}
 
-	firstRepo := repoTemplateData{
-		Name:          strings.TrimSpace(repoName),
-		Path:          absRepoPath,
-		TestCommand:   testCommand,
-		LintCommand:   lintCommand,
-		DefaultBranch: defaultBranch,
-		AutoMerge:     autoMerge,
-		PRLabels:      parseCSV(prLabelsRaw),
+// ── Step updates ─────────────────────────────────────
+
+func (m wizardModel) updateWelcome(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", " ":
+		m.step = stepSlack
+		m.appTokenInput.Focus()
+		return m, nil
+	case "q", "esc":
+		m.quitting = true
+		return m, tea.Quit
 	}
-	repos := []repoTemplateData{firstRepo}
+	return m, nil
+}
 
-	for {
-		var addAnother bool
-		err := huh.NewForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title("Add another repository?").
-					Description(fmt.Sprintf("Currently configured: %d repo(s)", len(repos))).
-					Affirmative("Yes").
-					Negative("No, finish setup").
-					Value(&addAnother),
-			),
-		).WithTheme(theme).Run()
-		if err != nil || !addAnother {
-			break
+func (m wizardModel) updateSlack(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "tab", "down":
+		if m.focusedInput == 0 {
+			m.focusedInput = 1
+			m.appTokenInput.Blur()
+			m.botTokenInput.Focus()
+		}
+		return m, nil
+	case "shift+tab", "up":
+		if m.focusedInput == 1 {
+			m.focusedInput = 0
+			m.botTokenInput.Blur()
+			m.appTokenInput.Focus()
+		}
+		return m, nil
+	case "enter":
+		app := m.appTokenInput.Value()
+		bot := m.botTokenInput.Value()
+		if !strings.HasPrefix(app, "xapp-") {
+			m.err = "App token must start with xapp-"
+			return m, nil
+		}
+		if !strings.HasPrefix(bot, "xoxb-") {
+			m.err = "Bot token must start with xoxb-"
+			return m, nil
+		}
+		m.appTokenInput.Blur()
+		m.botTokenInput.Blur()
+		m.step = stepRepo
+		m.repoPathInput.Focus()
+		m.focusedInput = 0
+		return m, nil
+	case "esc":
+		m.step = stepWelcome
+		m.appTokenInput.Blur()
+		m.botTokenInput.Blur()
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		if m.focusedInput == 0 {
+			m.appTokenInput, cmd = m.appTokenInput.Update(msg)
+		} else {
+			m.botTokenInput, cmd = m.botTokenInput.Update(msg)
+		}
+		return m, cmd
+	}
+}
+
+func (m wizardModel) updateRepo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "tab", "down":
+		if m.focusedInput == 0 {
+			m.focusedInput = 1
+			m.repoPathInput.Blur()
+			m.repoNameInput.Focus()
+		}
+		return m, nil
+	case "shift+tab", "up":
+		if m.focusedInput == 1 {
+			m.focusedInput = 0
+			m.repoNameInput.Blur()
+			m.repoPathInput.Focus()
+		}
+		return m, nil
+	case "enter":
+		path := m.repoPathInput.Value()
+		name := m.repoNameInput.Value()
+		if err := validateRepoPath(path); err != nil {
+			m.err = err.Error()
+			return m, nil
+		}
+		if strings.TrimSpace(name) == "" {
+			m.err = "Repo name cannot be empty"
+			return m, nil
+		}
+		m.repoPathInput.Blur()
+		m.repoNameInput.Blur()
+
+		// Auto-detect
+		abs, _ := filepath.Abs(path)
+		m.repoPathInput.SetValue(abs)
+		m.detected = detectRepoDefaults(abs)
+		m.testCmdInput.SetValue(m.detected.TestCommand)
+		m.lintCmdInput.SetValue(m.detected.LintCommand)
+
+		// Build branch options
+		m.branchOptions = []string{"main", "master", "develop"}
+		if b := m.detected.DefaultBranch; b != "main" && b != "master" && b != "develop" {
+			m.branchOptions = append([]string{b}, m.branchOptions...)
+		}
+		// Select detected branch
+		for i, b := range m.branchOptions {
+			if b == m.detected.DefaultBranch {
+				m.branchCursor = i
+				break
+			}
 		}
 
-		repo, err := runRepoSubForm(theme)
-		if err != nil {
-			break
+		m.step = stepRepoCommands
+		m.testCmdInput.Focus()
+		m.cmdFocusedField = 0
+		return m, nil
+	case "esc":
+		m.step = stepSlack
+		m.repoPathInput.Blur()
+		m.repoNameInput.Blur()
+		m.appTokenInput.Focus()
+		m.focusedInput = 0
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		if m.focusedInput == 0 {
+			m.repoPathInput, cmd = m.repoPathInput.Update(msg)
+		} else {
+			m.repoNameInput, cmd = m.repoNameInput.Update(msg)
 		}
-		repos = append(repos, repo)
+		return m, cmd
+	}
+}
+
+func (m wizardModel) updateRepoCommands(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "tab":
+		m.testCmdInput.Blur()
+		m.lintCmdInput.Blur()
+		m.cmdFocusedField = (m.cmdFocusedField + 1) % 3
+		switch m.cmdFocusedField {
+		case 0:
+			m.testCmdInput.Focus()
+		case 1:
+			m.lintCmdInput.Focus()
+		}
+		return m, nil
+	case "shift+tab":
+		m.testCmdInput.Blur()
+		m.lintCmdInput.Blur()
+		m.cmdFocusedField = (m.cmdFocusedField + 2) % 3
+		switch m.cmdFocusedField {
+		case 0:
+			m.testCmdInput.Focus()
+		case 1:
+			m.lintCmdInput.Focus()
+		}
+		return m, nil
+	case "enter":
+		if m.cmdFocusedField == 2 {
+			// On branch selector, enter confirms
+			m.step = stepToadKing
+			m.testCmdInput.Blur()
+			m.lintCmdInput.Blur()
+			return m, nil
+		}
+		// Tab forward from text inputs
+		m.testCmdInput.Blur()
+		m.lintCmdInput.Blur()
+		m.cmdFocusedField = (m.cmdFocusedField + 1) % 3
+		switch m.cmdFocusedField {
+		case 0:
+			m.testCmdInput.Focus()
+		case 1:
+			m.lintCmdInput.Focus()
+		}
+		return m, nil
+	case "up":
+		if m.cmdFocusedField == 2 {
+			if m.branchCursor > 0 {
+				m.branchCursor--
+			}
+			return m, nil
+		}
+		m.testCmdInput.Blur()
+		m.lintCmdInput.Blur()
+		m.cmdFocusedField = (m.cmdFocusedField + 2) % 3
+		switch m.cmdFocusedField {
+		case 0:
+			m.testCmdInput.Focus()
+		case 1:
+			m.lintCmdInput.Focus()
+		}
+		return m, nil
+	case "down":
+		if m.cmdFocusedField == 2 {
+			if m.branchCursor < len(m.branchOptions)-1 {
+				m.branchCursor++
+			}
+			return m, nil
+		}
+		m.testCmdInput.Blur()
+		m.lintCmdInput.Blur()
+		m.cmdFocusedField = (m.cmdFocusedField + 1) % 3
+		switch m.cmdFocusedField {
+		case 0:
+			m.testCmdInput.Focus()
+		case 1:
+			m.lintCmdInput.Focus()
+		}
+		return m, nil
+	case "esc":
+		m.step = stepRepo
+		m.testCmdInput.Blur()
+		m.lintCmdInput.Blur()
+		m.repoPathInput.Focus()
+		m.focusedInput = 0
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		switch m.cmdFocusedField {
+		case 0:
+			m.testCmdInput, cmd = m.testCmdInput.Update(msg)
+		case 1:
+			m.lintCmdInput, cmd = m.lintCmdInput.Update(msg)
+		}
+		return m, cmd
+	}
+}
+
+func (m wizardModel) updateToadKing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.toadKingCursor > 0 {
+			m.toadKingCursor--
+		}
+	case "down", "j":
+		if m.toadKingCursor < 2 {
+			m.toadKingCursor++
+		}
+	case "enter":
+		m.step = stepAdvancedAsk
+	case "esc":
+		m.step = stepRepoCommands
+		m.testCmdInput.Focus()
+		m.cmdFocusedField = 0
+	}
+	return m, nil
+}
+
+func (m wizardModel) updateAdvancedAsk(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "down", "k", "j":
+		m.advancedCursor = 1 - m.advancedCursor
+	case "enter":
+		if m.advancedCursor == 1 {
+			m.step = stepAdvanced
+			m.advSection = 0
+			m.advCursor = 0
+			m.channelsInput.Focus()
+		} else {
+			m.step = stepSummary
+		}
+	case "esc":
+		m.step = stepToadKing
+	}
+	return m, nil
+}
+
+func (m wizardModel) updateAdvanced(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		if m.advSection > 0 {
+			m.advSection--
+			m.advCursor = 0
+			m.blurAllAdvanced()
+			m.focusAdvancedField()
+		} else {
+			m.step = stepAdvancedAsk
+			m.blurAllAdvanced()
+		}
+		return m, nil
 	}
 
-	// Primary repo selection (if multiple)
-	if len(repos) > 1 {
-		options := make([]huh.Option[int], len(repos))
-		for i, r := range repos {
-			options[i] = huh.NewOption(r.Name, i)
+	switch m.advSection {
+	case 0: // Channels & Triggers
+		return m.updateAdvTriggers(msg)
+	case 1: // AI Models
+		return m.updateAdvModels(msg)
+	case 2: // Repo Options
+		return m.updateAdvRepoOpts(msg)
+	case 3: // Log Level
+		return m.updateAdvLog(msg)
+	}
+	return m, nil
+}
+
+func (m wizardModel) updateAdvTriggers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "tab", "down":
+		m.blurAllAdvanced()
+		m.advCursor = (m.advCursor + 1) % 3
+		m.focusAdvancedField()
+		return m, nil
+	case "shift+tab", "up":
+		m.blurAllAdvanced()
+		m.advCursor = (m.advCursor + 2) % 3
+		m.focusAdvancedField()
+		return m, nil
+	case "enter":
+		m.blurAllAdvanced()
+		m.advSection = 1
+		m.advCursor = 0
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		switch m.advCursor {
+		case 0:
+			m.channelsInput, cmd = m.channelsInput.Update(msg)
+		case 1:
+			m.emojiInput, cmd = m.emojiInput.Update(msg)
+		case 2:
+			m.keywordsInput, cmd = m.keywordsInput.Update(msg)
 		}
-		var primaryIdx int
-		err := huh.NewForm(
-			huh.NewGroup(
-				huh.NewSelect[int]().
-					Title("Which repo is primary?").
-					Description("Toad falls back to the primary repo when it can't determine which repo a message is about").
-					Options(options...).
-					Value(&primaryIdx),
-			),
-		).WithTheme(theme).Run()
-		if err == nil {
-			repos[primaryIdx].Primary = true
+		return m, cmd
+	}
+}
+
+func (m wizardModel) updateAdvModels(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "tab", "down":
+		m.advCursor = (m.advCursor + 1) % 3
+	case "shift+tab", "up":
+		m.advCursor = (m.advCursor + 2) % 3
+	case "left":
+		switch m.advCursor {
+		case 0:
+			if m.claudeModel > 0 {
+				m.claudeModel--
+			}
+		case 1:
+			if m.triageModel > 0 {
+				m.triageModel--
+			}
+		case 2:
+			m.autoSpawn = !m.autoSpawn
+		}
+	case "right":
+		switch m.advCursor {
+		case 0:
+			if m.claudeModel < 2 {
+				m.claudeModel++
+			}
+		case 1:
+			if m.triageModel < 1 {
+				m.triageModel++
+			}
+		case 2:
+			m.autoSpawn = !m.autoSpawn
+		}
+	case " ":
+		if m.advCursor == 2 {
+			m.autoSpawn = !m.autoSpawn
+		}
+	case "enter":
+		m.advSection = 2
+		m.advCursor = 0
+	}
+	return m, nil
+}
+
+func (m wizardModel) updateAdvRepoOpts(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "tab", "down":
+		m.blurAllAdvanced()
+		m.advCursor = (m.advCursor + 1) % 2
+		if m.advCursor == 1 {
+			m.labelsInput.Focus()
+		}
+	case "shift+tab", "up":
+		m.blurAllAdvanced()
+		m.advCursor = (m.advCursor + 1) % 2
+		if m.advCursor == 1 {
+			m.labelsInput.Focus()
+		}
+	case " ":
+		if m.advCursor == 0 {
+			m.autoMerge = !m.autoMerge
+		}
+	case "left", "right":
+		if m.advCursor == 0 {
+			m.autoMerge = !m.autoMerge
+		}
+	case "enter":
+		m.blurAllAdvanced()
+		m.advSection = 3
+		m.advCursor = 0
+	default:
+		if m.advCursor == 1 {
+			var cmd tea.Cmd
+			m.labelsInput, cmd = m.labelsInput.Update(msg)
+			return m, cmd
 		}
 	}
+	return m, nil
+}
 
-	// ── Build digest config from Toad King mode ─────
+func (m wizardModel) updateAdvLog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.logLevel > 0 {
+			m.logLevel--
+		}
+	case "down", "j":
+		if m.logLevel < 3 {
+			m.logLevel++
+		}
+	case "enter":
+		m.step = stepSummary
+	}
+	return m, nil
+}
+
+func (m *wizardModel) blurAllAdvanced() {
+	m.channelsInput.Blur()
+	m.emojiInput.Blur()
+	m.keywordsInput.Blur()
+	m.labelsInput.Blur()
+}
+
+func (m *wizardModel) focusAdvancedField() {
+	if m.advSection == 0 {
+		switch m.advCursor {
+		case 0:
+			m.channelsInput.Focus()
+		case 1:
+			m.emojiInput.Focus()
+		case 2:
+			m.keywordsInput.Focus()
+		}
+	}
+}
+
+func (m wizardModel) updateSummary(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "y":
+		if err := m.writeConfig(); err != nil {
+			m.err = err.Error()
+			return m, nil
+		}
+		m.configWritten = true
+		m.step = stepDone
+		return m, tea.Quit
+	case "esc", "n":
+		m.step = stepAdvancedAsk
+	}
+	return m, nil
+}
+
+// ── Config writing ───────────────────────────────────
+
+func (m *wizardModel) writeConfig() error {
+	toadKingModes := []string{"dry-run", "live", "off"}
+	toadKingMode := toadKingModes[m.toadKingCursor]
+
+	claudeModels := []string{"sonnet", "opus", "haiku"}
+	triageModels := []string{"haiku", "sonnet"}
+	logLevels := []string{"debug", "info", "warn", "error"}
 
 	digestEnabled := toadKingMode != "off"
 	digestDryRun := toadKingMode != "live"
 
-	// ── Render and write config ─────────────────────
+	absPath, _ := filepath.Abs(m.repoPathInput.Value())
 
 	data := templateData{
 		Slack: slackTemplateData{
-			AppToken: appToken,
-			BotToken: botToken,
-			Channels: parseCSV(channelsRaw),
-			Emoji:    triggerEmoji,
-			Keywords: parseCSV(triggerKeywordsRaw),
+			AppToken: m.appTokenInput.Value(),
+			BotToken: m.botTokenInput.Value(),
+			Channels: parseCSV(m.channelsInput.Value()),
+			Emoji:    m.emojiInput.Value(),
+			Keywords: parseCSV(m.keywordsInput.Value()),
 		},
-		Repos: repos,
+		Repos: []repoTemplateData{{
+			Name:          strings.TrimSpace(m.repoNameInput.Value()),
+			Path:          absPath,
+			TestCommand:   m.testCmdInput.Value(),
+			LintCommand:   m.lintCmdInput.Value(),
+			DefaultBranch: m.branchOptions[m.branchCursor],
+			AutoMerge:     m.autoMerge,
+			PRLabels:      parseCSV(m.labelsInput.Value()),
+		}},
 		Limits: limitsTemplateData{
-			MaxConcurrent:   parseIntOr(maxConcurrentStr, 2),
-			MaxTurns:        parseIntOr(maxTurnsStr, 30),
-			TimeoutMinutes:  parseIntOr(timeoutStr, 10),
-			MaxFilesChanged: parseIntOr(maxFilesStr, 5),
-			MaxRetries:      parseIntOr(maxRetriesStr, 1),
+			MaxConcurrent:   2,
+			MaxTurns:        30,
+			TimeoutMinutes:  10,
+			MaxFilesChanged: 5,
+			MaxRetries:      1,
 		},
 		Triage: triageTemplateData{
-			Model:     triageModel,
-			AutoSpawn: autoSpawn,
+			Model:     triageModels[m.triageModel],
+			AutoSpawn: m.autoSpawn,
 		},
 		Claude: claudeTemplateData{
-			Model: claudeModel,
+			Model: claudeModels[m.claudeModel],
 		},
 		Digest: digestTemplateData{
 			Enabled: digestEnabled,
 			DryRun:  digestDryRun,
 		},
-		IssueTracker: issueTrackerTemplateData{
-			Enabled:      issueEnabled,
-			Provider:     issueProvider,
-			APIToken:     issueAPIToken,
-			TeamID:       issueTeamID,
-			CreateIssues: issueCreate,
-		},
+		IssueTracker: issueTrackerTemplateData{},
 		Log: logTemplateData{
-			Level: logLevel,
+			Level: logLevels[m.logLevel],
 		},
 	}
 
@@ -406,277 +728,521 @@ This wizard will get you up and running in under 2 minutes.`).
 		return fmt.Errorf("rendering config: %w", err)
 	}
 
-	if err := os.WriteFile(configFile, configData, 0o600); err != nil {
-		return fmt.Errorf("writing %s: %w", configFile, err)
-	}
-
-	// ── Summary ─────────────────────────────────────
-
-	fmt.Println()
-	fmt.Print(tui.StyledMessage("Setup complete!"))
-	fmt.Printf("  Config written to %s\n", configFile)
-	fmt.Printf("  Repo:      %s (%s)\n", firstRepo.Name, detected.Stack)
-	if toadKingMode == "live" {
-		fmt.Printf("  Toad King: live mode\n")
-	} else if toadKingMode == "dry-run" {
-		fmt.Printf("  Toad King: dry-run (monitor only)\n")
-	} else {
-		fmt.Printf("  Toad King: off\n")
-	}
-	if len(repos) > 1 {
-		fmt.Printf("  Repos:     %d configured\n", len(repos))
-	}
-	fmt.Println()
-	fmt.Println("  Start toad with: toad")
-	fmt.Println()
-
-	return nil
+	return os.WriteFile(".toad.yaml", configData, 0o600)
 }
 
-// runAdvancedSetup shows optional configuration screens.
-func runAdvancedSetup(
-	theme huh.Theme,
-	channelsRaw *string, triggerEmoji *string, triggerKeywordsRaw *string,
-	claudeModel *string, triageModel *string, autoSpawn *bool,
-	maxConcurrentStr *string, maxTurnsStr *string, timeoutStr *string, maxFilesStr *string, maxRetriesStr *string,
-	autoMerge *bool, prLabelsRaw *string,
-	issueEnabled *bool, issueProvider *string, issueAPIToken *string, issueTeamID *string, issueCreate *bool,
-	logLevel *string,
-) error {
-	return huh.NewForm(
-		// Channels & triggers
-		huh.NewGroup(
-			huh.NewNote().
-				Title("Channels & Triggers").
-				Description("Configure which channels Toad monitors and what triggers it.").
-				Next(true).
-				NextLabel("Continue"),
-			huh.NewInput().
-				Title("Channel IDs").
-				Description("Comma-separated Slack channel IDs (leave empty for all public channels)").
-				Placeholder("C0123456789, C9876543210").
-				Value(channelsRaw),
-			huh.NewInput().
-				Title("Trigger emoji").
-				Description("React with this emoji to trigger Toad on a message").
-				Value(triggerEmoji),
-			huh.NewInput().
-				Title("Trigger keywords").
-				Description("Comma-separated phrases that trigger Toad").
-				Value(triggerKeywordsRaw),
-		),
+// ── View ─────────────────────────────────────────────
 
-		// AI models
-		huh.NewGroup(
-			huh.NewNote().
-				Title("AI Models").
-				Description("Configure which models Toad uses.\nAll models run on your existing subscription.").
-				Next(true).
-				NextLabel("Continue"),
-			huh.NewSelect[string]().
-				Title("Tadpole model (code generation)").
-				Options(
-					huh.NewOption("Sonnet — balanced speed & quality (recommended)", "sonnet"),
-					huh.NewOption("Opus — most capable, slower", "opus"),
-					huh.NewOption("Haiku — fastest, less capable", "haiku"),
-				).
-				Value(claudeModel),
-			huh.NewSelect[string]().
-				Title("Triage model (message classification)").
-				Options(
-					huh.NewOption("Haiku — fast, cheap (recommended)", "haiku"),
-					huh.NewOption("Sonnet — more accurate", "sonnet"),
-				).
-				Value(triageModel),
-			huh.NewConfirm().
-				Title("Auto-spawn without trigger?").
-				Description("Skip the emoji/keyword trigger — spawn tadpoles for any detected bug or feature request").
-				Affirmative("Yes").
-				Negative("No, require trigger").
-				Value(autoSpawn),
-		),
-
-		// Repo options
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Enable auto-merge on PRs?").
-				Description("Automatically merge Toad PRs when CI passes (requires GitHub repo setting)").
-				Affirmative("Yes").
-				Negative("No").
-				Value(autoMerge),
-			huh.NewInput().
-				Title("PR labels").
-				Description("Comma-separated labels to apply to Toad PRs (optional)").
-				Placeholder("toad, automated").
-				Value(prLabelsRaw),
-		),
-
-		// Safety limits
-		huh.NewGroup(
-			huh.NewNote().
-				Title("Safety Limits").
-				Description("Guard rails for autonomous runs. Defaults are conservative.").
-				Next(true).
-				NextLabel("Continue"),
-			huh.NewInput().
-				Title("Max concurrent tadpoles").
-				Value(maxConcurrentStr).
-				Validate(validatePositiveInt),
-			huh.NewInput().
-				Title("Max turns per tadpole").
-				Value(maxTurnsStr).
-				Validate(validatePositiveInt),
-			huh.NewInput().
-				Title("Timeout (minutes)").
-				Value(timeoutStr).
-				Validate(validatePositiveInt),
-			huh.NewInput().
-				Title("Max files changed").
-				Description("Abort if a tadpole touches more files than this").
-				Value(maxFilesStr).
-				Validate(validatePositiveInt),
-			huh.NewInput().
-				Title("Max retries").
-				Value(maxRetriesStr).
-				Validate(validateNonNegativeInt),
-		),
-
-		// Issue tracker
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Enable issue tracker integration?").
-				Description("Connect to Linear to track and create issues from Slack").
-				Affirmative("Yes").
-				Negative("No").
-				Value(issueEnabled),
-		),
-
-		// Issue tracker config (hidden unless enabled)
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Issue tracker provider").
-				Options(huh.NewOption("Linear", "linear")).
-				Value(issueProvider),
-			huh.NewInput().
-				Title("API Token").
-				Description("Linear API token (or set TOAD_LINEAR_API_TOKEN env var later)").
-				EchoMode(huh.EchoModePassword).
-				Placeholder("lin_api_...").
-				Value(issueAPIToken),
-			huh.NewInput().
-				Title("Team ID").
-				Description("Linear team ID for issue creation").
-				Value(issueTeamID),
-			huh.NewConfirm().
-				Title("Auto-create issues?").
-				Description("Create Linear issues for bugs/features discovered in Slack").
-				Affirmative("Yes").
-				Negative("No").
-				Value(issueCreate),
-		).WithHideFunc(func() bool { return !*issueEnabled }),
-
-		// Log level
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Log level").
-				Options(
-					huh.NewOption("Debug", "debug"),
-					huh.NewOption("Info (default)", "info"),
-					huh.NewOption("Warn", "warn"),
-					huh.NewOption("Error", "error"),
-				).
-				Value(logLevel),
-		),
-	).WithTheme(theme).Run()
-}
-
-// runRepoSubForm runs a standalone form to configure an additional repo.
-func runRepoSubForm(theme huh.Theme) (repoTemplateData, error) {
-	var repoPath, repoName string
-
-	// Step 1: Path & name (empty default for additional repos)
-	err := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Repo path").
-				Description("Absolute path to the git repository").
-				Placeholder("/path/to/repo").
-				Value(&repoPath).
-				Validate(validateRepoPath),
-			huh.NewInput().
-				Title("Repo name").
-				Description("Short name to identify this repo").
-				Value(&repoName).
-				Validate(huh.ValidateNotEmpty()),
-		),
-	).WithTheme(theme).Run()
-	if err != nil {
-		return repoTemplateData{}, err
+func (m wizardModel) View() tea.View {
+	if m.quitting {
+		return tea.NewView("")
 	}
 
-	// Auto-detect
-	absPath, _ := filepath.Abs(repoPath)
-	detected := detectRepoDefaults(absPath)
+	w := m.contentWidth()
+	var b strings.Builder
 
-	testCommand := detected.TestCommand
-	lintCommand := detected.LintCommand
-	defaultBranch := detected.DefaultBranch
+	// Progress bar (except welcome and done)
+	if m.step != stepWelcome && m.step != stepDone {
+		b.WriteString(tui.RenderProgressBar(stepNames, stepIndex(m.step)))
+		b.WriteString("\n\n")
+	}
 
-	detectedInfo := "Configure commands for this repo."
-	if detected.Stack != "" {
-		detectedInfo = fmt.Sprintf("Detected %s project", detected.Stack)
-		if detected.Module != "" {
-			detectedInfo += fmt.Sprintf(" (%s)", detected.Module)
+	// Step content
+	switch m.step {
+	case stepWelcome:
+		b.WriteString(m.viewWelcome())
+	case stepSlack:
+		b.WriteString(m.viewSlack())
+	case stepRepo:
+		b.WriteString(m.viewRepo())
+	case stepRepoCommands:
+		b.WriteString(m.viewRepoCommands())
+	case stepToadKing:
+		b.WriteString(m.viewToadKing())
+	case stepAdvancedAsk:
+		b.WriteString(m.viewAdvancedAsk())
+	case stepAdvanced:
+		b.WriteString(m.viewAdvanced())
+	case stepSummary:
+		b.WriteString(m.viewSummary())
+	case stepDone:
+		b.WriteString(m.viewDone())
+	}
+
+	// Error display
+	if m.err != "" {
+		b.WriteString("\n\n")
+		b.WriteString(tui.ErrorStyle.Render("✗ " + m.err))
+	}
+
+	// Help text at bottom
+	b.WriteString("\n\n")
+	b.WriteString(m.helpText())
+
+	// Wrap in bordered box
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(tui.ColorBorder).
+		Padding(1, 3).
+		Width(w)
+
+	box := boxStyle.Render(b.String())
+
+	// Center horizontally and vertically
+	boxLines := strings.Count(box, "\n") + 1
+	topPad := (m.height - boxLines) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+
+	centered := lipgloss.NewStyle().
+		Width(m.width).
+		Align(lipgloss.Center).
+		PaddingTop(topPad).
+		Render(box)
+
+	v := tea.NewView(centered)
+	v.AltScreen = true
+	return v
+}
+
+func (m wizardModel) contentWidth() int {
+	w := m.width - 8 // margin for centering
+	if w > 80 {
+		w = 80
+	}
+	if w < 40 {
+		w = 40
+	}
+	return w
+}
+
+// ── Step views ───────────────────────────────────────
+
+const toadLogo = `
+ ████████╗ ██████╗  █████╗ ██████╗
+ ╚══██╔══╝██╔═══██╗██╔══██╗██╔══██╗
+    ██║   ██║   ██║███████║██║  ██║
+    ██║   ██║   ██║██╔══██║██║  ██║
+    ██║   ╚██████╔╝██║  ██║██████╔╝
+    ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚═════╝`
+
+const toadFrog = `
+         ╭━━━╮ ╭━━━╮
+        ┃ ● ┃━┃ ● ┃
+         ╰┳━━━━━━┳╯
+    ╭━━━━━┻━━━━━━┻━━━━━╮
+    ┃  ╭──╮      ╭──╮  ┃
+    ┃  ╰──╯  ^^  ╰──╯  ┃
+    ╰━━┳━━━━━━━━━━━━┳━━╯
+       ┃  ╱╲    ╱╲  ┃
+       ╰━╱  ╲━━╱  ╲━╯`
+
+func (m wizardModel) viewWelcome() string {
+	var b strings.Builder
+
+	b.WriteString(tui.SelectedStyle.Render(toadLogo))
+	b.WriteString("\n")
+	b.WriteString(tui.DimStyle.Render(toadFrog))
+	b.WriteString("\n\n")
+	b.WriteString("AI-powered coding assistant that lives in Slack.\n")
+	b.WriteString("Monitors channels, answers questions, and fixes bugs\n")
+	b.WriteString("by autonomously creating pull requests.\n")
+	b.WriteString("\n")
+	b.WriteString(tui.DimStyle.Render("Press Enter to start setup."))
+
+	return b.String()
+}
+
+func (m wizardModel) viewSlack() string {
+	var b strings.Builder
+
+	b.WriteString(tui.TitleStyle.Render("Slack Connection"))
+	b.WriteString("\n\n")
+	b.WriteString(tui.DimStyle.Render("Create a Slack app at https://api.slack.com/apps"))
+	b.WriteString("\n")
+	b.WriteString(tui.DimStyle.Render("Enable Socket Mode, add Bot Token Scopes, subscribe to events."))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("App-Level Token", m.focusedInput == 0))
+	b.WriteString("\n")
+	b.WriteString(m.inputBorderStyle(m.focusedInput == 0).Render(m.appTokenInput.View()))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Bot User OAuth Token", m.focusedInput == 1))
+	b.WriteString("\n")
+	b.WriteString(m.inputBorderStyle(m.focusedInput == 1).Render(m.botTokenInput.View()))
+
+	return b.String()
+}
+
+func (m wizardModel) viewRepo() string {
+	var b strings.Builder
+
+	b.WriteString(tui.TitleStyle.Render("Repository"))
+	b.WriteString("\n\n")
+	b.WriteString(tui.DimStyle.Render("Configure the repo Toad will work on."))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Repo path", m.focusedInput == 0))
+	b.WriteString("\n")
+	b.WriteString(m.inputBorderStyle(m.focusedInput == 0).Render(m.repoPathInput.View()))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Repo name", m.focusedInput == 1))
+	b.WriteString("\n")
+	b.WriteString(m.inputBorderStyle(m.focusedInput == 1).Render(m.repoNameInput.View()))
+
+	return b.String()
+}
+
+func (m wizardModel) viewRepoCommands() string {
+	var b strings.Builder
+
+	b.WriteString(tui.TitleStyle.Render("Validation Commands"))
+	b.WriteString("\n\n")
+
+	if m.detected.Stack != "" {
+		info := fmt.Sprintf("Detected %s project", m.detected.Stack)
+		if m.detected.Module != "" {
+			info += fmt.Sprintf(" (%s)", m.detected.Module)
 		}
+		b.WriteString(tui.SuccessStyle.Render("✓ " + info))
+	} else {
+		b.WriteString(tui.DimStyle.Render("Configure test and lint commands."))
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Test command", m.cmdFocusedField == 0))
+	b.WriteString("\n")
+	b.WriteString(m.inputBorderStyle(m.cmdFocusedField == 0).Render(m.testCmdInput.View()))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Lint command", m.cmdFocusedField == 1))
+	b.WriteString("\n")
+	b.WriteString(m.inputBorderStyle(m.cmdFocusedField == 1).Render(m.lintCmdInput.View()))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Default branch", m.cmdFocusedField == 2))
+	b.WriteString("\n")
+	for i, branch := range m.branchOptions {
+		b.WriteString("  ")
+		if m.cmdFocusedField == 2 && i == m.branchCursor {
+			b.WriteString(tui.SelectedStyle.Render("● " + branch))
+		} else if i == m.branchCursor {
+			b.WriteString(tui.DimStyle.Render("● " + branch))
+		} else {
+			b.WriteString(tui.DimStyle.Render("○ " + branch))
+		}
+		b.WriteString("\n")
 	}
 
-	branchOptions := []huh.Option[string]{
-		huh.NewOption("main", "main"),
-		huh.NewOption("master", "master"),
-		huh.NewOption("develop", "develop"),
-	}
-	if defaultBranch != "main" && defaultBranch != "master" && defaultBranch != "develop" {
-		branchOptions = append([]huh.Option[string]{
-			huh.NewOption(defaultBranch+" (detected)", defaultBranch),
-		}, branchOptions...)
-	}
-
-	// Step 2: Commands
-	err = huh.NewForm(
-		huh.NewGroup(
-			huh.NewNote().
-				Title("Repository: "+strings.TrimSpace(repoName)).
-				Description(detectedInfo).
-				Next(true).
-				NextLabel("Continue"),
-			huh.NewInput().
-				Title("Test command").
-				Placeholder("e.g. go test ./...").
-				Value(&testCommand),
-			huh.NewInput().
-				Title("Lint command").
-				Placeholder("e.g. golangci-lint run").
-				Value(&lintCommand),
-			huh.NewSelect[string]().
-				Title("Default branch").
-				Options(branchOptions...).
-				Value(&defaultBranch),
-		),
-	).WithTheme(theme).Run()
-	if err != nil {
-		return repoTemplateData{}, err
-	}
-
-	return repoTemplateData{
-		Name:          strings.TrimSpace(repoName),
-		Path:          absPath,
-		TestCommand:   testCommand,
-		LintCommand:   lintCommand,
-		DefaultBranch: defaultBranch,
-	}, nil
+	return b.String()
 }
 
-// ── Validators ──────────────────────────────────────
+func (m wizardModel) viewToadKing() string {
+	var b strings.Builder
+
+	b.WriteString(tui.TitleStyle.Render("Toad King"))
+	b.WriteString("\n\n")
+	b.WriteString("Toad King passively monitors your Slack channels\n")
+	b.WriteString("and auto-identifies bugs that could be fixed.\n")
+	b.WriteString("\n")
+
+	options := []struct {
+		label string
+		desc  string
+	}{
+		{"Dry-run", "monitor and report opportunities (recommended)"},
+		{"Live", "auto-fix high-confidence bugs"},
+		{"Off", "disable passive monitoring"},
+	}
+
+	for i, opt := range options {
+		if i == m.toadKingCursor {
+			b.WriteString(tui.CursorStyle.Render("▸ "))
+			b.WriteString(tui.SelectedStyle.Render(opt.label))
+			b.WriteString(tui.DimStyle.Render(" — " + opt.desc))
+		} else {
+			b.WriteString("  ")
+			b.WriteString(opt.label)
+			b.WriteString(tui.DimStyle.Render(" — " + opt.desc))
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func (m wizardModel) viewAdvancedAsk() string {
+	var b strings.Builder
+
+	b.WriteString(tui.TitleStyle.Render("Advanced Settings"))
+	b.WriteString("\n\n")
+	b.WriteString(tui.DimStyle.Render("Channels, triggers, AI models, and more."))
+	b.WriteString("\n")
+	b.WriteString(tui.DimStyle.Render("Defaults work great for most setups."))
+	b.WriteString("\n\n")
+
+	options := []string{"Use defaults and finish", "Customize settings"}
+	for i, opt := range options {
+		if i == m.advancedCursor {
+			b.WriteString(tui.CursorStyle.Render("▸ "))
+			b.WriteString(tui.SelectedStyle.Render(opt))
+		} else {
+			b.WriteString("  " + opt)
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func (m wizardModel) viewAdvanced() string {
+	switch m.advSection {
+	case 0:
+		return m.viewAdvTriggers()
+	case 1:
+		return m.viewAdvModels()
+	case 2:
+		return m.viewAdvRepoOpts()
+	case 3:
+		return m.viewAdvLog()
+	}
+	return ""
+}
+
+func (m wizardModel) viewAdvTriggers() string {
+	var b strings.Builder
+
+	b.WriteString(tui.TitleStyle.Render("Channels & Triggers"))
+	b.WriteString("  ")
+	b.WriteString(tui.DimStyle.Render("(1/4)"))
+	b.WriteString("\n\n")
+
+	fields := []struct {
+		label string
+		view  string
+	}{
+		{"Channel IDs", m.channelsInput.View()},
+		{"Trigger emoji", m.emojiInput.View()},
+		{"Trigger keywords", m.keywordsInput.View()},
+	}
+
+	for i, f := range fields {
+		b.WriteString(m.fieldLabel(f.label, i == m.advCursor))
+		b.WriteString("\n")
+		b.WriteString(m.inputBorderStyle(i == m.advCursor).Render(f.view))
+		b.WriteString("\n\n")
+	}
+
+	return b.String()
+}
+
+func (m wizardModel) viewAdvModels() string {
+	var b strings.Builder
+
+	claudeModels := []string{"sonnet", "opus", "haiku"}
+	triageModels := []string{"haiku", "sonnet"}
+
+	b.WriteString(tui.TitleStyle.Render("AI Models"))
+	b.WriteString("  ")
+	b.WriteString(tui.DimStyle.Render("(2/4)"))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Tadpole model", m.advCursor == 0))
+	b.WriteString("  ")
+	for i, model := range claudeModels {
+		if i == m.claudeModel {
+			b.WriteString(tui.SelectedStyle.Render("[" + model + "]"))
+		} else {
+			b.WriteString(tui.DimStyle.Render(" " + model + " "))
+		}
+		b.WriteString(" ")
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Triage model", m.advCursor == 1))
+	b.WriteString("  ")
+	for i, model := range triageModels {
+		if i == m.triageModel {
+			b.WriteString(tui.SelectedStyle.Render("[" + model + "]"))
+		} else {
+			b.WriteString(tui.DimStyle.Render(" " + model + " "))
+		}
+		b.WriteString(" ")
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Auto-spawn", m.advCursor == 2))
+	b.WriteString("  ")
+	if m.autoSpawn {
+		b.WriteString(tui.SelectedStyle.Render("[on]"))
+		b.WriteString(tui.DimStyle.Render("  off "))
+	} else {
+		b.WriteString(tui.DimStyle.Render(" on  "))
+		b.WriteString(tui.SelectedStyle.Render("[off]"))
+	}
+	b.WriteString("\n")
+	b.WriteString(tui.DimStyle.Render("Skip trigger — auto-spawn for any detected bug"))
+
+	return b.String()
+}
+
+func (m wizardModel) viewAdvRepoOpts() string {
+	var b strings.Builder
+
+	b.WriteString(tui.TitleStyle.Render("Repo Options"))
+	b.WriteString("  ")
+	b.WriteString(tui.DimStyle.Render("(3/4)"))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Auto-merge PRs", m.advCursor == 0))
+	b.WriteString("  ")
+	if m.autoMerge {
+		b.WriteString(tui.SelectedStyle.Render("[on]"))
+		b.WriteString(tui.DimStyle.Render("  off "))
+	} else {
+		b.WriteString(tui.DimStyle.Render(" on  "))
+		b.WriteString(tui.SelectedStyle.Render("[off]"))
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("PR labels", m.advCursor == 1))
+	b.WriteString("\n")
+	b.WriteString(m.inputBorderStyle(m.advCursor == 1).Render(m.labelsInput.View()))
+
+	return b.String()
+}
+
+func (m wizardModel) viewAdvLog() string {
+	var b strings.Builder
+
+	levels := []string{"debug", "info", "warn", "error"}
+
+	b.WriteString(tui.TitleStyle.Render("Log Level"))
+	b.WriteString("  ")
+	b.WriteString(tui.DimStyle.Render("(4/4)"))
+	b.WriteString("\n\n")
+
+	for i, level := range levels {
+		if i == m.logLevel {
+			b.WriteString(tui.CursorStyle.Render("▸ "))
+			b.WriteString(tui.SelectedStyle.Render(level))
+		} else {
+			b.WriteString("  " + level)
+		}
+		if level == "info" {
+			b.WriteString(tui.DimStyle.Render(" (default)"))
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func (m wizardModel) viewSummary() string {
+	var b strings.Builder
+
+	toadKingModes := []string{"dry-run", "live", "off"}
+	claudeModels := []string{"sonnet", "opus", "haiku"}
+
+	b.WriteString(tui.TitleStyle.Render("Review & Save"))
+	b.WriteString("\n\n")
+
+	var box strings.Builder
+	box.WriteString(m.summaryLine("Repo", m.repoNameInput.Value()))
+	box.WriteString(m.summaryLine("Path", m.repoPathInput.Value()))
+	if m.detected.Stack != "" {
+		box.WriteString(m.summaryLine("Stack", m.detected.Stack))
+	}
+	box.WriteString(m.summaryLine("Branch", m.branchOptions[m.branchCursor]))
+	box.WriteString(m.summaryLine("Test", m.testCmdInput.Value()))
+	box.WriteString(m.summaryLine("Lint", m.lintCmdInput.Value()))
+	box.WriteString(m.summaryLine("Toad King", toadKingModes[m.toadKingCursor]))
+	box.WriteString(m.summaryLine("Model", claudeModels[m.claudeModel]))
+
+	// Inner summary box
+	innerBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(tui.ColorSubtle).
+		Padding(1, 2).
+		Width(m.contentWidth() - 12).
+		Render(box.String())
+
+	b.WriteString(innerBox)
+	b.WriteString("\n\n")
+	b.WriteString("Save to ")
+	b.WriteString(tui.SelectedStyle.Render(".toad.yaml"))
+	b.WriteString("?")
+
+	return b.String()
+}
+
+func (m wizardModel) summaryLine(key, value string) string {
+	return fmt.Sprintf("%-12s %s\n", tui.DimStyle.Render(key), value)
+}
+
+func (m wizardModel) viewDone() string {
+	var b strings.Builder
+	b.WriteString(tui.SuccessStyle.Render("✓ Config written to .toad.yaml"))
+	b.WriteString("\n\n")
+	b.WriteString("Start toad with: ")
+	b.WriteString(tui.SelectedStyle.Render("toad"))
+	return b.String()
+}
+
+// ── Help text ────────────────────────────────────────
+
+func (m wizardModel) helpText() string {
+	switch m.step {
+	case stepWelcome:
+		return tui.HelpStyle.Render("Enter start  •  Esc quit")
+	case stepSlack, stepRepo:
+		return tui.HelpStyle.Render("Tab/↓ next field  •  Enter continue  •  Esc back")
+	case stepRepoCommands:
+		return tui.HelpStyle.Render("Tab next field  •  ↑/↓ select branch  •  Enter continue  •  Esc back")
+	case stepToadKing:
+		return tui.HelpStyle.Render("↑/↓ select  •  Enter continue  •  Esc back")
+	case stepAdvancedAsk:
+		return tui.HelpStyle.Render("↑/↓ select  •  Enter continue  •  Esc back")
+	case stepAdvanced:
+		switch m.advSection {
+		case 0:
+			return tui.HelpStyle.Render("Tab next field  •  Enter next section  •  Esc back")
+		case 1, 2:
+			return tui.HelpStyle.Render("Tab next  •  ←/→ change  •  Enter next section  •  Esc back")
+		case 3:
+			return tui.HelpStyle.Render("↑/↓ select  •  Enter finish  •  Esc back")
+		}
+	case stepSummary:
+		return tui.HelpStyle.Render("Enter/y save  •  Esc/n back")
+	}
+	return ""
+}
+
+// ── Style helpers ────────────────────────────────────
+
+func (m wizardModel) fieldLabel(label string, focused bool) string {
+	if focused {
+		return tui.CursorStyle.Render("▸ ") + tui.TitleStyle.Render(label)
+	}
+	return "  " + label
+}
+
+func (m wizardModel) inputBorderStyle(focused bool) lipgloss.Style {
+	borderColor := tui.ColorBorder
+	if focused {
+		borderColor = tui.ColorPrimary
+	}
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderColor).
+		Padding(0, 1).
+		Width(m.contentWidth() - 10)
+}
+
+// ── Validators ───────────────────────────────────────
 
 func validateRepoPath(s string) error {
 	abs, err := filepath.Abs(s)
@@ -699,25 +1265,8 @@ func validateRepoPath(s string) error {
 	return nil
 }
 
-func validatePositiveInt(s string) error {
-	n := parseIntOr(s, -1)
-	if n <= 0 {
-		return fmt.Errorf("must be a positive integer")
-	}
-	return nil
-}
+// ── Helpers ──────────────────────────────────────────
 
-func validateNonNegativeInt(s string) error {
-	n := parseIntOr(s, -1)
-	if n < 0 {
-		return fmt.Errorf("must be a non-negative integer")
-	}
-	return nil
-}
-
-// ── Helpers ─────────────────────────────────────────
-
-// parseCSV splits a comma-separated string into trimmed non-empty parts.
 func parseCSV(s string) []string {
 	var result []string
 	for _, part := range strings.Split(s, ",") {
@@ -729,12 +1278,31 @@ func parseCSV(s string) []string {
 	return result
 }
 
-// validateBotToken checks the bot token works with a simple auth test.
-func validateBotToken(botToken string) error {
-	api := slack.New(botToken)
-	_, err := api.AuthTest()
-	if err != nil {
-		return fmt.Errorf("auth test failed (is your bot token correct?): %w", err)
+// ── Entry point ──────────────────────────────────────
+
+func runInit(cmd *cobra.Command, args []string) error {
+	// Overwrite check
+	if _, err := os.Stat(".toad.yaml"); err == nil {
+		fmt.Printf("  .toad.yaml already exists. Overwrite? [y/N] ")
+		var answer string
+		fmt.Scanln(&answer)
+		if answer != "y" && answer != "Y" {
+			fmt.Println("  Canceled.")
+			return nil
+		}
 	}
+
+	m := newWizardModel()
+	p := tea.NewProgram(m)
+	result, err := p.Run()
+	if err != nil {
+		return fmt.Errorf("wizard error: %w", err)
+	}
+
+	final := result.(wizardModel)
+	if final.quitting && !final.configWritten {
+		fmt.Println("  Setup canceled.")
+	}
+
 	return nil
 }
