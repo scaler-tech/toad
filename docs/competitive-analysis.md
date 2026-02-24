@@ -14,6 +14,8 @@ There are roughly 5 categories of autonomous coding tools today:
 
 **How they work:** You file an issue or assign a task, the agent spins up a cloud sandbox, works, creates a PR. Reactive — someone must explicitly trigger them.
 
+**Feb 2026 update:** Copilot Coding Agent is now GA for all paid Copilot users — it's becoming the default for many teams. Devin now supports Slack triggers directly (tag Devin in Slack → it works), eroding toad's "Slack-native" positioning on the reactive path.
+
 ### 2. Sentry/alert-specific fixers
 | Tool | Trigger | Status |
 |------|---------|--------|
@@ -26,11 +28,19 @@ There are roughly 5 categories of autonomous coding tools today:
 ### 3. Internal mega-systems (not available)
 [Stripe Minions](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents-part-2) — 1,300+ PRs/week on AWS EC2 devboxes, ~500 MCP tools, hybrid deterministic+agentic blueprints. Massive internal infra investment, not replicable outside Stripe.
 
-### 4. Always-on Slack daemons
+### 4. Slack-triggered agents (new category, Feb 2026)
+| Tool | Stack | Trigger | Status |
+|------|-------|---------|--------|
+| [Devin](https://devin.ai) | Cognition cloud | Slack tag / web | GA, Slack triggers now supported |
+| [Builder.io](https://www.builder.io) | Cloud | Slack tag / Jira assign | GA, reads Figma + repo |
+
+**New threat:** "Tag the bot in Slack, get a PR" is no longer unique to toad or Baudbot. Devin and Builder both support it now — but they're cloud-hosted SaaS, not self-hosted.
+
+### 5. Always-on Slack daemons
 | Tool | Stack | Isolation |
 |------|-------|-----------|
 | [Baudbot](https://github.com/modem-dev/baudbot) | TypeScript/Shell, Linux-only | Git worktrees |
-| **Toad** | Go, macOS/Linux | Git worktrees |
+| **Toad** | Go, macOS/Linux/Windows | Git worktrees |
 
 **Baudbot** is the closest competitor. Control agent + dev agents + sentry agent hierarchy, always-on in Slack, git worktrees for isolation, CI monitoring. But it's Linux-only, TypeScript/Shell, more complex deployment.
 
@@ -80,9 +90,22 @@ Toad fetches full thread context before spawning. The trigger message is often j
 |-----|---------------------------|
 | Single repo (for now) | Copilot (any repo), Devin (any repo) |
 | No cloud scaling | Stripe Minions (parallel devboxes), Copilot (Actions) |
-| No web dashboard | Devin (web UI), OpenHands (web UI) |
 | No SWE-Bench numbers | SWE-Agent, OpenHands have published benchmarks |
 | No built-in MCP tools (yet) | Stripe (~500 tools), Copilot (MCP support) |
+| Reactive path is commoditized | Devin, Copilot, Builder all do "trigger → PR" now |
+| No merge rate / ROI metrics | Hard for teams to measure value without tracking outcomes |
+
+---
+
+## Strategic Implications (Feb 2026)
+
+The "Slack bot that creates PRs" feature is becoming table stakes. Toad's reactive path (@mention → tadpole → PR) now competes with well-funded alternatives. **The proactive path (Toad King) is the true differentiator and must be the headline feature.**
+
+Key strategic moves:
+1. **Lead with Toad King** — enable dry-run by default, make investigation results visible in the dashboard, position passive monitoring as the primary value prop.
+2. **Self-hosted / data sovereignty** — code never leaves your machine. This matters for security-conscious teams and is a hard differentiator vs Devin, Copilot, Builder.
+3. **Track and show ROI** — merge rates, review round effectiveness, time saved. Teams need to see the value to justify keeping toad running.
+4. **Multi-repo is an adoption blocker** — teams rarely have one repo. Prioritize this.
 
 ---
 
@@ -90,11 +113,11 @@ Toad fetches full thread context before spawning. The trigger message is often j
 
 Toad occupies a unique niche: **the self-hosted, proactive Slack-native coding daemon**. It's the only tool that combines passive channel monitoring, multi-tier autonomous triage, codebase-aware Q&A, and autonomous fix agents — all in a zero-infra single binary.
 
-The closest thing to "Stripe Minions for the rest of us" — with the added dimension that it doesn't wait to be told what to fix.
+The closest thing to "Stripe Minions for the rest of us" — with the added dimension that it doesn't wait to be told what to fix. While competitors have caught up on the reactive path (trigger → PR), **nobody else watches your channels and fixes bugs before anyone files a ticket.**
 
 ---
 
-*Last updated: 2026-02-23*
+*Last updated: 2026-02-24*
 
 Sources:
 - [Stripe Minions Part 1](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents)
@@ -107,3 +130,6 @@ Sources:
 - [OpenHands](https://openhands.dev/blog/openhands-codeact-21-an-open-state-of-the-art-software-development-agent)
 - [Devin alternatives](https://www.tembo.io/blog/devin-alternatives-2025)
 - [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview)
+- [Best Background Agents for Developers 2026](https://www.builder.io/blog/best-ai-background-agents-for-developers-2026)
+- [Best AI Coding Agents 2026](https://playcode.io/blog/best-ai-coding-agents-2026)
+- [Coding agents in 2026 landscape](https://peerpush.net/blog/coding-agents-in-2026)

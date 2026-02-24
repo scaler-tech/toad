@@ -133,7 +133,7 @@ func defaults() *Config {
 			AllowedCategories: []string{"bug"},
 			MaxEstSize:        "small",
 			MaxChunkSize:      50,
-			ChunkTimeoutSecs:  60,
+			ChunkTimeoutSecs:  120,
 		},
 		IssueTracker: IssueTrackerConfig{
 			Enabled:  false,

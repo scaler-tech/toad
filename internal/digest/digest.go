@@ -193,15 +193,7 @@ func (e *Engine) flush(ctx context.Context) {
 			// Proportionally longer: 2x messages = 2x timeout
 			chunkTimeout = baseTimeout * time.Duration(len(ch.messages)) / time.Duration(maxSize)
 		}
-		chunkCtx, cancel := context.WithTimeout(ctx, chunkTimeout)
-
-		opportunities, err := e.analyze(chunkCtx, ch.messages)
-		cancel()
-
-		if err != nil {
-			slog.Warn("digest chunk analysis failed", "error", err, "label", ch.label)
-			continue // other chunks may still succeed
-		}
+		opportunities, _ := e.analyzeWithRetry(ctx, ch, chunkTimeout)
 
 		if len(opportunities) == 0 {
 			continue
@@ -404,6 +396,38 @@ Structured alerts (Sentry, CI, monitoring bots):
 - Treat these as bug reports — the exception/error message IS the specification
 - Example: a Sentry alert with "SsoAuthException: Tenant ID mismatch" and a file path is actionable`
 
+// analyzeWithRetry runs analyze with the given timeout, retrying once with a
+// longer deadline if the first attempt is killed (typically by context timeout).
+func (e *Engine) analyzeWithRetry(ctx context.Context, ch chunk, timeout time.Duration) ([]Opportunity, error) {
+	chunkCtx, cancel := context.WithTimeout(ctx, timeout)
+	opps, err := e.analyze(chunkCtx, ch.messages)
+	cancel()
+
+	if err == nil {
+		return opps, nil
+	}
+
+	// Only retry on signal: killed (timeout) — not on parse errors or API failures
+	if !strings.Contains(err.Error(), "signal: killed") {
+		slog.Warn("digest chunk analysis failed", "error", err, "label", ch.label)
+		return nil, err
+	}
+
+	retryTimeout := timeout * 2
+	slog.Warn("digest chunk timed out, retrying with longer deadline",
+		"label", ch.label, "original_timeout", timeout, "retry_timeout", retryTimeout)
+
+	retryCtx, retryCancel := context.WithTimeout(ctx, retryTimeout)
+	opps, err = e.analyze(retryCtx, ch.messages)
+	retryCancel()
+
+	if err != nil {
+		slog.Warn("digest chunk analysis failed after retry", "error", err, "label", ch.label)
+		return nil, err
+	}
+	return opps, nil
+}
+
 func (e *Engine) analyze(ctx context.Context, msgs []Message) ([]Opportunity, error) {
 	// Format messages as numbered list
 	var sb strings.Builder
@@ -415,7 +439,6 @@ func (e *Engine) analyze(ctx context.Context, msgs []Message) ([]Opportunity, er
 
 	args := []string{
 		"--print",
-		"--dangerously-skip-permissions",
 		"--max-turns", "1",
 		"--output-format", "json",
 		"--model", e.model,
