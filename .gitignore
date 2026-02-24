@@ -8,6 +8,9 @@
 # Claude Code
 .claude/
 
+# Private docs (strategy, competitive analysis)
+.docs/
+
 # Test binary
 *.test
 
