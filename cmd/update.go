@@ -63,6 +63,13 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	fmt.Println("  " + dimStyle.Render("Refreshing tap..."))
+	if refreshOut, err := exec.Command("brew", "update").CombinedOutput(); err != nil {
+		fmt.Println("  " + errorStyle.Render(fmt.Sprintf("brew update failed: %s", strings.TrimSpace(string(refreshOut)))))
+		fmt.Println()
+		return nil
+	}
+
 	fmt.Println("  " + dimStyle.Render("Upgrading toad..."))
 	upgradeCmd := exec.Command("brew", "upgrade", "--cask", "toad")
 	upgradeOutput, upgradeErr := upgradeCmd.CombinedOutput()
