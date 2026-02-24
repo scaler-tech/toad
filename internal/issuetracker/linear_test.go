@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/hergen/toad/internal/config"
@@ -283,8 +284,8 @@ func TestCreateIssue_Success(t *testing.T) {
 		}
 		json.NewDecoder(r.Body).Decode(&payload)
 
-		if payload.Variables["teamId"] != "team-123" {
-			t.Errorf("expected teamId 'team-123', got %v", payload.Variables["teamId"])
+		if payload.Variables["teamId"] != "00000000-0000-0000-0000-000000000123" {
+			t.Errorf("expected teamId UUID, got %v", payload.Variables["teamId"])
 		}
 
 		json.NewEncoder(w).Encode(map[string]any{
@@ -304,7 +305,7 @@ func TestCreateIssue_Success(t *testing.T) {
 
 	lt := &LinearTracker{
 		apiToken:   "test-token",
-		teamID:     "team-123",
+		teamID:     "00000000-0000-0000-0000-000000000123",
 		httpClient: srv.Client(),
 	}
 	// Override the URL by using a custom transport
@@ -356,7 +357,7 @@ func TestCreateIssue_WithLabels(t *testing.T) {
 
 	lt := &LinearTracker{
 		apiToken:       "token",
-		teamID:         "team",
+		teamID:         "00000000-0000-0000-0000-000000000001",
 		bugLabelID:     "bug-label-id",
 		featureLabelID: "feat-label-id",
 		httpClient:     &http.Client{Transport: &rewriteTransport{url: srv.URL}},
@@ -399,7 +400,7 @@ func TestCreateIssue_GraphQLError(t *testing.T) {
 
 	lt := &LinearTracker{
 		apiToken:   "token",
-		teamID:     "bad-team",
+		teamID:     "00000000-0000-0000-0000-000000000bad",
 		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
 	}
 
@@ -407,8 +408,8 @@ func TestCreateIssue_GraphQLError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for GraphQL error response")
 	}
-	if err.Error() != "linear API error: Team not found" {
-		t.Errorf("unexpected error message: %v", err)
+	if got := err.Error(); !strings.Contains(got, "Team not found") {
+		t.Errorf("expected error containing 'Team not found', got %v", got)
 	}
 }
 
@@ -421,7 +422,7 @@ func TestCreateIssue_Non200Status(t *testing.T) {
 
 	lt := &LinearTracker{
 		apiToken:   "bad-token",
-		teamID:     "team",
+		teamID:     "00000000-0000-0000-0000-000000000001",
 		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
 	}
 
@@ -432,7 +433,7 @@ func TestCreateIssue_Non200Status(t *testing.T) {
 }
 
 func TestCreateIssue_MissingToken(t *testing.T) {
-	lt := &LinearTracker{teamID: "team"}
+	lt := &LinearTracker{teamID: "00000000-0000-0000-0000-000000000001"}
 	_, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "test"})
 	if err == nil || err.Error() != "linear API token not configured" {
 		t.Errorf("expected token error, got %v", err)
@@ -461,7 +462,7 @@ func TestCreateIssue_CreationFailed(t *testing.T) {
 
 	lt := &LinearTracker{
 		apiToken:   "token",
-		teamID:     "team",
+		teamID:     "00000000-0000-0000-0000-000000000001",
 		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
 	}
 

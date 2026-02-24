@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"time"
@@ -18,6 +19,9 @@ var linearURLRe = regexp.MustCompile(`https://linear\.app/[^/]+/issue/([A-Z]+-\d
 
 // Bare issue ID pattern: PLF-3125 (2-5 uppercase letters, dash, digits).
 var bareIDRe = regexp.MustCompile(`\b([A-Z]{2,5}-\d+)\b`)
+
+// uuidRe matches a standard UUID format.
+var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // commonAcronyms that match bareIDRe but are not issue IDs.
 var commonAcronyms = map[string]bool{
@@ -95,6 +99,61 @@ func (lt *LinearTracker) ExtractIssueRef(text string) *IssueRef {
 	return nil
 }
 
+// resolveTeamID resolves a team key (e.g. "PLF") to its UUID via the Linear API.
+// If teamID is already a UUID, this is a no-op.
+func (lt *LinearTracker) resolveTeamID(ctx context.Context) error {
+	if uuidRe.MatchString(lt.teamID) {
+		return nil
+	}
+
+	slog.Info("resolving Linear team key to UUID", "key", lt.teamID)
+
+	query := `{ teams { nodes { id key } } }`
+	payload, _ := json.Marshal(map[string]any{"query": query})
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.linear.app/graphql", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", lt.apiToken)
+
+	resp, err := lt.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("linear API request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response: %w", err)
+	}
+
+	var result struct {
+		Data struct {
+			Teams struct {
+				Nodes []struct {
+					ID  string `json:"id"`
+					Key string `json:"key"`
+				} `json:"nodes"`
+			} `json:"teams"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return fmt.Errorf("parsing teams response: %w", err)
+	}
+
+	for _, team := range result.Data.Teams.Nodes {
+		if team.Key == lt.teamID {
+			slog.Info("resolved Linear team", "key", lt.teamID, "uuid", team.ID)
+			lt.teamID = team.ID
+			return nil
+		}
+	}
+
+	return fmt.Errorf("linear team key %q not found", lt.teamID)
+}
+
 // CreateIssue creates a new Linear issue via the GraphQL API.
 func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) (*IssueRef, error) {
 	if lt.apiToken == "" {
@@ -102,6 +161,11 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 	}
 	if lt.teamID == "" {
 		return nil, fmt.Errorf("linear team ID not configured")
+	}
+
+	// Resolve team key to UUID on first call (e.g. "PLF" → "4246aba1-...")
+	if err := lt.resolveTeamID(ctx); err != nil {
+		return nil, fmt.Errorf("resolving team ID: %w", err)
 	}
 
 	// Build label IDs based on category
@@ -182,7 +246,8 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 			} `json:"issueCreate"`
 		} `json:"data"`
 		Errors []struct {
-			Message string `json:"message"`
+			Message    string         `json:"message"`
+			Extensions map[string]any `json:"extensions"`
 		} `json:"errors"`
 	}
 
@@ -191,7 +256,12 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 	}
 
 	if len(gqlResp.Errors) > 0 {
-		return nil, fmt.Errorf("linear API error: %s", gqlResp.Errors[0].Message)
+		e := gqlResp.Errors[0]
+		if len(e.Extensions) > 0 {
+			extJSON, _ := json.Marshal(e.Extensions)
+			return nil, fmt.Errorf("linear API error: %s (details: %s)", e.Message, string(extJSON))
+		}
+		return nil, fmt.Errorf("linear API error: %s (response: %s)", e.Message, string(respBody))
 	}
 
 	if !gqlResp.Data.IssueCreate.Success {
