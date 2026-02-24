@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
@@ -64,17 +63,6 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Println("  " + dimStyle.Render("Refreshing homebrew tap..."))
-	brewUpdateCmd := exec.Command("brew", "update")
-	brewUpdateCmd.Stdout = os.Stdout
-	brewUpdateCmd.Stderr = os.Stderr
-	if err := brewUpdateCmd.Run(); err != nil {
-		fmt.Println("  " + errorStyle.Render(fmt.Sprintf("brew update failed: %v", err)))
-		fmt.Println()
-		return nil
-	}
-
-	fmt.Println()
 	fmt.Println("  " + dimStyle.Render("Upgrading toad..."))
 	upgradeCmd := exec.Command("brew", "upgrade", "--cask", "toad")
 	upgradeOutput, upgradeErr := upgradeCmd.CombinedOutput()
