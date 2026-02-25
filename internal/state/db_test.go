@@ -649,6 +649,94 @@ func TestDB_DigestOpportunities(t *testing.T) {
 	}
 }
 
+func TestDB_DigestOpportunity_InvestigatingLifecycle(t *testing.T) {
+	db := openTestDB(t)
+
+	// Save an investigating opportunity (pre-investigation)
+	opp := &DigestOpportunity{
+		Summary:       "Fix login crash",
+		Category:      "bug",
+		Confidence:    0.98,
+		EstSize:       "small",
+		Channel:       "C123",
+		Message:       "login is crashing",
+		Keywords:      "login,crash",
+		DryRun:        false,
+		Investigating: true,
+		CreatedAt:     time.Now(),
+	}
+	if err := db.SaveDigestOpportunity(opp); err != nil {
+		t.Fatalf("SaveDigestOpportunity: %v", err)
+	}
+	if opp.ID == 0 {
+		t.Error("expected ID to be set after save")
+	}
+
+	// Verify it appears as investigating
+	opps, _ := db.RecentDigestOpportunities(10)
+	if len(opps) != 1 || !opps[0].Investigating {
+		t.Fatalf("expected 1 investigating opportunity, got %d", len(opps))
+	}
+
+	// Counts should show 1 investigating
+	counts, err := db.DigestOpportunityCounts()
+	if err != nil {
+		t.Fatalf("DigestOpportunityCounts: %v", err)
+	}
+	if counts.Investigating != 1 {
+		t.Errorf("expected 1 investigating, got %d", counts.Investigating)
+	}
+	if counts.Approved != 0 || counts.Dismissed != 0 {
+		t.Errorf("expected 0 approved/dismissed, got %d/%d", counts.Approved, counts.Dismissed)
+	}
+
+	// Complete investigation — approved
+	opp.Investigating = false
+	opp.Reasoning = "clear fix, single file"
+	if err := db.UpdateDigestOpportunity(opp); err != nil {
+		t.Fatalf("UpdateDigestOpportunity: %v", err)
+	}
+
+	// Verify updated state
+	opps, _ = db.RecentDigestOpportunities(10)
+	if opps[0].Investigating {
+		t.Error("expected investigating to be false after update")
+	}
+	if opps[0].Reasoning != "clear fix, single file" {
+		t.Errorf("expected reasoning to be updated, got %q", opps[0].Reasoning)
+	}
+
+	// Counts should show 1 approved, 0 investigating
+	counts, _ = db.DigestOpportunityCounts()
+	if counts.Approved != 1 {
+		t.Errorf("expected 1 approved, got %d", counts.Approved)
+	}
+	if counts.Investigating != 0 {
+		t.Errorf("expected 0 investigating, got %d", counts.Investigating)
+	}
+
+	// Save and dismiss another
+	opp2 := &DigestOpportunity{
+		Summary:       "Refactor utils",
+		Category:      "feature",
+		Confidence:    0.96,
+		EstSize:       "small",
+		Channel:       "C456",
+		Investigating: true,
+		CreatedAt:     time.Now(),
+	}
+	db.SaveDigestOpportunity(opp2)
+	opp2.Investigating = false
+	opp2.Dismissed = true
+	opp2.Reasoning = "too complex"
+	db.UpdateDigestOpportunity(opp2)
+
+	counts, _ = db.DigestOpportunityCounts()
+	if counts.Approved != 1 || counts.Dismissed != 1 || counts.Investigating != 0 {
+		t.Errorf("counts: approved=%d dismissed=%d investigating=%d", counts.Approved, counts.Dismissed, counts.Investigating)
+	}
+}
+
 func TestDB_Stats_EmptyDB(t *testing.T) {
 	db := openTestDB(t)
 

@@ -249,6 +249,28 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 		}
 		msg := msgs[opp.MessageIdx]
 
+		// Save opportunity to DB in investigating state before the Sonnet deep-dive,
+		// so the dashboard shows an "investigating" spinner while work is in progress.
+		var dbOpp *state.DigestOpportunity
+		if e.db != nil {
+			dbOpp = &state.DigestOpportunity{
+				Summary:       opp.Summary,
+				Category:      opp.Category,
+				Confidence:    opp.Confidence,
+				EstSize:       opp.EstSize,
+				Channel:       msg.Channel,
+				Message:       msg.Text,
+				Keywords:      strings.Join(opp.Keywords, ","),
+				DryRun:        e.cfg.DryRun,
+				Investigating: true,
+				CreatedAt:     time.Now(),
+			}
+			if err := e.db.SaveDigestOpportunity(dbOpp); err != nil {
+				slog.Warn("failed to save investigating opportunity", "error", err)
+				dbOpp = nil
+			}
+		}
+
 		// Investigation gate: have ribbit check the codebase before spawning
 		dismissed := false
 		reasoning := ""
@@ -272,23 +294,13 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			}
 		}
 
-		// Persist opportunity to DB (both dry-run and real, dismissed and approved)
-		if e.db != nil {
-			dbOpp := &state.DigestOpportunity{
-				Summary:    opp.Summary,
-				Category:   opp.Category,
-				Confidence: opp.Confidence,
-				EstSize:    opp.EstSize,
-				Channel:    msg.Channel,
-				Message:    msg.Text,
-				Keywords:   strings.Join(opp.Keywords, ","),
-				DryRun:     e.cfg.DryRun,
-				Dismissed:  dismissed,
-				Reasoning:  reasoning,
-				CreatedAt:  time.Now(),
-			}
-			if err := e.db.SaveDigestOpportunity(dbOpp); err != nil {
-				slog.Warn("failed to save digest opportunity", "error", err)
+		// Update the DB row now that investigation is complete
+		if dbOpp != nil {
+			dbOpp.Dismissed = dismissed
+			dbOpp.Reasoning = reasoning
+			dbOpp.Investigating = false
+			if err := e.db.UpdateDigestOpportunity(dbOpp); err != nil {
+				slog.Warn("failed to update digest opportunity", "error", err)
 			}
 		}
 

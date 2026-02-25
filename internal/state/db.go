@@ -118,18 +118,19 @@ func migrate(db *sql.DB) error {
 		);
 
 		CREATE TABLE IF NOT EXISTS digest_opportunities (
-			id         INTEGER PRIMARY KEY AUTOINCREMENT,
-			summary    TEXT NOT NULL,
-			category   TEXT NOT NULL,
-			confidence REAL NOT NULL,
-			est_size   TEXT NOT NULL,
-			channel    TEXT,
-			message    TEXT,
-			keywords   TEXT,
-			dry_run    BOOLEAN NOT NULL DEFAULT TRUE,
-			dismissed  BOOLEAN NOT NULL DEFAULT FALSE,
-			reasoning  TEXT NOT NULL DEFAULT '',
-			created_at DATETIME NOT NULL
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			summary       TEXT NOT NULL,
+			category      TEXT NOT NULL,
+			confidence    REAL NOT NULL,
+			est_size      TEXT NOT NULL,
+			channel       TEXT,
+			message       TEXT,
+			keywords      TEXT,
+			dry_run       BOOLEAN NOT NULL DEFAULT TRUE,
+			dismissed     BOOLEAN NOT NULL DEFAULT FALSE,
+			reasoning     TEXT NOT NULL DEFAULT '',
+			investigating BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at    DATETIME NOT NULL
 		);
 	`)
 	if err != nil {
@@ -164,6 +165,15 @@ func migrate(db *sql.DB) error {
 	if ciExhaustedExists == 0 {
 		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN ci_exhausted_notified BOOLEAN DEFAULT FALSE`); err != nil {
 			slog.Warn("migration: failed to add ci_exhausted_notified column", "error", err)
+		}
+	}
+
+	// Add investigating column for existing databases that predate investigation visibility.
+	var investigatingExists int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('digest_opportunities') WHERE name = 'investigating'`).Scan(&investigatingExists)
+	if investigatingExists == 0 {
+		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN investigating BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
+			slog.Warn("migration: failed to add investigating column", "error", err)
 		}
 	}
 
@@ -442,30 +452,49 @@ func (d *DB) Stats() (*Stats, error) {
 
 // DigestOpportunity represents a potential one-shot fix found by the digest engine.
 type DigestOpportunity struct {
-	ID         int
-	Summary    string
-	Category   string
-	Confidence float64
-	EstSize    string
-	Channel    string
-	Message    string
-	Keywords   string
-	DryRun     bool
-	Dismissed  bool
-	Reasoning  string
-	CreatedAt  time.Time
+	ID            int
+	Summary       string
+	Category      string
+	Confidence    float64
+	EstSize       string
+	Channel       string
+	Message       string
+	Keywords      string
+	DryRun        bool
+	Dismissed     bool
+	Reasoning     string
+	Investigating bool
+	CreatedAt     time.Time
 }
 
 // SaveDigestOpportunity persists a digest opportunity to the database.
+// Returns the auto-generated ID in opp.ID.
 func (d *DB) SaveDigestOpportunity(opp *DigestOpportunity) error {
 	ctx, cancel := dbCtx()
 	defer cancel()
-	_, err := d.db.ExecContext(ctx, `
-		INSERT INTO digest_opportunities (summary, category, confidence, est_size, channel, message, keywords, dry_run, dismissed, reasoning, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	result, err := d.db.ExecContext(ctx, `
+		INSERT INTO digest_opportunities (summary, category, confidence, est_size, channel, message, keywords, dry_run, dismissed, reasoning, investigating, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		opp.Summary, opp.Category, opp.Confidence, opp.EstSize,
 		opp.Channel, opp.Message, opp.Keywords, opp.DryRun,
-		opp.Dismissed, opp.Reasoning, opp.CreatedAt,
+		opp.Dismissed, opp.Reasoning, opp.Investigating, opp.CreatedAt,
+	)
+	if err != nil {
+		return err
+	}
+	id, _ := result.LastInsertId()
+	opp.ID = int(id)
+	return nil
+}
+
+// UpdateDigestOpportunity updates an existing opportunity after investigation completes.
+func (d *DB) UpdateDigestOpportunity(opp *DigestOpportunity) error {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx, `
+		UPDATE digest_opportunities SET dry_run = ?, dismissed = ?, reasoning = ?, investigating = ?
+		WHERE id = ?`,
+		opp.DryRun, opp.Dismissed, opp.Reasoning, opp.Investigating, opp.ID,
 	)
 	return err
 }
@@ -556,7 +585,7 @@ func keywordOverlap(a, b map[string]bool) float64 {
 // RecentDigestOpportunities returns the most recent digest opportunities, newest first.
 func (d *DB) RecentDigestOpportunities(limit int) ([]*DigestOpportunity, error) {
 	rows, err := d.db.Query(
-		"SELECT id, summary, category, confidence, est_size, channel, message, keywords, dry_run, dismissed, reasoning, created_at FROM digest_opportunities ORDER BY created_at DESC LIMIT ?",
+		"SELECT id, summary, category, confidence, est_size, channel, message, keywords, dry_run, dismissed, reasoning, investigating, created_at FROM digest_opportunities ORDER BY created_at DESC LIMIT ?",
 		limit,
 	)
 	if err != nil {
@@ -567,12 +596,40 @@ func (d *DB) RecentDigestOpportunities(limit int) ([]*DigestOpportunity, error) 
 	var opps []*DigestOpportunity
 	for rows.Next() {
 		var opp DigestOpportunity
-		if err := rows.Scan(&opp.ID, &opp.Summary, &opp.Category, &opp.Confidence, &opp.EstSize, &opp.Channel, &opp.Message, &opp.Keywords, &opp.DryRun, &opp.Dismissed, &opp.Reasoning, &opp.CreatedAt); err != nil {
+		if err := rows.Scan(&opp.ID, &opp.Summary, &opp.Category, &opp.Confidence, &opp.EstSize, &opp.Channel, &opp.Message, &opp.Keywords, &opp.DryRun, &opp.Dismissed, &opp.Reasoning, &opp.Investigating, &opp.CreatedAt); err != nil {
 			return nil, err
 		}
 		opps = append(opps, &opp)
 	}
 	return opps, rows.Err()
+}
+
+// DigestCounts holds aggregate counts across all digest opportunities.
+type DigestCounts struct {
+	Approved      int
+	Dismissed     int
+	DryRun        int
+	Investigating int
+}
+
+// DigestOpportunityCounts returns aggregate counts across all opportunities in the DB.
+func (d *DB) DigestOpportunityCounts() (*DigestCounts, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+
+	var c DigestCounts
+	err := d.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(CASE WHEN investigating = TRUE THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN dismissed = TRUE AND investigating = FALSE THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN dry_run = TRUE AND dismissed = FALSE AND investigating = FALSE THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN dry_run = FALSE AND dismissed = FALSE AND investigating = FALSE THEN 1 ELSE 0 END), 0)
+		FROM digest_opportunities`,
+	).Scan(&c.Investigating, &c.Dismissed, &c.DryRun, &c.Approved)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // DaemonStats holds live daemon metrics written periodically while running.

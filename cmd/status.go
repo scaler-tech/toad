@@ -65,28 +65,30 @@ func runStatus(cmd *cobra.Command, args []string) error {
 }
 
 type apiResponse struct {
-	Daemon        *apiDaemon       `json:"daemon"`
-	Integrations  []apiIntegration `json:"integrations"`
-	Stats         *state.Stats     `json:"stats"`
-	Active        []apiRun         `json:"active"`
-	History       []apiRun         `json:"history"`
-	Watches       []apiWatch       `json:"watches"`
-	Opportunities []apiOpportunity `json:"opportunities"`
-	Config        *apiConfig       `json:"config,omitempty"`
-	CCUsage       *apiCCUsage      `json:"cc_usage,omitempty"`
-	Now           int64            `json:"now"`
+	Daemon        *apiDaemon        `json:"daemon"`
+	Integrations  []apiIntegration  `json:"integrations"`
+	Stats         *state.Stats      `json:"stats"`
+	Active        []apiRun          `json:"active"`
+	History       []apiRun          `json:"history"`
+	Watches       []apiWatch        `json:"watches"`
+	Opportunities []apiOpportunity  `json:"opportunities"`
+	DigestCounts  *state.DigestCounts `json:"digest_counts,omitempty"`
+	Config        *apiConfig        `json:"config,omitempty"`
+	CCUsage       *apiCCUsage       `json:"cc_usage,omitempty"`
+	Now           int64             `json:"now"`
 }
 
 type apiOpportunity struct {
-	Summary    string  `json:"summary"`
-	Category   string  `json:"category"`
-	Confidence float64 `json:"confidence"`
-	EstSize    string  `json:"est_size"`
-	Channel    string  `json:"channel"`
-	DryRun     bool    `json:"dry_run"`
-	Dismissed  bool    `json:"dismissed"`
-	Reasoning  string  `json:"reasoning,omitempty"`
-	CreatedAt  int64   `json:"created_at"`
+	Summary       string  `json:"summary"`
+	Category      string  `json:"category"`
+	Confidence    float64 `json:"confidence"`
+	EstSize       string  `json:"est_size"`
+	Channel       string  `json:"channel"`
+	DryRun        bool    `json:"dry_run"`
+	Dismissed     bool    `json:"dismissed"`
+	Investigating bool    `json:"investigating"`
+	Reasoning     string  `json:"reasoning,omitempty"`
+	CreatedAt     int64   `json:"created_at"`
 }
 
 type apiIntegration struct {
@@ -334,16 +336,21 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 
 		for _, o := range opportunities {
 			resp.Opportunities = append(resp.Opportunities, apiOpportunity{
-				Summary:    o.Summary,
-				Category:   o.Category,
-				Confidence: o.Confidence,
-				EstSize:    o.EstSize,
-				Channel:    o.Channel,
-				DryRun:     o.DryRun,
-				Dismissed:  o.Dismissed,
-				Reasoning:  o.Reasoning,
-				CreatedAt:  o.CreatedAt.Unix(),
+				Summary:       o.Summary,
+				Category:      o.Category,
+				Confidence:    o.Confidence,
+				EstSize:       o.EstSize,
+				Channel:       o.Channel,
+				DryRun:        o.DryRun,
+				Dismissed:     o.Dismissed,
+				Investigating: o.Investigating,
+				Reasoning:     o.Reasoning,
+				CreatedAt:     o.CreatedAt.Unix(),
 			})
+		}
+
+		if digestCounts, err := db.DigestOpportunityCounts(); err == nil {
+			resp.DigestCounts = digestCounts
 		}
 
 		if cfg != nil {
@@ -1055,9 +1062,11 @@ async function refresh() {
     // Digest panel
     const dsec = document.getElementById('digest-section');
     const opps = d.opportunities || [];
-    const approvedCount = opps.filter(o => !o.dismissed && !o.dry_run).length;
-    const dismissedCount = opps.filter(o => o.dismissed).length;
-    const dryRunCount = opps.filter(o => o.dry_run && !o.dismissed).length;
+    const dc = d.digest_counts || {};
+    const approvedCount = dc.Approved || 0;
+    const dismissedCount = dc.Dismissed || 0;
+    const dryRunCount = dc.DryRun || 0;
+    const investigatingCount = dc.Investigating || 0;
     if (dm.running) {
       dsec.style.display = '';
       if (dm.digest_enabled) {
@@ -1070,9 +1079,10 @@ async function refresh() {
         document.getElementById('d-next').textContent =
           dm.digest_next_flush ? 'in ' + relTime(dm.digest_next_flush, now) : '-';
         document.getElementById('d-processed').textContent = num(dm.digest_processed);
-        document.getElementById('d-opps').textContent = num(dm.digest_opportunities);
+        document.getElementById('d-opps').textContent = num(approvedCount + dismissedCount + dryRunCount + investigatingCount);
         let approvedText = '<span style="color:var(--green)">' + approvedCount + '</span> / <span style="color:var(--red)">' + dismissedCount + '</span>';
         if (dryRunCount > 0) approvedText += ' <span style="color:var(--dim)">(' + dryRunCount + ' dry-run)</span>';
+        if (investigatingCount > 0) approvedText += ' <span style="color:var(--amber)">(' + investigatingCount + ' investigating)</span>';
         document.getElementById('d-approved').innerHTML = approvedText;
         document.getElementById('d-spawns').textContent = num(dm.digest_spawns);
       } else {
@@ -1116,7 +1126,9 @@ async function refresh() {
           const o = opps[i];
           const hidden = !oppsExpanded && i >= MAX_VISIBLE ? ' display:none;' : '';
           let obadge;
-          if (o.dismissed) {
+          if (o.investigating) {
+            obadge = '<span class="badge badge-running"><span class="spinner"></span> investigating</span>';
+          } else if (o.dismissed) {
             obadge = '<span class="badge badge-failed">dismissed</span>';
           } else if (o.dry_run) {
             obadge = '<span class="badge badge-validating">dry-run</span>';
