@@ -31,9 +31,9 @@ type wizardStep int
 
 const (
 	stepWelcome wizardStep = iota
+	stepSlackGuide
 	stepSlack
 	stepRepo
-	stepRepoCommands
 	stepToadKing
 	stepAdvancedAsk
 	stepAdvanced
@@ -45,9 +45,9 @@ var stepNames = []string{"Slack", "Repo", "Toad King", "Finish"}
 
 func stepIndex(s wizardStep) int {
 	switch s {
-	case stepWelcome, stepSlack:
+	case stepWelcome, stepSlackGuide, stepSlack:
 		return 0
-	case stepRepo, stepRepoCommands:
+	case stepRepo:
 		return 1
 	case stepToadKing:
 		return 2
@@ -76,12 +76,9 @@ type wizardModel struct {
 	repoNameInput textinput.Model
 	detected      repoDefaults
 
-	// Repo commands
-	testCmdInput    textinput.Model
-	lintCmdInput    textinput.Model
-	branchOptions   []string
-	branchCursor    int
-	cmdFocusedField int // 0=test, 1=lint, 2=branch
+	// Repo detection
+	branchOptions []string
+	branchCursor  int
 
 	// Toad King
 	toadKingCursor int // 0=dry-run, 1=live, 2=off
@@ -89,18 +86,22 @@ type wizardModel struct {
 	// Advanced ask
 	advancedCursor int // 0=no, 1=yes
 
-	// Advanced settings
-	advSection    int // which advanced section
-	advCursor     int // cursor within section
-	channelsInput textinput.Model
-	emojiInput    textinput.Model
-	keywordsInput textinput.Model
-	claudeModel   int // 0=sonnet, 1=opus, 2=haiku
-	triageModel   int // 0=haiku, 1=sonnet
-	autoSpawn     bool
-	autoMerge     bool
-	labelsInput   textinput.Model
-	logLevel      int // 0=debug, 1=info, 2=warn, 3=error
+	// Advanced settings — 5 sections:
+	// 0=triggers, 1=validation, 2=models, 3=repo opts, 4=log
+	advSection       int
+	advCursor        int
+	channelsInput    textinput.Model
+	emojiInput       textinput.Model
+	keywordsInput    textinput.Model
+	customValidation bool // enable test/lint commands
+	testCmdInput     textinput.Model
+	lintCmdInput     textinput.Model
+	claudeModel      int // 0=sonnet, 1=opus, 2=haiku
+	triageModel      int // 0=haiku, 1=sonnet
+	autoSpawn        bool
+	autoMerge        bool
+	labelsInput      textinput.Model
+	logLevel         int // 0=debug, 1=info, 2=warn, 3=error
 
 	// Result
 	configWritten bool
@@ -186,12 +187,12 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.step {
 		case stepWelcome:
 			return m.updateWelcome(msg)
+		case stepSlackGuide:
+			return m.updateSlackGuide(msg)
 		case stepSlack:
 			return m.updateSlack(msg)
 		case stepRepo:
 			return m.updateRepo(msg)
-		case stepRepoCommands:
-			return m.updateRepoCommands(msg)
 		case stepToadKing:
 			return m.updateToadKing(msg)
 		case stepAdvancedAsk:
@@ -226,16 +227,9 @@ func (m wizardModel) forwardToActiveInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.repoNameInput, cmd = m.repoNameInput.Update(msg)
 		}
-	case stepRepoCommands:
-		switch m.cmdFocusedField {
-		case 0:
-			m.testCmdInput, cmd = m.testCmdInput.Update(msg)
-		case 1:
-			m.lintCmdInput, cmd = m.lintCmdInput.Update(msg)
-		}
 	case stepAdvanced:
 		switch m.advSection {
-		case 0:
+		case 0: // triggers
 			switch m.advCursor {
 			case 0:
 				m.channelsInput, cmd = m.channelsInput.Update(msg)
@@ -244,7 +238,14 @@ func (m wizardModel) forwardToActiveInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case 2:
 				m.keywordsInput, cmd = m.keywordsInput.Update(msg)
 			}
-		case 2:
+		case 1: // validation
+			switch m.advCursor {
+			case 1:
+				m.testCmdInput, cmd = m.testCmdInput.Update(msg)
+			case 2:
+				m.lintCmdInput, cmd = m.lintCmdInput.Update(msg)
+			}
+		case 3: // repo opts
 			if m.advCursor == 1 {
 				m.labelsInput, cmd = m.labelsInput.Update(msg)
 			}
@@ -258,12 +259,24 @@ func (m wizardModel) forwardToActiveInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m wizardModel) updateWelcome(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter", " ":
-		m.step = stepSlack
-		m.appTokenInput.Focus()
+		m.step = stepSlackGuide
 		return m, nil
 	case "q", "esc":
 		m.quitting = true
 		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m wizardModel) updateSlackGuide(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", " ":
+		m.step = stepSlack
+		m.appTokenInput.Focus()
+		return m, nil
+	case "esc":
+		m.step = stepWelcome
+		return m, nil
 	}
 	return m, nil
 }
@@ -302,7 +315,7 @@ func (m wizardModel) updateSlack(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focusedInput = 0
 		return m, nil
 	case "esc":
-		m.step = stepWelcome
+		m.step = stepSlackGuide
 		m.appTokenInput.Blur()
 		m.botTokenInput.Blur()
 		return m, nil
@@ -359,7 +372,6 @@ func (m wizardModel) updateRepo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if b := m.detected.DefaultBranch; b != "main" && b != "master" && b != "develop" {
 			m.branchOptions = append([]string{b}, m.branchOptions...)
 		}
-		// Select detected branch
 		for i, b := range m.branchOptions {
 			if b == m.detected.DefaultBranch {
 				m.branchCursor = i
@@ -367,9 +379,7 @@ func (m wizardModel) updateRepo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		m.step = stepRepoCommands
-		m.testCmdInput.Focus()
-		m.cmdFocusedField = 0
+		m.step = stepToadKing
 		return m, nil
 	case "esc":
 		m.step = stepSlack
@@ -389,102 +399,6 @@ func (m wizardModel) updateRepo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m wizardModel) updateRepoCommands(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "tab":
-		m.testCmdInput.Blur()
-		m.lintCmdInput.Blur()
-		m.cmdFocusedField = (m.cmdFocusedField + 1) % 3
-		switch m.cmdFocusedField {
-		case 0:
-			m.testCmdInput.Focus()
-		case 1:
-			m.lintCmdInput.Focus()
-		}
-		return m, nil
-	case "shift+tab":
-		m.testCmdInput.Blur()
-		m.lintCmdInput.Blur()
-		m.cmdFocusedField = (m.cmdFocusedField + 2) % 3
-		switch m.cmdFocusedField {
-		case 0:
-			m.testCmdInput.Focus()
-		case 1:
-			m.lintCmdInput.Focus()
-		}
-		return m, nil
-	case "enter":
-		if m.cmdFocusedField == 2 {
-			// On branch selector, enter confirms
-			m.step = stepToadKing
-			m.testCmdInput.Blur()
-			m.lintCmdInput.Blur()
-			return m, nil
-		}
-		// Tab forward from text inputs
-		m.testCmdInput.Blur()
-		m.lintCmdInput.Blur()
-		m.cmdFocusedField = (m.cmdFocusedField + 1) % 3
-		switch m.cmdFocusedField {
-		case 0:
-			m.testCmdInput.Focus()
-		case 1:
-			m.lintCmdInput.Focus()
-		}
-		return m, nil
-	case "up":
-		if m.cmdFocusedField == 2 {
-			if m.branchCursor > 0 {
-				m.branchCursor--
-			}
-			return m, nil
-		}
-		m.testCmdInput.Blur()
-		m.lintCmdInput.Blur()
-		m.cmdFocusedField = (m.cmdFocusedField + 2) % 3
-		switch m.cmdFocusedField {
-		case 0:
-			m.testCmdInput.Focus()
-		case 1:
-			m.lintCmdInput.Focus()
-		}
-		return m, nil
-	case "down":
-		if m.cmdFocusedField == 2 {
-			if m.branchCursor < len(m.branchOptions)-1 {
-				m.branchCursor++
-			}
-			return m, nil
-		}
-		m.testCmdInput.Blur()
-		m.lintCmdInput.Blur()
-		m.cmdFocusedField = (m.cmdFocusedField + 1) % 3
-		switch m.cmdFocusedField {
-		case 0:
-			m.testCmdInput.Focus()
-		case 1:
-			m.lintCmdInput.Focus()
-		}
-		return m, nil
-	case "esc":
-		m.step = stepRepo
-		m.testCmdInput.Blur()
-		m.lintCmdInput.Blur()
-		m.repoPathInput.Focus()
-		m.focusedInput = 0
-		return m, nil
-	default:
-		var cmd tea.Cmd
-		switch m.cmdFocusedField {
-		case 0:
-			m.testCmdInput, cmd = m.testCmdInput.Update(msg)
-		case 1:
-			m.lintCmdInput, cmd = m.lintCmdInput.Update(msg)
-		}
-		return m, cmd
-	}
-}
-
 func (m wizardModel) updateToadKing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
@@ -498,9 +412,9 @@ func (m wizardModel) updateToadKing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		m.step = stepAdvancedAsk
 	case "esc":
-		m.step = stepRepoCommands
-		m.testCmdInput.Focus()
-		m.cmdFocusedField = 0
+		m.step = stepRepo
+		m.repoPathInput.Focus()
+		m.focusedInput = 0
 	}
 	return m, nil
 }
@@ -542,11 +456,13 @@ func (m wizardModel) updateAdvanced(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.advSection {
 	case 0: // Channels & Triggers
 		return m.updateAdvTriggers(msg)
-	case 1: // AI Models
+	case 1: // Validation Commands
+		return m.updateAdvValidation(msg)
+	case 2: // AI Models
 		return m.updateAdvModels(msg)
-	case 2: // Repo Options
+	case 3: // Repo Options
 		return m.updateAdvRepoOpts(msg)
-	case 3: // Log Level
+	case 4: // Log Level
 		return m.updateAdvLog(msg)
 	}
 	return m, nil
@@ -566,7 +482,7 @@ func (m wizardModel) updateAdvTriggers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		m.blurAllAdvanced()
-		m.advSection = 1
+		m.advSection = 1 // validation
 		m.advCursor = 0
 		return m, nil
 	default:
@@ -581,6 +497,67 @@ func (m wizardModel) updateAdvTriggers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
+}
+
+func (m wizardModel) updateAdvValidation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if !m.customValidation {
+		// Toggle is shown — only handle toggle and enter
+		switch msg.String() {
+		case " ", "left", "right":
+			m.customValidation = true
+			m.advCursor = 1
+			m.testCmdInput.Focus()
+			return m, nil
+		case "enter":
+			m.blurAllAdvanced()
+			m.advSection = 2 // models
+			m.advCursor = 0
+		}
+		return m, nil
+	}
+
+	// Custom validation enabled — 3 fields: toggle(0), test(1), lint(2)
+	switch msg.String() {
+	case "tab", "down":
+		m.blurAllAdvanced()
+		m.advCursor = (m.advCursor + 1) % 3
+		m.focusAdvancedField()
+		return m, nil
+	case "shift+tab", "up":
+		m.blurAllAdvanced()
+		m.advCursor = (m.advCursor + 2) % 3
+		m.focusAdvancedField()
+		return m, nil
+	case " ":
+		if m.advCursor == 0 {
+			m.customValidation = false
+			m.advCursor = 0
+			m.blurAllAdvanced()
+			return m, nil
+		}
+	case "left", "right":
+		if m.advCursor == 0 {
+			m.customValidation = false
+			m.advCursor = 0
+			m.blurAllAdvanced()
+			return m, nil
+		}
+	case "enter":
+		m.blurAllAdvanced()
+		m.advSection = 2 // models
+		m.advCursor = 0
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		switch m.advCursor {
+		case 1:
+			m.testCmdInput, cmd = m.testCmdInput.Update(msg)
+		case 2:
+			m.lintCmdInput, cmd = m.lintCmdInput.Update(msg)
+		}
+		return m, cmd
+	}
+	return m, nil
 }
 
 func (m wizardModel) updateAdvModels(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -620,7 +597,7 @@ func (m wizardModel) updateAdvModels(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.autoSpawn = !m.autoSpawn
 		}
 	case "enter":
-		m.advSection = 2
+		m.advSection = 3 // repo opts
 		m.advCursor = 0
 	}
 	return m, nil
@@ -650,7 +627,7 @@ func (m wizardModel) updateAdvRepoOpts(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		m.blurAllAdvanced()
-		m.advSection = 3
+		m.advSection = 4 // log
 		m.advCursor = 0
 	default:
 		if m.advCursor == 1 {
@@ -682,11 +659,14 @@ func (m *wizardModel) blurAllAdvanced() {
 	m.channelsInput.Blur()
 	m.emojiInput.Blur()
 	m.keywordsInput.Blur()
+	m.testCmdInput.Blur()
+	m.lintCmdInput.Blur()
 	m.labelsInput.Blur()
 }
 
 func (m *wizardModel) focusAdvancedField() {
-	if m.advSection == 0 {
+	switch m.advSection {
+	case 0: // triggers
 		switch m.advCursor {
 		case 0:
 			m.channelsInput.Focus()
@@ -694,6 +674,13 @@ func (m *wizardModel) focusAdvancedField() {
 			m.emojiInput.Focus()
 		case 2:
 			m.keywordsInput.Focus()
+		}
+	case 1: // validation
+		switch m.advCursor {
+		case 1:
+			m.testCmdInput.Focus()
+		case 2:
+			m.lintCmdInput.Focus()
 		}
 	}
 }
@@ -729,6 +716,12 @@ func (m *wizardModel) writeConfig() error {
 
 	absPath, _ := filepath.Abs(m.repoPathInput.Value())
 
+	var testCmd, lintCmd string
+	if m.customValidation {
+		testCmd = m.testCmdInput.Value()
+		lintCmd = m.lintCmdInput.Value()
+	}
+
 	data := templateData{
 		Slack: slackTemplateData{
 			AppToken: m.appTokenInput.Value(),
@@ -740,8 +733,8 @@ func (m *wizardModel) writeConfig() error {
 		Repos: []repoTemplateData{{
 			Name:          strings.TrimSpace(m.repoNameInput.Value()),
 			Path:          absPath,
-			TestCommand:   m.testCmdInput.Value(),
-			LintCommand:   m.lintCmdInput.Value(),
+			TestCommand:   testCmd,
+			LintCommand:   lintCmd,
 			DefaultBranch: m.branchOptions[m.branchCursor],
 			AutoMerge:     m.autoMerge,
 			PRLabels:      parseCSV(m.labelsInput.Value()),
@@ -782,7 +775,9 @@ func (m *wizardModel) writeConfig() error {
 
 func (m wizardModel) View() tea.View {
 	if m.quitting {
-		return tea.NewView("")
+		v := tea.NewView("")
+		v.AltScreen = true
+		return v
 	}
 
 	w := m.contentWidth()
@@ -798,12 +793,12 @@ func (m wizardModel) View() tea.View {
 	switch m.step {
 	case stepWelcome:
 		b.WriteString(m.viewWelcome())
+	case stepSlackGuide:
+		b.WriteString(m.viewSlackGuide())
 	case stepSlack:
 		b.WriteString(m.viewSlack())
 	case stepRepo:
 		b.WriteString(m.viewRepo())
-	case stepRepoCommands:
-		b.WriteString(m.viewRepoCommands())
 	case stepToadKing:
 		b.WriteString(m.viewToadKing())
 	case stepAdvancedAsk:
@@ -887,14 +882,50 @@ func (m wizardModel) viewWelcome() string {
 	return b.String()
 }
 
+func (m wizardModel) viewSlackGuide() string {
+	var b strings.Builder
+
+	b.WriteString(tui.TitleStyle.Render("Slack App Setup"))
+	b.WriteString("\n\n")
+	b.WriteString("Create a Slack app before continuing:\n\n")
+
+	steps := []struct {
+		num  string
+		text string
+		detail string
+	}{
+		{"1", "Go to https://api.slack.com/apps", "Create New App → From scratch"},
+		{"2", "Enable Socket Mode", "Settings → Socket Mode → toggle on"},
+		{"3", "Generate an App-Level Token", "Settings → Basic Information → App-Level Tokens\n     Scope: " + tui.AccentStyle.Render("connections:write") + "  (token starts with xapp-)"},
+		{"4", "Add Bot Token Scopes", "OAuth & Permissions → Scopes → Bot Token Scopes:\n" +
+			"     " + tui.AccentStyle.Render("app_mentions:read") + "    " + tui.AccentStyle.Render("channels:history") + "\n" +
+			"     " + tui.AccentStyle.Render("channels:join") + "        " + tui.AccentStyle.Render("channels:read") + "\n" +
+			"     " + tui.AccentStyle.Render("chat:write") + "           " + tui.AccentStyle.Render("groups:history") + "\n" +
+			"     " + tui.AccentStyle.Render("groups:read") + "          " + tui.AccentStyle.Render("reactions:read") + "\n" +
+			"     " + tui.AccentStyle.Render("reactions:write") + "      " + tui.AccentStyle.Render("users:read")},
+		{"5", "Subscribe to events", "Event Subscriptions → toggle on → Subscribe to bot events:\n" +
+			"     " + tui.AccentStyle.Render("app_mention") + "          " + tui.AccentStyle.Render("message.channels") + "\n" +
+			"     " + tui.AccentStyle.Render("message.groups") + "       " + tui.AccentStyle.Render("reaction_added")},
+		{"6", "Install to your workspace", "Copy the Bot User OAuth Token (starts with xoxb-)"},
+	}
+
+	for _, s := range steps {
+		b.WriteString(tui.SelectedStyle.Render(s.num + ". "))
+		b.WriteString(s.text + "\n")
+		b.WriteString(tui.DimStyle.Render("     " + s.detail))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(tui.DimStyle.Render("Press Enter when you have your tokens ready."))
+
+	return b.String()
+}
+
 func (m wizardModel) viewSlack() string {
 	var b strings.Builder
 
-	b.WriteString(tui.TitleStyle.Render("Slack Connection"))
-	b.WriteString("\n\n")
-	b.WriteString(tui.DimStyle.Render("Create a Slack app at https://api.slack.com/apps"))
-	b.WriteString("\n")
-	b.WriteString(tui.DimStyle.Render("Enable Socket Mode, add Bot Token Scopes, subscribe to events."))
+	b.WriteString(tui.TitleStyle.Render("Slack Tokens"))
 	b.WriteString("\n\n")
 
 	b.WriteString(m.fieldLabel("App-Level Token", m.focusedInput == 0))
@@ -925,50 +956,6 @@ func (m wizardModel) viewRepo() string {
 	b.WriteString(m.fieldLabel("Repo name", m.focusedInput == 1))
 	b.WriteString("\n")
 	b.WriteString(m.inputBorderStyle(m.focusedInput == 1).Render(m.repoNameInput.View()))
-
-	return b.String()
-}
-
-func (m wizardModel) viewRepoCommands() string {
-	var b strings.Builder
-
-	b.WriteString(tui.TitleStyle.Render("Validation Commands"))
-	b.WriteString("\n\n")
-
-	if m.detected.Stack != "" {
-		info := fmt.Sprintf("Detected %s project", m.detected.Stack)
-		if m.detected.Module != "" {
-			info += fmt.Sprintf(" (%s)", m.detected.Module)
-		}
-		b.WriteString(tui.SuccessStyle.Render("✓ " + info))
-	} else {
-		b.WriteString(tui.DimStyle.Render("Configure test and lint commands."))
-	}
-	b.WriteString("\n\n")
-
-	b.WriteString(m.fieldLabel("Test command", m.cmdFocusedField == 0))
-	b.WriteString("\n")
-	b.WriteString(m.inputBorderStyle(m.cmdFocusedField == 0).Render(m.testCmdInput.View()))
-	b.WriteString("\n\n")
-
-	b.WriteString(m.fieldLabel("Lint command", m.cmdFocusedField == 1))
-	b.WriteString("\n")
-	b.WriteString(m.inputBorderStyle(m.cmdFocusedField == 1).Render(m.lintCmdInput.View()))
-	b.WriteString("\n\n")
-
-	b.WriteString(m.fieldLabel("Default branch", m.cmdFocusedField == 2))
-	b.WriteString("\n")
-	for i, branch := range m.branchOptions {
-		b.WriteString("  ")
-		if m.cmdFocusedField == 2 && i == m.branchCursor {
-			b.WriteString(tui.SelectedStyle.Render("● " + branch))
-		} else if i == m.branchCursor {
-			b.WriteString(tui.DimStyle.Render("● " + branch))
-		} else {
-			b.WriteString(tui.DimStyle.Render("○ " + branch))
-		}
-		b.WriteString("\n")
-	}
 
 	return b.String()
 }
@@ -1036,10 +1023,12 @@ func (m wizardModel) viewAdvanced() string {
 	case 0:
 		return m.viewAdvTriggers()
 	case 1:
-		return m.viewAdvModels()
+		return m.viewAdvValidation()
 	case 2:
-		return m.viewAdvRepoOpts()
+		return m.viewAdvModels()
 	case 3:
+		return m.viewAdvRepoOpts()
+	case 4:
 		return m.viewAdvLog()
 	}
 	return ""
@@ -1050,7 +1039,7 @@ func (m wizardModel) viewAdvTriggers() string {
 
 	b.WriteString(tui.TitleStyle.Render("Channels & Triggers"))
 	b.WriteString("  ")
-	b.WriteString(tui.DimStyle.Render("(1/4)"))
+	b.WriteString(tui.DimStyle.Render("(1/5)"))
 	b.WriteString("\n\n")
 
 	fields := []struct {
@@ -1072,6 +1061,54 @@ func (m wizardModel) viewAdvTriggers() string {
 	return b.String()
 }
 
+func (m wizardModel) viewAdvValidation() string {
+	var b strings.Builder
+
+	b.WriteString(tui.TitleStyle.Render("Validation Commands"))
+	b.WriteString("  ")
+	b.WriteString(tui.DimStyle.Render("(2/5)"))
+	b.WriteString("\n\n")
+
+	b.WriteString(tui.DimStyle.Render("By default, Toad relies on CI checks for PR validation."))
+	b.WriteString("\n")
+	b.WriteString(tui.DimStyle.Render("Enable local validation to run tests/lint before pushing."))
+	b.WriteString("\n\n")
+
+	b.WriteString(m.fieldLabel("Enable local validation", m.advCursor == 0))
+	b.WriteString("  ")
+	if m.customValidation {
+		b.WriteString(tui.SelectedStyle.Render("[on]"))
+		b.WriteString(tui.DimStyle.Render("  off "))
+	} else {
+		b.WriteString(tui.DimStyle.Render(" on  "))
+		b.WriteString(tui.SelectedStyle.Render("[off]"))
+	}
+	b.WriteString("\n")
+
+	if m.customValidation {
+		if m.detected.Stack != "" {
+			info := fmt.Sprintf("Detected %s project", m.detected.Stack)
+			if m.detected.Module != "" {
+				info += fmt.Sprintf(" (%s)", m.detected.Module)
+			}
+			b.WriteString(tui.SuccessStyle.Render("  ✓ " + info))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+
+		b.WriteString(m.fieldLabel("Test command", m.advCursor == 1))
+		b.WriteString("\n")
+		b.WriteString(m.inputBorderStyle(m.advCursor == 1).Render(m.testCmdInput.View()))
+		b.WriteString("\n\n")
+
+		b.WriteString(m.fieldLabel("Lint command", m.advCursor == 2))
+		b.WriteString("\n")
+		b.WriteString(m.inputBorderStyle(m.advCursor == 2).Render(m.lintCmdInput.View()))
+	}
+
+	return b.String()
+}
+
 func (m wizardModel) viewAdvModels() string {
 	var b strings.Builder
 
@@ -1080,7 +1117,7 @@ func (m wizardModel) viewAdvModels() string {
 
 	b.WriteString(tui.TitleStyle.Render("AI Models"))
 	b.WriteString("  ")
-	b.WriteString(tui.DimStyle.Render("(2/4)"))
+	b.WriteString(tui.DimStyle.Render("(3/5)"))
 	b.WriteString("\n\n")
 
 	b.WriteString(m.fieldLabel("Tadpole model", m.advCursor == 0))
@@ -1127,7 +1164,7 @@ func (m wizardModel) viewAdvRepoOpts() string {
 
 	b.WriteString(tui.TitleStyle.Render("Repo Options"))
 	b.WriteString("  ")
-	b.WriteString(tui.DimStyle.Render("(3/4)"))
+	b.WriteString(tui.DimStyle.Render("(4/5)"))
 	b.WriteString("\n\n")
 
 	b.WriteString(m.fieldLabel("Auto-merge PRs", m.advCursor == 0))
@@ -1155,7 +1192,7 @@ func (m wizardModel) viewAdvLog() string {
 
 	b.WriteString(tui.TitleStyle.Render("Log Level"))
 	b.WriteString("  ")
-	b.WriteString(tui.DimStyle.Render("(4/4)"))
+	b.WriteString(tui.DimStyle.Render("(5/5)"))
 	b.WriteString("\n\n")
 
 	for i, level := range levels {
@@ -1190,8 +1227,12 @@ func (m wizardModel) viewSummary() string {
 		box.WriteString(m.summaryLine("Stack", m.detected.Stack))
 	}
 	box.WriteString(m.summaryLine("Branch", m.branchOptions[m.branchCursor]))
-	box.WriteString(m.summaryLine("Test", m.testCmdInput.Value()))
-	box.WriteString(m.summaryLine("Lint", m.lintCmdInput.Value()))
+	if m.customValidation {
+		box.WriteString(m.summaryLine("Test", m.testCmdInput.Value()))
+		box.WriteString(m.summaryLine("Lint", m.lintCmdInput.Value()))
+	} else {
+		box.WriteString(m.summaryLine("Validation", "CI only"))
+	}
 	box.WriteString(m.summaryLine("Toad King", toadKingModes[m.toadKingCursor]))
 	box.WriteString(m.summaryLine("Model", claudeModels[m.claudeModel]))
 
@@ -1231,21 +1272,26 @@ func (m wizardModel) helpText() string {
 	switch m.step {
 	case stepWelcome:
 		return tui.HelpStyle.Render("Enter start  •  Esc quit")
+	case stepSlackGuide:
+		return tui.HelpStyle.Render("Enter I've got my tokens  •  Esc back")
 	case stepSlack, stepRepo:
 		return tui.HelpStyle.Render("Tab/↓ next field  •  Enter continue  •  Esc back")
-	case stepRepoCommands:
-		return tui.HelpStyle.Render("Tab next field  •  ↑/↓ select branch  •  Enter continue  •  Esc back")
 	case stepToadKing:
 		return tui.HelpStyle.Render("↑/↓ select  •  Enter continue  •  Esc back")
 	case stepAdvancedAsk:
 		return tui.HelpStyle.Render("↑/↓ select  •  Enter continue  •  Esc back")
 	case stepAdvanced:
 		switch m.advSection {
-		case 0:
+		case 0: // triggers
 			return tui.HelpStyle.Render("Tab next field  •  Enter next section  •  Esc back")
-		case 1, 2:
+		case 1: // validation
+			if m.customValidation {
+				return tui.HelpStyle.Render("Tab next field  •  Space toggle  •  Enter next section  •  Esc back")
+			}
+			return tui.HelpStyle.Render("Space/←/→ enable  •  Enter next section  •  Esc back")
+		case 2, 3: // models, repo opts
 			return tui.HelpStyle.Render("Tab next  •  ←/→ change  •  Enter next section  •  Esc back")
-		case 3:
+		case 4: // log
 			return tui.HelpStyle.Render("↑/↓ select  •  Enter finish  •  Esc back")
 		}
 	case stepSummary:
@@ -1328,6 +1374,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	m := newWizardModel()
 	p := tea.NewProgram(m)
 	result, err := p.Run()
+	fmt.Println() // clean line after alt screen exit
 	if err != nil {
 		return fmt.Errorf("wizard error: %w", err)
 	}
@@ -1335,6 +1382,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 	final := result.(wizardModel)
 	if final.quitting && !final.configWritten {
 		fmt.Println("  Setup canceled.")
+	} else if final.configWritten {
+		fmt.Println(tui.StyledMessage("Config written to .toad.yaml"))
+		fmt.Println("  Start toad with: toad")
 	}
 
 	return nil
