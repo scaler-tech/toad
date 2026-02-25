@@ -48,7 +48,8 @@ type MessageHandler func(ctx context.Context, msg *IncomingMessage)
 type Client struct {
 	api          *slack.Client
 	socket       *socketmode.Client
-	channels     map[string]bool
+	cfgChannels  map[string]bool // channel names from config (empty = all)
+	channels     map[string]bool // resolved channel IDs to monitor (empty when cfgChannels is empty)
 	triggers     config.Triggers
 	handler      MessageHandler
 	botUserID    string
@@ -68,18 +69,20 @@ func NewClient(cfg config.SlackConfig) *Client {
 
 	socket := socketmode.New(api)
 
-	channels := make(map[string]bool, len(cfg.Channels))
+	// Store configured channel names; resolved to IDs during Run().
+	cfgChannels := make(map[string]bool, len(cfg.Channels))
 	for _, ch := range cfg.Channels {
-		channels[ch] = true
+		cfgChannels[ch] = true
 	}
 
 	return &Client{
-		api:      api,
-		socket:   socket,
-		channels: channels,
-		triggers: cfg.Triggers,
-		seen:     make(map[string]time.Time),
-		replies:  make(map[string]time.Time),
+		api:         api,
+		socket:      socket,
+		cfgChannels: cfgChannels,
+		channels:    make(map[string]bool),
+		triggers:    cfg.Triggers,
+		seen:        make(map[string]time.Time),
+		replies:     make(map[string]time.Time),
 	}
 }
 
@@ -98,16 +101,75 @@ func (c *Client) Run(ctx context.Context) error {
 	c.botUserID = authResp.UserID
 	slog.Info("authenticated with Slack", "bot_user_id", c.botUserID, "team", authResp.Team)
 
-	// Auto-join public channels the bot isn't already in
-	c.autoJoinPublicChannels()
+	// Join channels: if specific channels are configured, only join those;
+	// otherwise join all public channels.
+	if len(c.cfgChannels) > 0 {
+		c.joinConfiguredChannels()
+	} else {
+		c.joinAllPublicChannels()
+	}
 
 	go c.handleEvents(ctx)
 	return c.socket.RunContext(ctx)
 }
 
-// autoJoinPublicChannels discovers all public channels and joins any the bot isn't in yet.
-// Respects Slack rate limits by throttling join calls (~1/sec).
-func (c *Client) autoJoinPublicChannels() {
+// joinConfiguredChannels resolves configured channel names to IDs and joins only those.
+// Lists both public and private channels so private channels the bot was invited to
+// are also resolved and monitored.
+func (c *Client) joinConfiguredChannels() {
+	var joined, alreadyMember int
+	resolved := make(map[string]bool) // track which config names were found
+	for _, chType := range []string{"public_channel", "private_channel"} {
+		cursor := ""
+		for {
+			params := &slack.GetConversationsParameters{
+				Types:           []string{chType},
+				Limit:           200,
+				Cursor:          cursor,
+				ExcludeArchived: true,
+			}
+			channels, nextCursor, err := c.api.GetConversations(params)
+			if err != nil {
+				slog.Warn("failed to list channels", "type", chType, "error", err)
+				break
+			}
+			for _, ch := range channels {
+				if !c.cfgChannels[ch.Name] {
+					continue
+				}
+				c.channels[ch.ID] = true
+				resolved[ch.Name] = true
+				if ch.IsMember {
+					alreadyMember++
+					continue
+				}
+				// Can only join public channels; private channels require an invite.
+				if chType == "public_channel" {
+					if _, _, _, err := c.api.JoinConversation(ch.ID); err != nil {
+						slog.Warn("failed to join channel", "channel", ch.Name, "error", err)
+					} else {
+						joined++
+						slog.Debug("joined channel", "channel", ch.Name)
+					}
+					time.Sleep(time.Second)
+				}
+			}
+			if nextCursor == "" {
+				break
+			}
+			cursor = nextCursor
+		}
+	}
+	for name := range c.cfgChannels {
+		if !resolved[name] {
+			slog.Warn("configured channel not found — check name or invite toad for private channels", "channel", name)
+		}
+	}
+	slog.Info("channel join complete", "joined", joined, "already_member", alreadyMember)
+}
+
+// joinAllPublicChannels discovers all public channels and joins any the bot isn't in yet.
+func (c *Client) joinAllPublicChannels() {
 	var joined, skipped int
 	cursor := ""
 	for {
@@ -133,7 +195,6 @@ func (c *Client) autoJoinPublicChannels() {
 				joined++
 				slog.Debug("auto-joined channel", "channel", ch.Name)
 			}
-			// Slack Tier 3 rate limit: ~50 req/min for conversations.join
 			time.Sleep(time.Second)
 		}
 		if nextCursor == "" {
@@ -146,8 +207,9 @@ func (c *Client) autoJoinPublicChannels() {
 
 // inChannel checks if a channel should be monitored.
 // If no explicit channels are configured, all channels are monitored.
+// If channels are configured, only resolved channel IDs pass.
 func (c *Client) inChannel(channelID string) bool {
-	if len(c.channels) == 0 {
+	if len(c.cfgChannels) == 0 {
 		return true
 	}
 	return c.channels[channelID]

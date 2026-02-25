@@ -155,8 +155,9 @@ func (g *GitLabProvider) GetCIStatus(ctx context.Context, prNumber int, repoPath
 	}
 
 	var pipeline glabPipeline
-	if err := json.Unmarshal(mrStdout.Bytes(), &pipeline); err != nil { //nolint:nilerr // No pipeline or null — treat as success (no CI configured)
-		return &CIStatus{State: "success"}, nil
+	if err := json.Unmarshal(mrStdout.Bytes(), &pipeline); err != nil {
+		// No pipeline or null JSON — treat as success (no CI configured).
+		return &CIStatus{State: "success"}, nil //nolint:nilerr
 	}
 	if pipeline.ID == 0 {
 		return &CIStatus{State: "success"}, nil

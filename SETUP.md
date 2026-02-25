@@ -226,11 +226,11 @@ slack:
 |-------|------|---------|-------------|
 | `app_token` | string | *(required)* | Slack app-level token for Socket Mode (`xapp-...`) |
 | `bot_token` | string | *(required)* | Slack bot OAuth token (`xoxb-...`) |
-| `channels` | list | `[]` | Channels to monitor. Empty list means all public channels. |
+| `channels` | list | `[]` | Channels to monitor. Empty = join and monitor all public channels. When set, toad only joins listed channels. |
 | `triggers.emoji` | string | `"frog"` | React with this emoji on a toad reply to spawn a tadpole |
 | `triggers.keywords` | list | `["toad fix", "toad help"]` | Messages starting with these keywords trigger toad |
 
-**Tip:** If you set `channels` to an empty list, toad auto-joins and monitors all public channels. To restrict toad to specific channels, list them by name (without `#`).
+**Tip:** If you set `channels` to an empty list, toad auto-joins and monitors all public channels. To restrict toad to specific channels, list them by name (without `#`) — toad will only join those channels. Private channels work too: invite toad to the private channel and add its name to the list. Note that channel names are resolved to IDs at startup, so if you add a new channel to the config or invite toad to a new private channel, restart toad to pick it up.
 
 ---
 
