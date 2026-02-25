@@ -18,6 +18,7 @@ import (
 const (
 	keyEnter    = "enter"
 	keyEsc      = "esc"
+	keyTab      = "tab"
 	keyDown     = "down"
 	keyShiftTab = "shift+tab"
 )
@@ -290,7 +291,7 @@ func (m wizardModel) updateSlackGuide(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m wizardModel) updateSlack(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "tab", keyDown:
+	case keyTab, keyDown:
 		if m.focusedInput == 0 {
 			m.focusedInput = 1
 			m.appTokenInput.Blur()
@@ -339,7 +340,7 @@ func (m wizardModel) updateSlack(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m wizardModel) updateRepo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "tab", keyDown:
+	case keyTab, keyDown:
 		if m.focusedInput == 0 {
 			m.focusedInput = 1
 			m.repoPathInput.Blur()
@@ -476,7 +477,7 @@ func (m wizardModel) updateAdvanced(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m wizardModel) updateAdvTriggers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "tab", keyDown:
+	case keyTab, keyDown:
 		m.blurAllAdvanced()
 		m.advCursor = (m.advCursor + 1) % 3
 		m.focusAdvancedField()
@@ -524,7 +525,7 @@ func (m wizardModel) updateAdvValidation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Custom validation enabled — 3 fields: toggle(0), test(1), lint(2)
 	switch msg.String() {
-	case "tab", keyDown:
+	case keyTab, keyDown:
 		m.blurAllAdvanced()
 		m.advCursor = (m.advCursor + 1) % 3
 		m.focusAdvancedField()
@@ -568,7 +569,7 @@ func (m wizardModel) updateAdvValidation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m wizardModel) updateAdvModels(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "tab", keyDown:
+	case keyTab, keyDown:
 		m.advCursor = (m.advCursor + 1) % 3
 	case keyShiftTab, "up":
 		m.advCursor = (m.advCursor + 2) % 3
@@ -611,7 +612,7 @@ func (m wizardModel) updateAdvModels(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m wizardModel) updateAdvRepoOpts(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "tab", keyDown:
+	case keyTab, keyDown:
 		m.blurAllAdvanced()
 		m.advCursor = (m.advCursor + 1) % 2
 		if m.advCursor == 1 {
