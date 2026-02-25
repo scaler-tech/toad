@@ -17,6 +17,7 @@ type Config struct {
 	Claude       ClaudeConfig       `yaml:"claude"`
 	Digest       DigestConfig       `yaml:"digest"`
 	IssueTracker IssueTrackerConfig `yaml:"issue_tracker"`
+	VCS          VCSConfig          `yaml:"vcs"`
 	Log          LogConfig          `yaml:"log"`
 }
 
@@ -97,6 +98,10 @@ type IssueTrackerConfig struct {
 	FeatureLabelID string `yaml:"feature_label_id"`
 }
 
+type VCSConfig struct {
+	Platform string `yaml:"platform"` // "github" (default), "gitlab" (future)
+}
+
 type LogConfig struct {
 	Level string `yaml:"level"`
 	File  string `yaml:"file"`
@@ -142,6 +147,9 @@ func defaults() *Config {
 		IssueTracker: IssueTrackerConfig{
 			Enabled:  false,
 			Provider: "linear",
+		},
+		VCS: VCSConfig{
+			Platform: "github",
 		},
 		Log: LogConfig{
 			Level: "info",

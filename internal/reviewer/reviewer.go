@@ -2,13 +2,11 @@
 package reviewer
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +14,7 @@ import (
 	islack "github.com/hergen/toad/internal/slack"
 	"github.com/hergen/toad/internal/state"
 	"github.com/hergen/toad/internal/tadpole"
+	"github.com/hergen/toad/internal/vcs"
 )
 
 // SpawnFunc spawns a tadpole task. Typically wraps tadpole.Pool.Spawn.
@@ -27,6 +26,7 @@ type Watcher struct {
 	repos           []config.RepoConfig
 	spawn           SpawnFunc
 	slack           *islack.Client
+	vcs             vcs.Provider
 	interval        time.Duration
 	maxReviewRounds int
 	maxCIFixRounds  int
@@ -34,7 +34,7 @@ type Watcher struct {
 }
 
 // NewWatcher creates a PR review watcher.
-func NewWatcher(db *state.DB, repos []config.RepoConfig, spawn SpawnFunc, slack *islack.Client, maxReviewRounds, maxCIFixRounds int, triageModel string) *Watcher {
+func NewWatcher(db *state.DB, repos []config.RepoConfig, spawn SpawnFunc, slack *islack.Client, maxReviewRounds, maxCIFixRounds int, triageModel string, vcsProvider vcs.Provider) *Watcher {
 	if maxReviewRounds <= 0 {
 		maxReviewRounds = 3
 	}
@@ -46,6 +46,7 @@ func NewWatcher(db *state.DB, repos []config.RepoConfig, spawn SpawnFunc, slack 
 		repos:           repos,
 		spawn:           spawn,
 		slack:           slack,
+		vcs:             vcsProvider,
 		interval:        2 * time.Minute,
 		maxReviewRounds: maxReviewRounds,
 		maxCIFixRounds:  maxCIFixRounds,
@@ -95,23 +96,6 @@ func (w *Watcher) poll(ctx context.Context) {
 	}
 }
 
-// ghComment represents a review comment from the GitHub API.
-type ghComment struct {
-	ID   int    `json:"id"`
-	Body string `json:"body"`
-	Path string `json:"path"`
-	User struct {
-		Login string `json:"login"`
-		Type  string `json:"type"` // "User" or "Bot"
-	} `json:"user"`
-	CreatedAt string `json:"created_at"`
-}
-
-// ghPR represents PR state from the GitHub CLI.
-type ghPR struct {
-	State string `json:"state"` // "OPEN", "CLOSED", "MERGED"
-}
-
 func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 	// 0. Skip if a tadpole is already running for this thread — avoids branch collision
 	// when the previous fix is still in progress and the worktree holds the branch.
@@ -127,12 +111,12 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 	}
 
 	// 1. Check PR state — close the watch if merged/closed
-	prState, err := w.getPRState(ctx, watch.PRNumber, watch.RepoPath)
+	prState, err := w.vcs.GetPRState(ctx, watch.PRNumber, watch.RepoPath)
 	if err != nil {
 		return fmt.Errorf("getting PR state: %w", err)
 	}
-	if !strings.EqualFold(prState.State, "open") {
-		slog.Info("PR closed/merged, stopping watch", "pr", watch.PRNumber, "state", prState.State)
+	if !strings.EqualFold(prState, "open") {
+		slog.Info("PR closed/merged, stopping watch", "pr", watch.PRNumber, "state", prState)
 		return w.db.ClosePRWatch(watch.PRNumber)
 	}
 
@@ -160,30 +144,19 @@ func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch)
 		return false, nil
 	}
 
-	// Fetch both inline review comments AND conversation comments.
-	// GitHub has two separate APIs: pulls/{n}/comments for inline code review
-	// comments, and issues/{n}/comments for conversation-tab comments.
-	reviewComments, err := w.getReviewComments(ctx, watch.PRNumber, watch.RepoPath)
+	// Fetch all comments (review + conversation) via the VCS provider.
+	allComments, err := w.vcs.GetPRComments(ctx, watch.PRNumber, watch.RepoPath)
 	if err != nil {
-		slog.Warn("failed to get review comments, continuing", "pr", watch.PRNumber, "error", err)
+		slog.Warn("failed to get PR comments, continuing", "pr", watch.PRNumber, "error", err)
 	}
-	issueComments, err := w.getIssueComments(ctx, watch.PRNumber, watch.RepoPath)
-	if err != nil {
-		slog.Warn("failed to get issue comments, continuing", "pr", watch.PRNumber, "error", err)
-	}
-
-	// Merge both comment types — IDs are globally unique across GitHub
-	var allComments []ghComment
-	allComments = append(allComments, reviewComments...)
-	allComments = append(allComments, issueComments...)
 
 	// Filter to new comments from humans (not bots)
-	var newComments []ghComment
+	var newComments []vcs.PRComment
 	for _, c := range allComments {
 		if c.ID <= watch.LastCommentID {
 			continue
 		}
-		if c.User.Type == "Bot" {
+		if c.UserType == "Bot" {
 			continue
 		}
 		newComments = append(newComments, c)
@@ -191,8 +164,7 @@ func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch)
 
 	slog.Debug("PR review check",
 		"pr", watch.PRNumber,
-		"review_comments", len(reviewComments),
-		"issue_comments", len(issueComments),
+		"total_comments", len(allComments),
 		"new_human_comments", len(newComments),
 	)
 
@@ -261,132 +233,6 @@ func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch)
 	return true, nil
 }
 
-// ciStatus represents the aggregate CI status for a PR.
-type ciStatus struct {
-	State     string   // "pending", "success", "failure"
-	FailedIDs []string // GitHub Actions run IDs that failed
-}
-
-// ghCheck represents a single check run from `gh pr checks --json`.
-type ghCheck struct {
-	Name  string `json:"name"`
-	State string `json:"state"` // "PENDING", "SUCCESS", "FAILURE", "ERROR", etc.
-	Link  string `json:"link"`  // details URL, e.g. GitHub Actions run link
-}
-
-// getCIStatus checks the CI status for a PR using `gh pr checks`.
-func (w *Watcher) getCIStatus(ctx context.Context, prNumber int, repoPath string) (*ciStatus, error) {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "checks",
-		strconv.Itoa(prNumber),
-		"--json", "name,state,link",
-	)
-	cmd.Dir = repoPath
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-
-	var checks []ghCheck
-	if err := json.Unmarshal(stdout.Bytes(), &checks); err != nil {
-		return nil, fmt.Errorf("parsing checks: %w", err)
-	}
-
-	if len(checks) == 0 {
-		return &ciStatus{State: "success"}, nil
-	}
-
-	// Determine aggregate state
-	hasPending := false
-	hasFailure := false
-	failedIDs := make(map[string]bool)
-
-	for _, c := range checks {
-		state := strings.ToUpper(c.State)
-
-		switch {
-		case state == "PENDING" || state == "QUEUED" || state == "IN_PROGRESS":
-			hasPending = true
-		case state == "FAILURE" || state == "ERROR":
-			hasFailure = true
-			if id := extractRunID(c.Link); id != "" {
-				failedIDs[id] = true
-			}
-		}
-	}
-
-	result := &ciStatus{State: "success"}
-	if hasPending {
-		result.State = "pending"
-	}
-	if hasFailure {
-		result.State = "failure"
-		for id := range failedIDs {
-			result.FailedIDs = append(result.FailedIDs, id)
-		}
-	}
-	return result, nil
-}
-
-// extractRunID parses a GitHub Actions run ID from a details URL.
-// e.g. "https://github.com/owner/repo/actions/runs/12345/job/67890" → "12345"
-func extractRunID(detailsURL string) string {
-	const marker = "/actions/runs/"
-	idx := strings.Index(detailsURL, marker)
-	if idx < 0 {
-		return ""
-	}
-	rest := detailsURL[idx+len(marker):]
-	// Take everything up to the next "/" or end of string
-	if slashIdx := strings.Index(rest, "/"); slashIdx >= 0 {
-		rest = rest[:slashIdx]
-	}
-	// Validate it looks like a number
-	if _, err := strconv.ParseInt(rest, 10, 64); err != nil {
-		return ""
-	}
-	return rest
-}
-
-// getCIFailureLogs fetches failed CI logs using `gh run view --log-failed`.
-func (w *Watcher) getCIFailureLogs(ctx context.Context, failedRunIDs []string, repoPath string) string {
-	const maxPerRun = 8192
-	const maxTotal = 15360
-
-	var allLogs strings.Builder
-	for _, runID := range failedRunIDs {
-		cmd := exec.CommandContext(ctx, "gh", "run", "view", runID, "--log-failed")
-		cmd.Dir = repoPath
-
-		output, err := cmd.Output()
-		if err != nil {
-			slog.Warn("failed to fetch CI logs", "run_id", runID, "error", err)
-			continue
-		}
-
-		logText := string(output)
-		// Keep the tail of logs — that's where failures appear
-		if len(logText) > maxPerRun {
-			logText = logText[len(logText)-maxPerRun:]
-		}
-
-		fmt.Fprintf(&allLogs, "=== Run %s (failed) ===\n%s\n\n", runID, logText)
-
-		if allLogs.Len() >= maxTotal {
-			break
-		}
-	}
-
-	result := allLogs.String()
-	if len(result) > maxTotal {
-		result = result[len(result)-maxTotal:]
-	}
-	return result
-}
-
 // checkCI checks CI status for a PR and spawns a fix tadpole if CI failed.
 // Returns true if a fix tadpole was spawned.
 func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, error) {
@@ -405,7 +251,7 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 		return false, nil
 	}
 
-	ci, err := w.getCIStatus(ctx, watch.PRNumber, watch.RepoPath)
+	ci, err := w.vcs.GetCIStatus(ctx, watch.PRNumber, watch.RepoPath)
 	if err != nil {
 		slog.Warn("failed to get CI status", "pr", watch.PRNumber, "error", err)
 		return false, nil
@@ -431,7 +277,12 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 	// If found, merge it instead of spawning a tadpole — it's a free fix.
 	repo := config.RepoByPath(w.repos, watch.RepoPath)
 	if repo != nil && repo.MergeBotFixups {
-		if fixupPR := w.findBotFixupPR(ctx, watch.Branch, watch.RepoPath); fixupPR > 0 {
+		botPRs, listErr := w.vcs.ListBotPRs(ctx, watch.Branch, watch.RepoPath)
+		if listErr != nil {
+			slog.Debug("failed to list bot PRs", "branch", watch.Branch, "error", listErr)
+		}
+		if len(botPRs) > 0 {
+			fixupPR := botPRs[0]
 			slog.Info("bot fixup PR found", "pr", watch.PRNumber, "fixup_pr", fixupPR)
 
 			if w.slack != nil && watch.SlackChannel != "" && watch.SlackThread != "" {
@@ -439,15 +290,9 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 					fmt.Sprintf(":wrench: Merging bot fix-up PR #%d...", fixupPR))
 			}
 
-			mergeCmd := exec.CommandContext(ctx, "gh", "pr", "merge",
-				strconv.Itoa(fixupPR), "--squash", "--delete-branch")
-			mergeCmd.Dir = watch.RepoPath
-			var mergeStderr bytes.Buffer
-			mergeCmd.Stderr = &mergeStderr
-			if err := mergeCmd.Run(); err != nil {
+			if mergeErr := w.vcs.MergePR(ctx, fixupPR, watch.RepoPath); mergeErr != nil {
 				slog.Warn("failed to merge bot fixup PR, falling through to tadpole",
-					"fixup_pr", fixupPR, "error", err,
-					"stderr", strings.TrimSpace(mergeStderr.String()))
+					"fixup_pr", fixupPR, "error", mergeErr)
 			} else {
 				slog.Info("merged bot fixup PR", "fixup_pr", fixupPR, "parent_pr", watch.PRNumber)
 				return true, nil
@@ -455,7 +300,7 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 		}
 	}
 
-	logs := w.getCIFailureLogs(ctx, ci.FailedIDs, watch.RepoPath)
+	logs := w.vcs.GetCIFailureLogs(ctx, ci.FailedIDs, watch.RepoPath)
 
 	// Increment CI fix count only when we're actually spawning a fix tadpole
 	if err := w.db.IncrementCIFixCount(watch.PRNumber); err != nil {
@@ -529,7 +374,7 @@ Rules:
 - The summary should describe what code changes are needed (only if actionable)
 - Be conservative — when in doubt, it's actionable`
 
-func (w *Watcher) triageComments(ctx context.Context, prNumber int, comments []ghComment) (*commentTriage, error) {
+func (w *Watcher) triageComments(ctx context.Context, prNumber int, comments []vcs.PRComment) (*commentTriage, error) {
 	// Format comments for the prompt
 	var sb strings.Builder
 	for i, c := range comments {
@@ -538,7 +383,7 @@ func (w *Watcher) triageComments(ctx context.Context, prNumber int, comments []g
 		} else {
 			fmt.Fprintf(&sb, "[%d] (general comment)\n", i)
 		}
-		fmt.Fprintf(&sb, "    @%s: %s\n\n", c.User.Login, c.Body)
+		fmt.Fprintf(&sb, "    @%s: %s\n\n", c.UserLogin, c.Body)
 	}
 
 	prompt := fmt.Sprintf(commentTriagePrompt, prNumber, sb.String())
@@ -576,7 +421,7 @@ func (w *Watcher) triageComments(ctx context.Context, prNumber int, comments []g
 			if c.Path != "" {
 				fmt.Fprintf(&task, "File: %s\n", c.Path)
 			}
-			fmt.Fprintf(&task, "@%s: %s\n\n", c.User.Login, c.Body)
+			fmt.Fprintf(&task, "@%s: %s\n\n", c.UserLogin, c.Body)
 		}
 		result.TaskDescription = task.String()
 	}
@@ -595,120 +440,3 @@ func extractResultText(output []byte) string {
 	return strings.TrimSpace(string(output))
 }
 
-func (w *Watcher) getReviewComments(ctx context.Context, prNumber int, repoPath string) ([]ghComment, error) {
-	cmd := exec.CommandContext(ctx, "gh", "api",
-		fmt.Sprintf("repos/{owner}/{repo}/pulls/%d/comments", prNumber),
-		"--jq", ".",
-	)
-	cmd.Dir = repoPath
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-
-	var comments []ghComment
-	if err := json.Unmarshal(stdout.Bytes(), &comments); err != nil {
-		return nil, fmt.Errorf("parsing comments: %w", err)
-	}
-	return comments, nil
-}
-
-func (w *Watcher) getIssueComments(ctx context.Context, prNumber int, repoPath string) ([]ghComment, error) {
-	cmd := exec.CommandContext(ctx, "gh", "api",
-		fmt.Sprintf("repos/{owner}/{repo}/issues/%d/comments", prNumber),
-		"--jq", ".",
-	)
-	cmd.Dir = repoPath
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-
-	var comments []ghComment
-	if err := json.Unmarshal(stdout.Bytes(), &comments); err != nil {
-		return nil, fmt.Errorf("parsing issue comments: %w", err)
-	}
-	return comments, nil
-}
-
-func (w *Watcher) getPRState(ctx context.Context, prNumber int, repoPath string) (*ghPR, error) {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
-		strconv.Itoa(prNumber),
-		"--json", "state",
-	)
-	cmd.Dir = repoPath
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-
-	var pr ghPR
-	if err := json.Unmarshal(stdout.Bytes(), &pr); err != nil {
-		return nil, fmt.Errorf("parsing PR state: %w", err)
-	}
-	return &pr, nil
-}
-
-// botPR represents a PR from `gh pr list --json`.
-type botPR struct {
-	Number int `json:"number"`
-	Author struct {
-		Login string `json:"login"`
-		Type  string `json:"type"` // "User" or "Bot"
-	} `json:"author"`
-}
-
-// findBotFixupPR checks if there's a bot-authored PR targeting the given branch.
-// Returns the PR number or 0 if none found.
-func (w *Watcher) findBotFixupPR(ctx context.Context, branch, repoPath string) int {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
-		"--base", branch,
-		"--state", "open",
-		"--json", "number,author",
-	)
-	cmd.Dir = repoPath
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		slog.Debug("failed to list PRs targeting branch", "branch", branch, "error", err)
-		return 0
-	}
-
-	var prs []botPR
-	if err := json.Unmarshal(stdout.Bytes(), &prs); err != nil {
-		slog.Debug("failed to parse PR list", "error", err)
-		return 0
-	}
-
-	for _, pr := range prs {
-		if strings.EqualFold(pr.Author.Type, "Bot") {
-			return pr.Number
-		}
-	}
-	return 0
-}
-
-// ExtractPRNumber extracts a PR number from a GitHub PR URL.
-// e.g., "https://github.com/owner/repo/pull/42" → 42
-func ExtractPRNumber(prURL string) (int, error) {
-	parts := strings.Split(strings.TrimRight(prURL, "/"), "/")
-	if len(parts) < 2 || parts[len(parts)-2] != "pull" {
-		return 0, fmt.Errorf("not a PR URL: %s", prURL)
-	}
-	return strconv.Atoi(parts[len(parts)-1])
-}

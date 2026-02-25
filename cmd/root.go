@@ -28,6 +28,8 @@ import (
 	"github.com/hergen/toad/internal/tadpole"
 	"github.com/hergen/toad/internal/triage"
 	"github.com/hergen/toad/internal/tui"
+	"github.com/hergen/toad/internal/update"
+	"github.com/hergen/toad/internal/vcs"
 )
 
 // daemonCounters tracks live metrics for the stats reporter.
@@ -86,15 +88,25 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		toadlog.Setup(cfg.Log.Level, cfg.Log.File)
 	}
 
-	// 4. Check required CLI tools
+	// 4. Print version and check for updates
+	slog.Info("starting toad", "version", Version)
+	if info, checkErr := update.Check(Version); checkErr == nil && info != nil && info.Available {
+		slog.Warn("update available", "current", info.Current, "latest", info.Latest)
+	}
+
+	// 5. Check required CLI tools
 	if err := checkClaude(); err != nil {
 		return err
 	}
-	if err := checkGH(); err != nil {
+	vcsProvider, err := vcs.NewProvider(cfg.VCS.Platform)
+	if err != nil {
+		return fmt.Errorf("vcs config: %w", err)
+	}
+	if err := vcsProvider.Check(); err != nil {
 		return err
 	}
 
-	// 5. Initialize components
+	// 6. Initialize components
 	stateDB, err := state.OpenDB()
 	if err != nil {
 		return fmt.Errorf("opening state db: %w", err)
@@ -123,24 +135,24 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	ribbitSem := make(chan struct{}, cfg.Limits.MaxConcurrent*3)
 	tadpoleSem := make(chan struct{}, cfg.Limits.MaxConcurrent)
 
-	// 6. Initialize Slack client
+	// 7. Initialize Slack client
 	slackClient := islack.NewClient(cfg.Slack)
 
 	// Initialize tadpole runner and pool (with Slack client for status updates)
-	tadpoleRunner := tadpole.NewRunner(cfg, slackClient, stateManager)
+	tadpoleRunner := tadpole.NewRunner(cfg, slackClient, stateManager, vcsProvider)
 	tadpolePool := tadpole.NewPool(tadpoleSem, tadpoleRunner)
 
 	// Initialize issue tracker
 	tracker := issuetracker.NewTracker(cfg.IssueTracker)
 
-	// 7. Initialize PR review watcher
+	// 8. Initialize PR review watcher
 	prWatcher := reviewer.NewWatcher(stateDB, cfg.Repos, func(ctx context.Context, task tadpole.Task) error {
 		return tadpolePool.Spawn(ctx, task)
-	}, slackClient, cfg.Limits.MaxReviewRounds, cfg.Limits.MaxCIFixRounds, cfg.Triage.Model)
+	}, slackClient, cfg.Limits.MaxReviewRounds, cfg.Limits.MaxCIFixRounds, cfg.Triage.Model, vcsProvider)
 
 	// Wire PR review tracking — after a successful ship, register the PR for review watching
 	tadpoleRunner.OnShip(func(prURL, branch, runID string, task tadpole.Task) {
-		prNum, err := reviewer.ExtractPRNumber(prURL)
+		prNum, err := vcsProvider.ExtractPRNumber(prURL)
 		if err != nil {
 			slog.Warn("could not extract PR number for review tracking", "url", prURL, "error", err)
 			return
@@ -163,7 +175,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Wire path scrubber — prevents absolute filesystem paths from leaking to Slack
 	slackClient.SetPathScrubber(repoPaths)
 
-	// 8. Initialize digest engine (Toad King) if enabled
+	// 9. Initialize digest engine (Toad King) if enabled
 	var digestEngine *digest.Engine
 	if cfg.Digest.Enabled {
 		digestEngine = digest.New(&cfg.Digest, cfg.Triage.Model,
@@ -187,12 +199,12 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		)
 	}
 
-	// 9. Set up message handler — dispatch into goroutines so the event loop stays responsive
+	// 10. Set up message handler — dispatch into goroutines so the event loop stays responsive
 	slackClient.OnMessage(func(ctx context.Context, msg *islack.IncomingMessage) {
 		go handleMessage(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, tadpolePool, digestEngine, tracker, resolver, repoPaths)
 	})
 
-	// 8. Handle graceful shutdown
+	// 11. Handle graceful shutdown
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -1069,10 +1081,3 @@ func checkClaude() error {
 	return nil
 }
 
-func checkGH() error {
-	_, err := exec.LookPath("gh")
-	if err != nil {
-		return fmt.Errorf("gh CLI not found in PATH — install it first: https://cli.github.com")
-	}
-	return nil
-}

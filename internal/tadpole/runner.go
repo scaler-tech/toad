@@ -16,6 +16,7 @@ import (
 	islack "github.com/hergen/toad/internal/slack"
 	"github.com/hergen/toad/internal/state"
 	"github.com/hergen/toad/internal/triage"
+	"github.com/hergen/toad/internal/vcs"
 )
 
 // Task describes the work for a tadpole to perform.
@@ -41,12 +42,13 @@ type Runner struct {
 	cfg          *config.Config
 	slack        *islack.Client // nil for CLI-only runs
 	stateManager *state.Manager
+	vcs          vcs.Provider
 	onShip       ShipCallback
 }
 
 // NewRunner creates a tadpole runner.
-func NewRunner(cfg *config.Config, slack *islack.Client, sm *state.Manager) *Runner {
-	return &Runner{cfg: cfg, slack: slack, stateManager: sm}
+func NewRunner(cfg *config.Config, slack *islack.Client, sm *state.Manager, vcsProvider vcs.Provider) *Runner {
+	return &Runner{cfg: cfg, slack: slack, stateManager: sm, vcs: vcsProvider}
 }
 
 // OnShip registers a callback that fires after a successful PR is created.
@@ -212,7 +214,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 			}
 		}
 
-		prURL, err = ship(ctx, wt.Path, wt.Branch, task, repo.AutoMerge, repo.PRLabels, slackLink, task.RepoPaths, repo.DefaultBranch)
+		prURL, err = r.ship(ctx, wt.Path, wt.Branch, task, repo.AutoMerge, repo.PRLabels, slackLink, task.RepoPaths, repo.DefaultBranch)
 		if err != nil {
 			return fail(fmt.Sprintf("shipping: %s", err))
 		}
@@ -285,7 +287,7 @@ func (r *Runner) swapReact(task Task, remove, add string) {
 	r.slack.SwapReaction(task.SlackChannel, task.SlackThreadTS, remove, add)
 }
 
-func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge bool, prLabels []string, slackLink string, repoPaths map[string]string, defaultBranch string) (string, error) {
+func (r *Runner) ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge bool, prLabels []string, slackLink string, repoPaths map[string]string, defaultBranch string) (string, error) {
 	// Push branch to origin
 	slog.Info("pushing branch", "branch", branch)
 	pushCmd := exec.CommandContext(ctx, "git", "push", "-u", "origin", branch)
@@ -305,7 +307,7 @@ func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge
 		return "", fmt.Errorf("no changes vs %s — the issue may already be fixed on the target branch", defaultBranch)
 	}
 
-	// Create PR via gh CLI
+	// Create PR
 	title := task.Summary
 	runes := []rune(title)
 	if len(runes) > 70 {
@@ -333,38 +335,25 @@ func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge
 	}
 
 	slog.Info("creating PR", "title", title, "branch", branch)
-	prArgs := []string{"pr", "create",
-		"--title", title,
-		"--body", body,
-		"--head", branch,
+	prURL, err := r.vcs.CreatePR(ctx, vcs.CreatePROpts{
+		RepoPath: worktreePath,
+		Branch:   branch,
+		Title:    title,
+		Body:     body,
+		Labels:   prLabels,
+	})
+	if err != nil {
+		return "", err
 	}
-	for _, label := range prLabels {
-		prArgs = append(prArgs, "--label", label)
-	}
-	prCmd := exec.CommandContext(ctx, "gh", prArgs...)
-	prCmd.Dir = worktreePath
-	var prStdout, prStderr bytes.Buffer
-	prCmd.Stdout = &prStdout
-	prCmd.Stderr = &prStderr
-	if err := prCmd.Run(); err != nil {
-		return "", fmt.Errorf("gh pr create: %w: %s", err, strings.TrimSpace(prStderr.String()))
-	}
-
-	prURL := strings.TrimSpace(prStdout.String())
 
 	// Enable auto-merge if configured — the PR will merge automatically once
 	// all branch protection requirements (reviews, CI) are satisfied.
 	if autoMerge {
 		slog.Info("enabling auto-merge", "pr", prURL)
-		mergeCmd := exec.CommandContext(ctx, "gh", "pr", "merge", "--auto", "--squash", branch)
-		mergeCmd.Dir = worktreePath
-		var mergeStderr bytes.Buffer
-		mergeCmd.Stderr = &mergeStderr
-		if err := mergeCmd.Run(); err != nil {
+		if err := r.vcs.EnableAutoMerge(ctx, worktreePath, branch); err != nil {
 			// Non-fatal: PR is created, auto-merge is a bonus.
 			// This can fail if the repo doesn't have auto-merge enabled in settings.
-			slog.Warn("failed to enable auto-merge", "error", err,
-				"stderr", strings.TrimSpace(mergeStderr.String()))
+			slog.Warn("failed to enable auto-merge", "error", err)
 		}
 	}
 
