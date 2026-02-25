@@ -118,6 +118,11 @@ repos:
     #   - path: "web-app"
     #     test_command: "make test"
     #     lint_command: "make stan && make cs"
+    # Per-repo VCS override:
+    # vcs:
+    #   platform: "gitlab"
+    #   host: "gitlab.company.com"
+    #   bot_usernames: ["renovate-bot"]
 
 {{ end }}
 # ──────────────────────────────────────────────
@@ -185,7 +190,10 @@ digest:
 # VCS Platform
 # ──────────────────────────────────────────────
 # vcs:
-#   platform: "github"    # "github" or "gitlab"
+#   platform: "github"         # "github" or "gitlab"
+#   # host: "gitlab.example.com"  # Self-hosted GitLab hostname (or TOAD_GITLAB_HOST env)
+#   # bot_usernames:              # Usernames to treat as bots (GitLab)
+#   #   - "renovate-bot"
 
 # ──────────────────────────────────────────────
 # Logging

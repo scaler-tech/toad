@@ -26,7 +26,7 @@ type Watcher struct {
 	repos           []config.RepoConfig
 	spawn           SpawnFunc
 	slack           *islack.Client
-	vcs             vcs.Provider
+	vcs             vcs.Resolver
 	interval        time.Duration
 	maxReviewRounds int
 	maxCIFixRounds  int
@@ -34,7 +34,7 @@ type Watcher struct {
 }
 
 // NewWatcher creates a PR review watcher.
-func NewWatcher(db *state.DB, repos []config.RepoConfig, spawn SpawnFunc, slack *islack.Client, maxReviewRounds, maxCIFixRounds int, triageModel string, vcsProvider vcs.Provider) *Watcher {
+func NewWatcher(db *state.DB, repos []config.RepoConfig, spawn SpawnFunc, slack *islack.Client, maxReviewRounds, maxCIFixRounds int, triageModel string, vcsResolver vcs.Resolver) *Watcher {
 	if maxReviewRounds <= 0 {
 		maxReviewRounds = 3
 	}
@@ -46,7 +46,7 @@ func NewWatcher(db *state.DB, repos []config.RepoConfig, spawn SpawnFunc, slack 
 		repos:           repos,
 		spawn:           spawn,
 		slack:           slack,
-		vcs:             vcsProvider,
+		vcs:             vcsResolver,
 		interval:        2 * time.Minute,
 		maxReviewRounds: maxReviewRounds,
 		maxCIFixRounds:  maxCIFixRounds,
@@ -110,8 +110,10 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 		}
 	}
 
+	vcsProvider := w.vcs(watch.RepoPath)
+
 	// 1. Check PR state — close the watch if merged/closed
-	prState, err := w.vcs.GetPRState(ctx, watch.PRNumber, watch.RepoPath)
+	prState, err := vcsProvider.GetPRState(ctx, watch.PRNumber, watch.RepoPath)
 	if err != nil {
 		return fmt.Errorf("getting PR state: %w", err)
 	}
@@ -121,7 +123,7 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 	}
 
 	// 2. Check review comments (takes priority over CI)
-	commentFixSpawned, err := w.checkReviewComments(ctx, watch)
+	commentFixSpawned, err := w.checkReviewComments(ctx, vcsProvider, watch)
 	if err != nil {
 		return err
 	}
@@ -129,7 +131,7 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 	// 3. If no comment fix was spawned, check CI status
 	// Skip CI check if a comment fix was just spawned — the push will restart CI anyway.
 	if !commentFixSpawned {
-		if _, err := w.checkCI(ctx, watch); err != nil {
+		if _, err := w.checkCI(ctx, vcsProvider, watch); err != nil {
 			return err
 		}
 	}
@@ -139,13 +141,13 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 
 // checkReviewComments fetches and triages new review comments, spawning a fix tadpole if actionable.
 // Returns true if a fix tadpole was spawned.
-func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch) (bool, error) {
+func (w *Watcher) checkReviewComments(ctx context.Context, vcsProvider vcs.Provider, watch *state.PRWatch) (bool, error) {
 	if watch.FixCount >= w.maxReviewRounds {
 		return false, nil
 	}
 
 	// Fetch all comments (review + conversation) via the VCS provider.
-	allComments, err := w.vcs.GetPRComments(ctx, watch.PRNumber, watch.RepoPath)
+	allComments, err := vcsProvider.GetPRComments(ctx, watch.PRNumber, watch.RepoPath)
 	if err != nil {
 		slog.Warn("failed to get PR comments, continuing", "pr", watch.PRNumber, "error", err)
 	}
@@ -180,7 +182,7 @@ func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch)
 	}
 
 	// Use Haiku to triage which comments are actionable code feedback
-	triage, err := w.triageComments(ctx, watch.PRNumber, newComments)
+	triage, err := w.triageComments(ctx, vcsProvider, watch.PRNumber, newComments)
 	if err != nil {
 		slog.Warn("failed to triage review comments", "pr", watch.PRNumber, "error", err)
 		return false, nil
@@ -204,7 +206,7 @@ func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch)
 
 	task := tadpole.Task{
 		Description:    triage.TaskDescription,
-		Summary:        fmt.Sprintf("fix review comments on PR #%d", watch.PRNumber),
+		Summary:        fmt.Sprintf("fix review comments on %s #%d", vcsProvider.PRNoun(), watch.PRNumber),
 		Category:       "bug",
 		EstSize:        "small",
 		SlackChannel:   watch.SlackChannel,
@@ -216,8 +218,8 @@ func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch)
 	// Notify in Slack
 	if w.slack != nil && watch.SlackChannel != "" && watch.SlackThread != "" {
 		w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
-			fmt.Sprintf(":mag: Review feedback on PR #%d — spawning fix tadpole...\n> %s",
-				watch.PRNumber, triage.Summary))
+			fmt.Sprintf(":mag: Review feedback on %s #%d — spawning fix tadpole...\n> %s",
+				vcsProvider.PRNoun(), watch.PRNumber, triage.Summary))
 	}
 
 	// Spawn fix tadpole
@@ -225,7 +227,7 @@ func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch)
 		slog.Error("failed to spawn review fix tadpole", "pr", watch.PRNumber, "error", err)
 		if w.slack != nil && watch.SlackChannel != "" {
 			w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
-				fmt.Sprintf(":x: Failed to spawn fix tadpole for PR #%d: %s", watch.PRNumber, err))
+				fmt.Sprintf(":x: Failed to spawn fix tadpole for %s #%d: %s", vcsProvider.PRNoun(), watch.PRNumber, err))
 		}
 		return false, err
 	}
@@ -235,14 +237,14 @@ func (w *Watcher) checkReviewComments(ctx context.Context, watch *state.PRWatch)
 
 // checkCI checks CI status for a PR and spawns a fix tadpole if CI failed.
 // Returns true if a fix tadpole was spawned.
-func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, error) {
+func (w *Watcher) checkCI(ctx context.Context, vcsProvider vcs.Provider, watch *state.PRWatch) (bool, error) {
 	if watch.CIFixCount >= w.maxCIFixRounds {
 		if !watch.CIExhaustedNotified {
 			slog.Info("CI fix budget exhausted, notifying", "pr", watch.PRNumber, "ci_fix_count", watch.CIFixCount)
 			if w.slack != nil && watch.SlackChannel != "" && watch.SlackThread != "" {
 				w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
-					fmt.Sprintf(":warning: CI still failing after %d fix attempts on PR #%d — needs human attention",
-						watch.CIFixCount, watch.PRNumber))
+					fmt.Sprintf(":warning: CI still failing after %d fix attempts on %s #%d — needs human attention",
+						watch.CIFixCount, vcsProvider.PRNoun(), watch.PRNumber))
 			}
 			if err := w.db.MarkCIExhaustedNotified(watch.PRNumber); err != nil {
 				slog.Warn("failed to mark CI exhaustion notified", "pr", watch.PRNumber, "error", err)
@@ -251,7 +253,7 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 		return false, nil
 	}
 
-	ci, err := w.vcs.GetCIStatus(ctx, watch.PRNumber, watch.RepoPath)
+	ci, err := vcsProvider.GetCIStatus(ctx, watch.PRNumber, watch.RepoPath)
 	if err != nil {
 		slog.Warn("failed to get CI status", "pr", watch.PRNumber, "error", err)
 		return false, nil
@@ -277,7 +279,7 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 	// If found, merge it instead of spawning a tadpole — it's a free fix.
 	repo := config.RepoByPath(w.repos, watch.RepoPath)
 	if repo != nil && repo.MergeBotFixups {
-		botPRs, listErr := w.vcs.ListBotPRs(ctx, watch.Branch, watch.RepoPath)
+		botPRs, listErr := vcsProvider.ListBotPRs(ctx, watch.Branch, watch.RepoPath)
 		if listErr != nil {
 			slog.Debug("failed to list bot PRs", "branch", watch.Branch, "error", listErr)
 		}
@@ -287,10 +289,10 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 
 			if w.slack != nil && watch.SlackChannel != "" && watch.SlackThread != "" {
 				w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
-					fmt.Sprintf(":wrench: Merging bot fix-up PR #%d...", fixupPR))
+					fmt.Sprintf(":wrench: Merging bot fix-up %s #%d...", vcsProvider.PRNoun(), fixupPR))
 			}
 
-			if mergeErr := w.vcs.MergePR(ctx, fixupPR, watch.RepoPath); mergeErr != nil {
+			if mergeErr := vcsProvider.MergePR(ctx, fixupPR, watch.RepoPath); mergeErr != nil {
 				slog.Warn("failed to merge bot fixup PR, falling through to tadpole",
 					"fixup_pr", fixupPR, "error", mergeErr)
 			} else {
@@ -300,7 +302,7 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 		}
 	}
 
-	logs := w.vcs.GetCIFailureLogs(ctx, ci.FailedIDs, watch.RepoPath)
+	logs := vcsProvider.GetCIFailureLogs(ctx, ci.FailedIDs, watch.RepoPath)
 
 	// Increment CI fix count only when we're actually spawning a fix tadpole
 	if err := w.db.IncrementCIFixCount(watch.PRNumber); err != nil {
@@ -308,7 +310,7 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 	}
 
 	var taskDesc strings.Builder
-	fmt.Fprintf(&taskDesc, "Fix CI failures on PR #%d.\n\n", watch.PRNumber)
+	fmt.Fprintf(&taskDesc, "Fix CI failures on %s #%d.\n\n", vcsProvider.PRNoun(), watch.PRNumber)
 	if logs != "" {
 		taskDesc.WriteString("The CI pipeline is failing. Fix the issues shown in the logs below.\n\n")
 		taskDesc.WriteString("CI failure logs:\n\n```\n")
@@ -321,7 +323,7 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 
 	task := tadpole.Task{
 		Description:    taskDesc.String(),
-		Summary:        fmt.Sprintf("fix CI failures on PR #%d", watch.PRNumber),
+		Summary:        fmt.Sprintf("fix CI failures on %s #%d", vcsProvider.PRNoun(), watch.PRNumber),
 		Category:       "bug",
 		EstSize:        "small",
 		SlackChannel:   watch.SlackChannel,
@@ -333,15 +335,15 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 	// Notify in Slack
 	if w.slack != nil && watch.SlackChannel != "" && watch.SlackThread != "" {
 		w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
-			fmt.Sprintf(":rotating_light: CI failing on PR #%d (attempt %d/%d) — spawning fix tadpole...",
-				watch.PRNumber, watch.CIFixCount+1, w.maxCIFixRounds))
+			fmt.Sprintf(":rotating_light: CI failing on %s #%d (attempt %d/%d) — spawning fix tadpole...",
+				vcsProvider.PRNoun(), watch.PRNumber, watch.CIFixCount+1, w.maxCIFixRounds))
 	}
 
 	if err := w.spawn(ctx, task); err != nil {
 		slog.Error("failed to spawn CI fix tadpole", "pr", watch.PRNumber, "error", err)
 		if w.slack != nil && watch.SlackChannel != "" {
 			w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
-				fmt.Sprintf(":x: Failed to spawn CI fix tadpole for PR #%d: %s", watch.PRNumber, err))
+				fmt.Sprintf(":x: Failed to spawn CI fix tadpole for %s #%d: %s", vcsProvider.PRNoun(), watch.PRNumber, err))
 		}
 		return false, err
 	}
@@ -357,9 +359,9 @@ type commentTriage struct {
 	TaskDescription string `json:"-"` // built after triage
 }
 
-const commentTriagePrompt = `You are triaging PR review comments to decide if they require code changes.
+const commentTriagePrompt = `You are triaging review comments to decide if they require code changes.
 
-The comments below are from PR #%d. Evaluate whether ANY of them contain actionable code feedback — requests for changes, bug reports, suggestions for improvement, or specific issues to fix.
+The comments below are from %s #%d. Evaluate whether ANY of them contain actionable code feedback — requests for changes, bug reports, suggestions for improvement, or specific issues to fix.
 
 <comments>
 %s
@@ -374,7 +376,7 @@ Rules:
 - The summary should describe what code changes are needed (only if actionable)
 - Be conservative — when in doubt, it's actionable`
 
-func (w *Watcher) triageComments(ctx context.Context, prNumber int, comments []vcs.PRComment) (*commentTriage, error) {
+func (w *Watcher) triageComments(ctx context.Context, vcsProvider vcs.Provider, prNumber int, comments []vcs.PRComment) (*commentTriage, error) {
 	// Format comments for the prompt
 	var sb strings.Builder
 	for i, c := range comments {
@@ -386,7 +388,7 @@ func (w *Watcher) triageComments(ctx context.Context, prNumber int, comments []v
 		fmt.Fprintf(&sb, "    @%s: %s\n\n", c.UserLogin, c.Body)
 	}
 
-	prompt := fmt.Sprintf(commentTriagePrompt, prNumber, sb.String())
+	prompt := fmt.Sprintf(commentTriagePrompt, vcsProvider.PRNoun(), prNumber, sb.String())
 
 	triageCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -415,7 +417,7 @@ func (w *Watcher) triageComments(ctx context.Context, prNumber int, comments []v
 	// Build the task description from the original comments if actionable
 	if result.Actionable {
 		var task strings.Builder
-		fmt.Fprintf(&task, "Fix review comments on PR #%d.\n\n", prNumber)
+		fmt.Fprintf(&task, "Fix review comments on %s #%d.\n\n", vcsProvider.PRNoun(), prNumber)
 		task.WriteString("Review comments to address:\n\n")
 		for _, c := range comments {
 			if c.Path != "" {

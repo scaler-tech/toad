@@ -19,6 +19,7 @@ import (
 	"github.com/hergen/toad/internal/config"
 	"github.com/hergen/toad/internal/state"
 	"github.com/hergen/toad/internal/update"
+	"github.com/hergen/toad/internal/vcs"
 )
 
 var statusPort int
@@ -75,6 +76,7 @@ type apiResponse struct {
 	DigestCounts  *state.DigestCounts `json:"digest_counts,omitempty"`
 	Config        *apiConfig          `json:"config,omitempty"`
 	CCUsage       *apiCCUsage         `json:"cc_usage,omitempty"`
+	PRNoun        string              `json:"pr_noun"`
 	Now           int64               `json:"now"`
 }
 
@@ -171,6 +173,16 @@ type ccExtra struct {
 }
 
 func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
+	// Resolve PR noun once at construction time.
+	prNoun := "PR"
+	if cfg != nil {
+		primaryRepo := config.PrimaryRepo(cfg.Repos)
+		resolved := config.ResolvedVCS(primaryRepo, cfg.VCS)
+		if p, err := vcs.NewProvider(vcs.ProviderConfig{Platform: resolved.Platform}); err == nil {
+			prNoun = p.PRNoun()
+		}
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		stats, err := db.Stats()
 		if err != nil {
@@ -278,8 +290,8 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 		}
 		integrations = append(integrations, issueInt)
 
-		// PR Reviewer
-		reviewerInt := apiIntegration{Name: "PR Reviewer"}
+		// VCS Reviewer
+		reviewerInt := apiIntegration{Name: resp.PRNoun + " Reviewer"}
 		if daemon.Running {
 			reviewerInt.Status = "enabled"
 			watchCount := len(watches)
@@ -372,6 +384,8 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 		}
 
 		resp.CCUsage = fetchCCUsage()
+
+		resp.PRNoun = prNoun
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
@@ -820,9 +834,9 @@ const dashboardHTML = `<!DOCTYPE html>
   <div class="table-wrap" id="opps-wrap"></div>
 </section>
 
-<!-- PR Watches -->
+<!-- VCS Watches -->
 <section id="watches-section" style="display:none">
-  <h2>PR Watches <span class="count" id="watches-count">0</span></h2>
+  <h2><span id="watches-noun">PR</span> Watches <span class="count" id="watches-count">0</span></h2>
   <div class="table-wrap" id="watches-wrap"></div>
 </section>
 
@@ -918,6 +932,7 @@ async function refresh() {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const d = await resp.json();
     const now = d.now;
+    const prNoun = d.pr_noun || 'PR';
 
     document.getElementById('error-bar').style.display = 'none';
     document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
@@ -1026,7 +1041,7 @@ async function refresh() {
     if (history.length === 0) {
       document.getElementById('history-wrap').innerHTML = '<div class="empty">No completed runs</div>';
     } else {
-      let html = '<table><tr><th style="width:90px">Status</th><th style="width:22%">Branch</th><th>Task</th><th style="width:60px">Files</th><th style="width:80px">Duration</th><th style="width:22%">PR</th></tr>';
+      let html = '<table><tr><th style="width:90px">Status</th><th style="width:22%">Branch</th><th>Task</th><th style="width:60px">Files</th><th style="width:80px">Duration</th><th style="width:22%">' + prNoun + '</th></tr>';
       for (let i = 0; i < history.length; i++) {
         const r = history[i];
         const hidden = !historyExpanded && i >= MAX_VISIBLE ? ' style="display:none"' : '';
@@ -1157,15 +1172,16 @@ async function refresh() {
       }
     }
 
-    // PR Watches
+    // VCS Watches
     const watches = d.watches || [];
     const wsec = document.getElementById('watches-section');
+    document.getElementById('watches-noun').textContent = prNoun;
     if (watches.length === 0) {
       wsec.style.display = 'none';
     } else {
       wsec.style.display = '';
       document.getElementById('watches-count').textContent = watches.length;
-      let html = '<table><tr><th style="width:60px">PR</th><th style="width:30%">Branch</th><th style="width:60px">Fixes</th><th>URL</th></tr>';
+      let html = '<table><tr><th style="width:60px">' + prNoun + '</th><th style="width:30%">Branch</th><th style="width:60px">Fixes</th><th>URL</th></tr>';
       for (const w of watches) {
         html += '<tr><td class="mono">#' + w.pr_number + '</td>'
           + '<td class="mono">' + esc(w.branch) + '</td>'

@@ -234,3 +234,66 @@ func TestValidateRepos_MultiplePrimary(t *testing.T) {
 		t.Error("expected error for multiple primary repos")
 	}
 }
+
+func TestValidate_UnsupportedGlobalVCSPlatform(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.VCS.Platform = "bitbucket"
+	if err := Validate(cfg); err == nil {
+		t.Error("expected error for unsupported global VCS platform")
+	}
+}
+
+func TestResolvedVCS_NilRepo(t *testing.T) {
+	global := VCSConfig{Platform: "github"}
+	got := ResolvedVCS(nil, global)
+	if got.Platform != "github" {
+		t.Errorf("nil repo should return global, got platform=%q", got.Platform)
+	}
+}
+
+func TestResolvedVCS_NilOverride(t *testing.T) {
+	global := VCSConfig{Platform: "github", Host: "gh.example.com"}
+	repo := &RepoConfig{Name: "r", Path: "/tmp/r"} // VCS is nil
+	got := ResolvedVCS(repo, global)
+	if got.Platform != "github" || got.Host != "gh.example.com" {
+		t.Errorf("nil VCS override should return global, got %+v", got)
+	}
+}
+
+func TestResolvedVCS_PartialOverride(t *testing.T) {
+	global := VCSConfig{Platform: "github", Host: "gh.example.com", BotUsernames: []string{"bot-a"}}
+	repo := &RepoConfig{
+		Name: "r", Path: "/tmp/r",
+		VCS: &VCSConfig{Platform: "gitlab"},
+	}
+	got := ResolvedVCS(repo, global)
+	if got.Platform != "gitlab" {
+		t.Errorf("expected platform override to gitlab, got %q", got.Platform)
+	}
+	if got.Host != "gh.example.com" {
+		t.Errorf("expected host inherited from global, got %q", got.Host)
+	}
+	if len(got.BotUsernames) != 1 || got.BotUsernames[0] != "bot-a" {
+		t.Errorf("expected bot_usernames inherited from global, got %v", got.BotUsernames)
+	}
+}
+
+func TestResolvedVCS_FullOverride(t *testing.T) {
+	global := VCSConfig{Platform: "github", Host: "gh.example.com", BotUsernames: []string{"bot-a"}}
+	repo := &RepoConfig{
+		Name: "r", Path: "/tmp/r",
+		VCS: &VCSConfig{Platform: "gitlab", Host: "gl.local", BotUsernames: []string{"renovate"}},
+	}
+	got := ResolvedVCS(repo, global)
+	if got.Platform != "gitlab" {
+		t.Errorf("expected gitlab, got %q", got.Platform)
+	}
+	if got.Host != "gl.local" {
+		t.Errorf("expected gl.local, got %q", got.Host)
+	}
+	if len(got.BotUsernames) != 1 || got.BotUsernames[0] != "renovate" {
+		t.Errorf("expected [renovate], got %v", got.BotUsernames)
+	}
+}

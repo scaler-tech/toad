@@ -42,13 +42,13 @@ type Runner struct {
 	cfg          *config.Config
 	slack        *islack.Client // nil for CLI-only runs
 	stateManager *state.Manager
-	vcs          vcs.Provider
+	vcs          vcs.Resolver
 	onShip       ShipCallback
 }
 
 // NewRunner creates a tadpole runner.
-func NewRunner(cfg *config.Config, slack *islack.Client, sm *state.Manager, vcsProvider vcs.Provider) *Runner {
-	return &Runner{cfg: cfg, slack: slack, stateManager: sm, vcs: vcsProvider}
+func NewRunner(cfg *config.Config, slack *islack.Client, sm *state.Manager, vcsResolver vcs.Resolver) *Runner {
+	return &Runner{cfg: cfg, slack: slack, stateManager: sm, vcs: vcsResolver}
 }
 
 // OnShip registers a callback that fires after a successful PR is created.
@@ -70,6 +70,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	runID := fmt.Sprintf("tadpole-%d", start.UnixMilli())
 
 	repo := task.repoConfig(r.cfg)
+	vcsProvider := r.vcs(repo.Path)
 
 	// Track run in state manager
 	run := &state.Run{
@@ -200,9 +201,9 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 		if err := pushBranch(ctx, wt.Path, wt.Branch); err != nil {
 			return fail(fmt.Sprintf("pushing fix: %s", err))
 		}
-		prURL = "(pushed to existing PR)"
+		prURL = fmt.Sprintf("(pushed to existing %s)", vcsProvider.PRNoun())
 	} else {
-		r.updateStatus(task, statusTS, ":rocket: Opening PR...")
+		r.updateStatus(task, statusTS, fmt.Sprintf(":rocket: Opening %s...", vcsProvider.PRNoun()))
 
 		// Fetch Slack permalink for the PR body (non-fatal on error)
 		slackLink := ""
@@ -214,7 +215,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 			}
 		}
 
-		prURL, err = r.ship(ctx, wt.Path, wt.Branch, task, repo.AutoMerge, repo.PRLabels, slackLink, task.RepoPaths, repo.DefaultBranch)
+		prURL, err = r.ship(ctx, vcsProvider, wt.Path, wt.Branch, task, repo.AutoMerge, repo.PRLabels, slackLink, task.RepoPaths, repo.DefaultBranch)
 		if err != nil {
 			return fail(fmt.Sprintf("shipping: %s", err))
 		}
@@ -229,8 +230,8 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 		Duration:     duration,
 	})
 
-	finalMsg := fmt.Sprintf(":white_check_mark: Done! PR: %s\n_(%d files changed, %s)_",
-		prURL, valResult.FilesChanged, duration.Round(time.Second))
+	finalMsg := fmt.Sprintf(":white_check_mark: Done! %s: %s\n_(%d files changed, %s)_",
+		vcsProvider.PRNoun(), prURL, valResult.FilesChanged, duration.Round(time.Second))
 	r.updateStatus(task, statusTS, finalMsg)
 	r.swapReact(task, "hatching_chick", "white_check_mark")
 
@@ -287,7 +288,7 @@ func (r *Runner) swapReact(task Task, remove, add string) {
 	r.slack.SwapReaction(task.SlackChannel, task.SlackThreadTS, remove, add)
 }
 
-func (r *Runner) ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge bool, prLabels []string, slackLink string, repoPaths map[string]string, defaultBranch string) (string, error) {
+func (r *Runner) ship(ctx context.Context, vcsProvider vcs.Provider, worktreePath, branch string, task Task, autoMerge bool, prLabels []string, slackLink string, repoPaths map[string]string, defaultBranch string) (string, error) {
 	// Push branch to origin
 	slog.Info("pushing branch", "branch", branch)
 	pushCmd := exec.CommandContext(ctx, "git", "push", "-u", "origin", branch)
@@ -335,7 +336,7 @@ func (r *Runner) ship(ctx context.Context, worktreePath, branch string, task Tas
 	}
 
 	slog.Info("creating PR", "title", title, "branch", branch)
-	prURL, err := r.vcs.CreatePR(ctx, vcs.CreatePROpts{
+	prURL, err := vcsProvider.CreatePR(ctx, vcs.CreatePROpts{
 		RepoPath: worktreePath,
 		Branch:   branch,
 		Title:    title,
@@ -350,7 +351,7 @@ func (r *Runner) ship(ctx context.Context, worktreePath, branch string, task Tas
 	// all branch protection requirements (reviews, CI) are satisfied.
 	if autoMerge {
 		slog.Info("enabling auto-merge", "pr", prURL)
-		if err := r.vcs.EnableAutoMerge(ctx, worktreePath, branch); err != nil {
+		if err := vcsProvider.EnableAutoMerge(ctx, worktreePath, branch); err != nil {
 			// Non-fatal: PR is created, auto-merge is a bonus.
 			// This can fail if the repo doesn't have auto-merge enabled in settings.
 			slog.Warn("failed to enable auto-merge", "error", err)

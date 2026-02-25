@@ -307,6 +307,8 @@ func (g *GitHubProvider) ExtractPRNumber(prURL string) (int, error) {
 	return strconv.Atoi(parts[len(parts)-1])
 }
 
+func (g *GitHubProvider) PRNoun() string { return "PR" }
+
 func (g *GitHubProvider) ExtractRunID(detailsURL string) string {
 	const marker = "/actions/runs/"
 	idx := strings.Index(detailsURL, marker)

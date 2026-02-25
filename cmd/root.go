@@ -98,12 +98,9 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	if err := checkClaude(); err != nil {
 		return err
 	}
-	vcsProvider, err := vcs.NewProvider(cfg.VCS.Platform)
+	vcsResolver, err := buildVCSResolver(cfg)
 	if err != nil {
 		return fmt.Errorf("vcs config: %w", err)
-	}
-	if err := vcsProvider.Check(); err != nil {
-		return err
 	}
 
 	// 6. Initialize components
@@ -139,7 +136,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	slackClient := islack.NewClient(cfg.Slack)
 
 	// Initialize tadpole runner and pool (with Slack client for status updates)
-	tadpoleRunner := tadpole.NewRunner(cfg, slackClient, stateManager, vcsProvider)
+	tadpoleRunner := tadpole.NewRunner(cfg, slackClient, stateManager, vcsResolver)
 	tadpolePool := tadpole.NewPool(tadpoleSem, tadpoleRunner)
 
 	// Initialize issue tracker
@@ -148,20 +145,20 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// 8. Initialize PR review watcher
 	prWatcher := reviewer.NewWatcher(stateDB, cfg.Repos, func(ctx context.Context, task tadpole.Task) error {
 		return tadpolePool.Spawn(ctx, task)
-	}, slackClient, cfg.Limits.MaxReviewRounds, cfg.Limits.MaxCIFixRounds, cfg.Triage.Model, vcsProvider)
+	}, slackClient, cfg.Limits.MaxReviewRounds, cfg.Limits.MaxCIFixRounds, cfg.Triage.Model, vcsResolver)
 
 	// Wire PR review tracking — after a successful ship, register the PR for review watching
 	tadpoleRunner.OnShip(func(prURL, branch, runID string, task tadpole.Task) {
-		prNum, err := vcsProvider.ExtractPRNumber(prURL)
-		if err != nil {
-			slog.Warn("could not extract PR number for review tracking", "url", prURL, "error", err)
-			return
-		}
 		repoPath := ""
 		if task.Repo != nil {
 			repoPath = task.Repo.Path
 		} else if len(cfg.Repos) > 0 {
 			repoPath = cfg.Repos[0].Path
+		}
+		prNum, err := vcsResolver(repoPath).ExtractPRNumber(prURL)
+		if err != nil {
+			slog.Warn("could not extract PR number for review tracking", "url", prURL, "error", err)
+			return
 		}
 		prWatcher.TrackPR(prNum, prURL, branch, runID, task.SlackChannel, task.SlackThreadTS, repoPath)
 	})
@@ -1081,5 +1078,28 @@ func checkClaude() error {
 		return fmt.Errorf("claude CLI not found in PATH — install it first: https://docs.anthropic.com/en/docs/claude-code")
 	}
 	return nil
+}
+
+// buildVCSResolver constructs a VCS Resolver from config, merging per-repo
+// overrides with the global VCS settings. Each unique provider is Check()-ed
+// during construction.
+func buildVCSResolver(cfg *config.Config) (vcs.Resolver, error) {
+	repoVCS := make(map[string]vcs.ProviderConfig, len(cfg.Repos))
+	for _, r := range cfg.Repos {
+		resolved := config.ResolvedVCS(&r, cfg.VCS)
+		repoVCS[r.Path] = vcs.ProviderConfig{
+			Platform:     resolved.Platform,
+			Host:         resolved.Host,
+			BotUsernames: resolved.BotUsernames,
+		}
+	}
+	primary := config.PrimaryRepo(cfg.Repos)
+	fallbackVCS := config.ResolvedVCS(primary, cfg.VCS)
+	fallbackCfg := vcs.ProviderConfig{
+		Platform:     fallbackVCS.Platform,
+		Host:         fallbackVCS.Host,
+		BotUsernames: fallbackVCS.BotUsernames,
+	}
+	return vcs.NewResolver(repoVCS, fallbackCfg)
 }
 

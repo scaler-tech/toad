@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -45,6 +46,7 @@ type RepoConfig struct {
 	MergeBotFixups bool            `yaml:"merge_bot_fixups"`
 	PRLabels       []string        `yaml:"pr_labels"`
 	Services       []ServiceConfig `yaml:"services"`
+	VCS            *VCSConfig      `yaml:"vcs"` // optional, overrides global VCS config
 }
 
 // ServiceConfig maps a subdirectory to its specific lint/test commands.
@@ -99,7 +101,9 @@ type IssueTrackerConfig struct {
 }
 
 type VCSConfig struct {
-	Platform string `yaml:"platform"` // "github" (default), "gitlab" (future)
+	Platform     string   `yaml:"platform"`      // "github" (default), "gitlab"
+	Host         string   `yaml:"host"`           // optional: self-hosted GitLab hostname
+	BotUsernames []string `yaml:"bot_usernames"`  // usernames to treat as bots (GitLab)
 }
 
 type LogConfig struct {
@@ -206,6 +210,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("TOAD_LINEAR_API_TOKEN"); v != "" {
 		cfg.IssueTracker.APIToken = v
 	}
+	// TOAD_GITLAB_HOST sets the global VCS host for self-hosted GitLab.
+	// Per-repo host overrides must be set via YAML (repos[].vcs.host).
+	if v := os.Getenv("TOAD_GITLAB_HOST"); v != "" {
+		cfg.VCS.Host = v
+	}
 }
 
 // Validate checks that required configuration is present.
@@ -216,6 +225,10 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.Slack.BotToken == "" {
 		return fmt.Errorf("slack bot_token is required (set in .toad.yaml or TOAD_SLACK_BOT_TOKEN env)")
+	}
+	validPlatforms := map[string]bool{"github": true, "gitlab": true}
+	if cfg.VCS.Platform != "" && !validPlatforms[strings.ToLower(cfg.VCS.Platform)] {
+		return fmt.Errorf("unsupported VCS platform %q — supported: github, gitlab", cfg.VCS.Platform)
 	}
 	if err := ValidateRepos(cfg); err != nil {
 		return err
@@ -238,6 +251,7 @@ func ValidateRepos(cfg *Config) error {
 	}
 	names := make(map[string]bool)
 	primaryCount := 0
+	validPlatforms := map[string]bool{"github": true, "gitlab": true}
 	for _, r := range cfg.Repos {
 		if r.Path == "" {
 			return fmt.Errorf("repo %q: path is required", r.Name)
@@ -254,6 +268,9 @@ func ValidateRepos(cfg *Config) error {
 		names[r.Name] = true
 		if r.Primary {
 			primaryCount++
+		}
+		if r.VCS != nil && r.VCS.Platform != "" && !validPlatforms[strings.ToLower(r.VCS.Platform)] {
+			return fmt.Errorf("repo %q: unsupported VCS platform %q — supported: github, gitlab", r.Name, r.VCS.Platform)
 		}
 	}
 	if primaryCount > 1 {
@@ -294,4 +311,23 @@ func RepoByPath(repos []RepoConfig, path string) *RepoConfig {
 		}
 	}
 	return nil
+}
+
+// ResolvedVCS merges a repo's optional VCS override with the global VCS config.
+// Per-repo fields take precedence when set; unset fields inherit from global.
+func ResolvedVCS(repo *RepoConfig, global VCSConfig) VCSConfig {
+	if repo == nil || repo.VCS == nil {
+		return global
+	}
+	result := global
+	if repo.VCS.Platform != "" {
+		result.Platform = repo.VCS.Platform
+	}
+	if repo.VCS.Host != "" {
+		result.Host = repo.VCS.Host
+	}
+	if len(repo.VCS.BotUsernames) > 0 {
+		result.BotUsernames = repo.VCS.BotUsernames
+	}
+	return result
 }

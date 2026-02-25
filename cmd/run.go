@@ -11,7 +11,6 @@ import (
 	toadlog "github.com/hergen/toad/internal/log"
 	"github.com/hergen/toad/internal/state"
 	"github.com/hergen/toad/internal/tadpole"
-	"github.com/hergen/toad/internal/vcs"
 )
 
 var repoFlag string
@@ -45,12 +44,9 @@ func runTadpole(cmd *cobra.Command, args []string) error {
 	if err := checkClaude(); err != nil {
 		return err
 	}
-	vcsProvider, err := vcs.NewProvider(cfg.VCS.Platform)
+	vcsResolver, err := buildVCSResolver(cfg)
 	if err != nil {
 		return fmt.Errorf("vcs config: %w", err)
-	}
-	if err := vcsProvider.Check(); err != nil {
-		return err
 	}
 
 	// Resolve target repo
@@ -63,7 +59,7 @@ func runTadpole(cmd *cobra.Command, args []string) error {
 	fmt.Printf(":frog: Starting tadpole: %s\n\n", taskDesc)
 
 	sm := state.NewManager()
-	runner := tadpole.NewRunner(cfg, nil, sm, vcsProvider)
+	runner := tadpole.NewRunner(cfg, nil, sm, vcsResolver)
 
 	repoPaths := make(map[string]string, len(cfg.Repos))
 	for _, r := range cfg.Repos {
