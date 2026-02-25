@@ -355,6 +355,33 @@ func TestDB_PRWatch_CIFixCount(t *testing.T) {
 	}
 }
 
+func TestDB_PRWatch_CIExhaustedNotified(t *testing.T) {
+	db := openTestDB(t)
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
+
+	// Initially not notified
+	watches, _ := db.OpenPRWatches(3, 3)
+	if len(watches) != 1 {
+		t.Fatalf("expected 1 watch, got %d", len(watches))
+	}
+	if watches[0].CIExhaustedNotified {
+		t.Error("expected CIExhaustedNotified to be false initially")
+	}
+
+	// Mark as notified
+	if err := db.MarkCIExhaustedNotified(42); err != nil {
+		t.Fatal(err)
+	}
+
+	watches, _ = db.OpenPRWatches(3, 3)
+	if len(watches) != 1 {
+		t.Fatalf("expected 1 watch, got %d", len(watches))
+	}
+	if !watches[0].CIExhaustedNotified {
+		t.Error("expected CIExhaustedNotified to be true after marking")
+	}
+}
+
 func TestDB_Stats(t *testing.T) {
 	db := openTestDB(t)
 

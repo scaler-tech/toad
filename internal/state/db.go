@@ -96,18 +96,19 @@ func migrate(db *sql.DB) error {
 		);
 
 		CREATE TABLE IF NOT EXISTS pr_watches (
-			pr_number       INTEGER PRIMARY KEY,
-			pr_url          TEXT NOT NULL,
-			branch          TEXT NOT NULL,
-			run_id          TEXT NOT NULL,
-			slack_channel   TEXT,
-			slack_thread    TEXT,
-			last_comment_id INTEGER DEFAULT 0,
-			fix_count       INTEGER DEFAULT 0,
-			ci_fix_count    INTEGER DEFAULT 0,
-			repo_path       TEXT DEFAULT '',
-			created_at      DATETIME NOT NULL,
-			closed          BOOLEAN DEFAULT FALSE
+			pr_number              INTEGER PRIMARY KEY,
+			pr_url                 TEXT NOT NULL,
+			branch                 TEXT NOT NULL,
+			run_id                 TEXT NOT NULL,
+			slack_channel          TEXT,
+			slack_thread           TEXT,
+			last_comment_id        INTEGER DEFAULT 0,
+			fix_count              INTEGER DEFAULT 0,
+			ci_fix_count           INTEGER DEFAULT 0,
+			repo_path              TEXT DEFAULT '',
+			ci_exhausted_notified  BOOLEAN DEFAULT FALSE,
+			created_at             DATETIME NOT NULL,
+			closed                 BOOLEAN DEFAULT FALSE
 		);
 
 		CREATE TABLE IF NOT EXISTS daemon_stats (
@@ -154,6 +155,15 @@ func migrate(db *sql.DB) error {
 	if ciFixCountExists == 0 {
 		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN ci_fix_count INTEGER DEFAULT 0`); err != nil {
 			slog.Warn("migration: failed to add ci_fix_count column", "error", err)
+		}
+	}
+
+	// Add ci_exhausted_notified column for existing databases that predate zombie watch fix.
+	var ciExhaustedExists int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'ci_exhausted_notified'`).Scan(&ciExhaustedExists)
+	if ciExhaustedExists == 0 {
+		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN ci_exhausted_notified BOOLEAN DEFAULT FALSE`); err != nil {
+			slog.Warn("migration: failed to add ci_exhausted_notified column", "error", err)
 		}
 	}
 
@@ -319,7 +329,7 @@ func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slack
 // OpenPRWatches returns all PRs being monitored (not closed, under either fix limit).
 func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, error) {
 	rows, err := d.db.Query(
-		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count, repo_path FROM pr_watches WHERE closed = FALSE AND (fix_count < ? OR ci_fix_count < ?)",
+		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count, repo_path, ci_exhausted_notified FROM pr_watches WHERE closed = FALSE AND (fix_count < ? OR ci_fix_count < ?)",
 		maxReviewRounds, maxCIFixRounds,
 	)
 	if err != nil {
@@ -330,7 +340,7 @@ func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, err
 	var watches []*PRWatch
 	for rows.Next() {
 		var w PRWatch
-		if err := rows.Scan(&w.PRNumber, &w.PRURL, &w.Branch, &w.RunID, &w.SlackChannel, &w.SlackThread, &w.LastCommentID, &w.FixCount, &w.CIFixCount, &w.RepoPath); err != nil {
+		if err := rows.Scan(&w.PRNumber, &w.PRURL, &w.Branch, &w.RunID, &w.SlackChannel, &w.SlackThread, &w.LastCommentID, &w.FixCount, &w.CIFixCount, &w.RepoPath, &w.CIExhaustedNotified); err != nil {
 			return nil, err
 		}
 		watches = append(watches, &w)
@@ -351,6 +361,15 @@ func (d *DB) UpdatePRWatchLastComment(prNumber, lastCommentID int) error {
 func (d *DB) IncrementCIFixCount(prNumber int) error {
 	_, err := d.db.Exec(
 		"UPDATE pr_watches SET ci_fix_count = ci_fix_count + 1 WHERE pr_number = ?",
+		prNumber,
+	)
+	return err
+}
+
+// MarkCIExhaustedNotified marks that the CI exhaustion notification has been sent for a PR.
+func (d *DB) MarkCIExhaustedNotified(prNumber int) error {
+	_, err := d.db.Exec(
+		"UPDATE pr_watches SET ci_exhausted_notified = TRUE WHERE pr_number = ?",
 		prNumber,
 	)
 	return err
@@ -617,16 +636,17 @@ func (d *DB) Close() error {
 
 // PRWatch represents a monitored toad PR.
 type PRWatch struct {
-	PRNumber      int
-	PRURL         string
-	Branch        string
-	RunID         string
-	SlackChannel  string
-	SlackThread   string
-	LastCommentID int
-	FixCount      int
-	CIFixCount    int
-	RepoPath      string
+	PRNumber            int
+	PRURL               string
+	Branch              string
+	RunID               string
+	SlackChannel        string
+	SlackThread         string
+	LastCommentID       int
+	FixCount            int
+	CIFixCount          int
+	RepoPath            string
+	CIExhaustedNotified bool
 }
 
 // ThreadMemory holds cached context for a Slack thread.

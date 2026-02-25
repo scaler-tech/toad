@@ -110,6 +110,7 @@ repos:
 {{ end }}{{ if $r.LintCommand }}    lint_command: "{{ $r.LintCommand }}"
 {{ end }}    default_branch: "{{ $r.DefaultBranch }}"
     auto_merge: {{ $r.AutoMerge }}
+    # merge_bot_fixups: false    # Auto-merge bot-authored PRs targeting toad branches (e.g. CI style fixes)
 {{ if $r.PRLabels }}    pr_labels:
 {{ range $r.PRLabels }}      - "{{ . }}"
 {{ end }}{{ end }}    # Per-service validation for monorepos:

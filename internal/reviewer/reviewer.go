@@ -391,7 +391,17 @@ func (w *Watcher) getCIFailureLogs(ctx context.Context, failedRunIDs []string, r
 // Returns true if a fix tadpole was spawned.
 func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, error) {
 	if watch.CIFixCount >= w.maxCIFixRounds {
-		slog.Debug("CI fix budget exhausted", "pr", watch.PRNumber, "ci_fix_count", watch.CIFixCount)
+		if !watch.CIExhaustedNotified {
+			slog.Info("CI fix budget exhausted, notifying", "pr", watch.PRNumber, "ci_fix_count", watch.CIFixCount)
+			if w.slack != nil && watch.SlackChannel != "" && watch.SlackThread != "" {
+				w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
+					fmt.Sprintf(":warning: CI still failing after %d fix attempts on PR #%d — needs human attention",
+						watch.CIFixCount, watch.PRNumber))
+			}
+			if err := w.db.MarkCIExhaustedNotified(watch.PRNumber); err != nil {
+				slog.Warn("failed to mark CI exhaustion notified", "pr", watch.PRNumber, "error", err)
+			}
+		}
 		return false, nil
 	}
 
@@ -410,18 +420,47 @@ func (w *Watcher) checkCI(ctx context.Context, watch *state.PRWatch) (bool, erro
 		return false, nil
 	}
 
-	// CI failed — fetch logs and spawn fix
+	// CI failed — fetch logs, check for auto-fix PR, or spawn fix
 	slog.Info("CI failure detected",
 		"pr", watch.PRNumber,
 		"failed_runs", len(ci.FailedIDs),
 		"ci_fix_count", watch.CIFixCount,
 	)
 
-	if err := w.db.IncrementCIFixCount(watch.PRNumber); err != nil {
-		return false, fmt.Errorf("incrementing CI fix count: %w", err)
+	// Check if a bot created a fixup PR (e.g. code style fixes) targeting the toad branch.
+	// If found, merge it instead of spawning a tadpole — it's a free fix.
+	repo := config.RepoByPath(w.repos, watch.RepoPath)
+	if repo != nil && repo.MergeBotFixups {
+		if fixupPR := w.findBotFixupPR(ctx, watch.Branch, watch.RepoPath); fixupPR > 0 {
+			slog.Info("bot fixup PR found", "pr", watch.PRNumber, "fixup_pr", fixupPR)
+
+			if w.slack != nil && watch.SlackChannel != "" && watch.SlackThread != "" {
+				w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
+					fmt.Sprintf(":wrench: Merging bot fix-up PR #%d...", fixupPR))
+			}
+
+			mergeCmd := exec.CommandContext(ctx, "gh", "pr", "merge",
+				strconv.Itoa(fixupPR), "--squash", "--delete-branch")
+			mergeCmd.Dir = watch.RepoPath
+			var mergeStderr bytes.Buffer
+			mergeCmd.Stderr = &mergeStderr
+			if err := mergeCmd.Run(); err != nil {
+				slog.Warn("failed to merge bot fixup PR, falling through to tadpole",
+					"fixup_pr", fixupPR, "error", err,
+					"stderr", strings.TrimSpace(mergeStderr.String()))
+			} else {
+				slog.Info("merged bot fixup PR", "fixup_pr", fixupPR, "parent_pr", watch.PRNumber)
+				return true, nil
+			}
+		}
 	}
 
 	logs := w.getCIFailureLogs(ctx, ci.FailedIDs, watch.RepoPath)
+
+	// Increment CI fix count only when we're actually spawning a fix tadpole
+	if err := w.db.IncrementCIFixCount(watch.PRNumber); err != nil {
+		return false, fmt.Errorf("incrementing CI fix count: %w", err)
+	}
 
 	var taskDesc strings.Builder
 	fmt.Fprintf(&taskDesc, "Fix CI failures on PR #%d.\n\n", watch.PRNumber)
@@ -621,6 +660,48 @@ func (w *Watcher) getPRState(ctx context.Context, prNumber int, repoPath string)
 		return nil, fmt.Errorf("parsing PR state: %w", err)
 	}
 	return &pr, nil
+}
+
+// botPR represents a PR from `gh pr list --json`.
+type botPR struct {
+	Number int `json:"number"`
+	Author struct {
+		Login string `json:"login"`
+		Type  string `json:"type"` // "User" or "Bot"
+	} `json:"author"`
+}
+
+// findBotFixupPR checks if there's a bot-authored PR targeting the given branch.
+// Returns the PR number or 0 if none found.
+func (w *Watcher) findBotFixupPR(ctx context.Context, branch, repoPath string) int {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
+		"--base", branch,
+		"--state", "open",
+		"--json", "number,author",
+	)
+	cmd.Dir = repoPath
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		slog.Debug("failed to list PRs targeting branch", "branch", branch, "error", err)
+		return 0
+	}
+
+	var prs []botPR
+	if err := json.Unmarshal(stdout.Bytes(), &prs); err != nil {
+		slog.Debug("failed to parse PR list", "error", err)
+		return 0
+	}
+
+	for _, pr := range prs {
+		if strings.EqualFold(pr.Author.Type, "Bot") {
+			return pr.Number
+		}
+	}
+	return 0
 }
 
 // ExtractPRNumber extracts a PR number from a GitHub PR URL.

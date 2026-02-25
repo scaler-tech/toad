@@ -212,7 +212,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 			}
 		}
 
-		prURL, err = ship(ctx, wt.Path, wt.Branch, task, repo.AutoMerge, repo.PRLabels, slackLink, task.RepoPaths)
+		prURL, err = ship(ctx, wt.Path, wt.Branch, task, repo.AutoMerge, repo.PRLabels, slackLink, task.RepoPaths, repo.DefaultBranch)
 		if err != nil {
 			return fail(fmt.Sprintf("shipping: %s", err))
 		}
@@ -285,7 +285,7 @@ func (r *Runner) swapReact(task Task, remove, add string) {
 	r.slack.SwapReaction(task.SlackChannel, task.SlackThreadTS, remove, add)
 }
 
-func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge bool, prLabels []string, slackLink string, repoPaths map[string]string) (string, error) {
+func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge bool, prLabels []string, slackLink string, repoPaths map[string]string, defaultBranch string) (string, error) {
 	// Push branch to origin
 	slog.Info("pushing branch", "branch", branch)
 	pushCmd := exec.CommandContext(ctx, "git", "push", "-u", "origin", branch)
@@ -294,6 +294,15 @@ func ship(ctx context.Context, worktreePath, branch string, task Task, autoMerge
 	pushCmd.Stderr = &pushStderr
 	if err := pushCmd.Run(); err != nil {
 		return "", fmt.Errorf("git push: %w: %s", err, strings.TrimSpace(pushStderr.String()))
+	}
+
+	// Verify we have commits ahead of the default branch — catches cases where
+	// Claude's changes are identical to what's already on main after push.
+	diffCmd := exec.CommandContext(ctx, "git", "log", "origin/"+defaultBranch+"..HEAD", "--oneline")
+	diffCmd.Dir = worktreePath
+	diffOut, err := diffCmd.Output()
+	if err == nil && strings.TrimSpace(string(diffOut)) == "" {
+		return "", fmt.Errorf("no changes vs %s — the issue may already be fixed on the target branch", defaultBranch)
 	}
 
 	// Create PR via gh CLI

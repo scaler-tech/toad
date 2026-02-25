@@ -412,6 +412,55 @@ func handleTriggered(
 		}
 	}
 
+	// Retry detection: if user says "try again" / "retry" in a thread with a previous
+	// toad failure, skip triage and re-spawn directly.
+	if isRetryIntent(msg.Text) && hasFailedTadpole(msg.ThreadContext) {
+		slog.Info("retry intent detected", "channel", channelName, "thread", threadTS)
+
+		if !stateManager.Claim(threadTS) {
+			slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
+			slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
+			return
+		}
+		claimed := true
+		defer func() {
+			if claimed {
+				stateManager.Unclaim(threadTS)
+			}
+		}()
+
+		taskDescription := buildTaskDescription(msg.Text, msg.ThreadContext)
+		repo := resolver.Resolve("", nil)
+		if repo == nil {
+			slackClient.ReplyInThread(msg.Channel, threadTS,
+				":frog: I'm not sure which repo this is about — could you mention a file or project name?")
+			slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
+			return
+		}
+
+		task := tadpole.Task{
+			Description:   taskDescription,
+			Summary:       "retry: " + truncate(taskDescription, 60),
+			Category:      "bug",
+			EstSize:       "small",
+			SlackChannel:  msg.Channel,
+			SlackThreadTS: threadTS,
+			Repo:          repo,
+			RepoPaths:     repoPaths,
+		}
+
+		if err := tadpolePool.Spawn(ctx, task); err != nil {
+			slog.Error("retry spawn failed", "error", err)
+			slackClient.SwapReaction(msg.Channel, msg.Timestamp, "eyes", "warning")
+			slackClient.ReplyInThread(msg.Channel, threadTS,
+				":x: Failed to spawn tadpole: "+err.Error())
+			return
+		}
+		claimed = false
+		slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
+		return
+	}
+
 	// Triage — fast Haiku classification (~1s) to decide: ribbit or tadpole?
 	result, err := triageEngine.Classify(ctx, msg, channelName)
 	if err != nil {
@@ -971,6 +1020,45 @@ func stripCodeFences(text string) string {
 		inner = inner[:fenceEnd]
 	}
 	return inner
+}
+
+// isRetryIntent checks if a message text indicates the user wants to retry a previous attempt.
+func isRetryIntent(text string) bool {
+	lower := strings.ToLower(text)
+	retryPhrases := []string{
+		"try again",
+		"retry",
+		"redo",
+		"re-do",
+		"one more time",
+		"rerun",
+		"re-run",
+	}
+	for _, phrase := range retryPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasFailedTadpole checks thread context for evidence of a previous toad failure.
+func hasFailedTadpole(threadContext []string) bool {
+	for _, msg := range threadContext {
+		if strings.Contains(msg, ":x: Tadpole failed") {
+			return true
+		}
+	}
+	return false
+}
+
+// truncate returns the first n runes of s, appending "..." if truncated.
+func truncate(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n-3]) + "..."
 }
 
 func checkClaude() error {

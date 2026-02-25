@@ -203,6 +203,85 @@ func TestStripCodeFences_PlainFences(t *testing.T) {
 	}
 }
 
+func TestIsRetryIntent(t *testing.T) {
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{"try again", true},
+		{"can you try again?", true},
+		{"retry", true},
+		{"please retry this", true},
+		{"redo", true},
+		{"re-do this please", true},
+		{"one more time", true},
+		{"rerun", true},
+		{"re-run it", true},
+		{"@toad TRY AGAIN", true},
+		{"fix the nil pointer in handler.go", false},
+		{"great work!", false},
+		{"", false},
+		{"this is trying my patience", false}, // "try" without "again" - should not match
+	}
+	for _, tt := range tests {
+		got := isRetryIntent(tt.text)
+		if got != tt.want {
+			t.Errorf("isRetryIntent(%q) = %v, want %v", tt.text, got, tt.want)
+		}
+	}
+}
+
+func TestHasFailedTadpole(t *testing.T) {
+	tests := []struct {
+		name    string
+		context []string
+		want    bool
+	}{
+		{
+			"with failure marker",
+			[]string{"some message", ":x: Tadpole failed — tests failed", "user: try again"},
+			true,
+		},
+		{
+			"no failure marker",
+			[]string{"some message", ":white_check_mark: Done! PR: https://github.com/pr/1"},
+			false,
+		},
+		{
+			"empty context",
+			nil,
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hasFailedTadpole(tt.context)
+			if got != tt.want {
+				t.Errorf("hasFailedTadpole() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		input string
+		n     int
+		want  string
+	}{
+		{"short", 10, "short"},
+		{"exactly ten", 11, "exactly ten"},
+		{"this is a long string that needs truncation", 20, "this is a long st..."},
+		{"", 5, ""},
+	}
+	for _, tt := range tests {
+		got := truncate(tt.input, tt.n)
+		if got != tt.want {
+			t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.n, got, tt.want)
+		}
+	}
+}
+
 // helpers
 
 func contains(s, substr string) bool {
