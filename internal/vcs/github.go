@@ -79,6 +79,38 @@ func (g *GitHubProvider) GetPRState(ctx context.Context, prNumber int, repoPath 
 	return pr.State, nil
 }
 
+func (g *GitHubProvider) GetMergeability(ctx context.Context, prNumber int, repoPath string) (string, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view",
+		strconv.Itoa(prNumber),
+		"--json", "mergeable",
+	)
+	cmd.Dir = repoPath
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	var pr struct {
+		Mergeable string `json:"mergeable"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &pr); err != nil {
+		return "", fmt.Errorf("parsing mergeable status: %w", err)
+	}
+
+	switch strings.ToUpper(pr.Mergeable) {
+	case "MERGEABLE":
+		return "MERGEABLE", nil
+	case "CONFLICTING":
+		return "CONFLICTING", nil
+	default:
+		return "UNKNOWN", nil
+	}
+}
+
 // ghCheck represents a single check run from `gh pr checks --json`.
 type ghCheck struct {
 	Name  string `json:"name"`

@@ -23,6 +23,10 @@ type Provider interface {
 	// GetPRState returns the PR state (e.g. "OPEN", "CLOSED", "MERGED").
 	GetPRState(ctx context.Context, prNumber int, repoPath string) (string, error)
 
+	// GetMergeability returns whether a PR can be merged.
+	// Returns "MERGEABLE", "CONFLICTING", or "UNKNOWN".
+	GetMergeability(ctx context.Context, prNumber int, repoPath string) (string, error)
+
 	// GetCIStatus returns the aggregate CI status for a PR.
 	GetCIStatus(ctx context.Context, prNumber int, repoPath string) (*CIStatus, error)
 

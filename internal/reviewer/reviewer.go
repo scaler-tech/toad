@@ -122,13 +122,22 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 		return w.db.ClosePRWatch(watch.PRNumber)
 	}
 
-	// 2. Check review comments (takes priority over CI)
+	// 2. Check for merge conflicts (takes priority — can't review/CI a conflicting PR)
+	conflictFixSpawned, err := w.checkMergeConflicts(ctx, vcsProvider, watch)
+	if err != nil {
+		return err
+	}
+	if conflictFixSpawned {
+		return nil
+	}
+
+	// 3. Check review comments
 	commentFixSpawned, err := w.checkReviewComments(ctx, vcsProvider, watch)
 	if err != nil {
 		return err
 	}
 
-	// 3. If no comment fix was spawned, check CI status
+	// 4. If no comment fix was spawned, check CI status
 	// Skip CI check if a comment fix was just spawned — the push will restart CI anyway.
 	if !commentFixSpawned {
 		if _, err := w.checkCI(ctx, vcsProvider, watch); err != nil {
@@ -137,6 +146,74 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 	}
 
 	return nil
+}
+
+// checkMergeConflicts detects merge conflicts on a PR and spawns a fix tadpole to rebase+resolve.
+// Returns true if a fix tadpole was spawned.
+func (w *Watcher) checkMergeConflicts(ctx context.Context, vcsProvider vcs.Provider, watch *state.PRWatch) (bool, error) {
+	if watch.ConflictFixCount >= w.maxReviewRounds {
+		return false, nil
+	}
+
+	mergeability, err := vcsProvider.GetMergeability(ctx, watch.PRNumber, watch.RepoPath)
+	if err != nil {
+		slog.Debug("failed to check mergeability", "pr", watch.PRNumber, "error", err)
+		return false, nil
+	}
+
+	if mergeability != "CONFLICTING" {
+		return false, nil
+	}
+
+	slog.Info("merge conflict detected",
+		"pr", watch.PRNumber,
+		"conflict_fix_count", watch.ConflictFixCount,
+	)
+
+	repo := config.RepoByPath(w.repos, watch.RepoPath)
+	defaultBranch := "main"
+	if repo != nil && repo.DefaultBranch != "" {
+		defaultBranch = repo.DefaultBranch
+	}
+
+	task := tadpole.Task{
+		Description: fmt.Sprintf(
+			"Rebase branch onto %s and resolve all merge conflicts on %s #%d.\n\n"+
+				"The branch has merge conflicts with the default branch. Rebase onto origin/%s, "+
+				"resolve any conflicts preserving the intent of the branch's changes, "+
+				"then stage and commit the resolved files.",
+			defaultBranch, vcsProvider.PRNoun(), watch.PRNumber, defaultBranch),
+		Summary:        fmt.Sprintf("resolve merge conflicts on %s #%d", vcsProvider.PRNoun(), watch.PRNumber),
+		Category:       "bug",
+		EstSize:        "small",
+		SlackChannel:   watch.SlackChannel,
+		SlackThreadTS:  watch.SlackThread,
+		ExistingBranch: watch.Branch,
+		Repo:           repo,
+	}
+
+	if w.slack != nil && watch.SlackChannel != "" && watch.SlackThread != "" {
+		w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
+			fmt.Sprintf(":warning: Merge conflict detected on %s #%d — spawning fix tadpole...",
+				vcsProvider.PRNoun(), watch.PRNumber))
+	}
+
+	if err := w.spawn(ctx, task); err != nil {
+		slog.Error("failed to spawn merge conflict fix tadpole", "pr", watch.PRNumber, "error", err)
+		if w.slack != nil && watch.SlackChannel != "" {
+			w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
+				fmt.Sprintf(":x: Failed to spawn merge conflict fix for %s #%d: %s",
+					vcsProvider.PRNoun(), watch.PRNumber, err))
+		}
+		return false, err
+	}
+
+	// Increment conflict fix count to track resolution attempts
+	if err := w.db.IncrementConflictFixCount(watch.PRNumber); err != nil {
+		slog.Warn("failed to increment conflict fix count", "pr", watch.PRNumber, "error", err)
+	}
+
+	return true, nil
 }
 
 // checkReviewComments fetches and triages new review comments, spawning a fix tadpole if actionable.

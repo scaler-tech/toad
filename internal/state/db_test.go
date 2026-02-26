@@ -298,9 +298,20 @@ func TestDB_PRWatch_FixCountLimit(t *testing.T) {
 		db.IncrementCIFixCount(42)
 	}
 
+	// PR should still appear — conflict fix budget is not exhausted
+	watches, _ = db.OpenPRWatches(3, 3)
+	if len(watches) != 1 {
+		t.Error("PR at review+CI fix limits should still appear when conflict fix budget remains")
+	}
+
+	// Exhaust conflict fix budget
+	for i := 0; i < 3; i++ {
+		db.IncrementConflictFixCount(42)
+	}
+
 	watches, _ = db.OpenPRWatches(3, 3)
 	if len(watches) != 0 {
-		t.Error("PR at both fix limits should not appear in open watches")
+		t.Error("PR at all fix limits should not appear in open watches")
 	}
 }
 
@@ -347,11 +358,42 @@ func TestDB_PRWatch_CIFixCount(t *testing.T) {
 		t.Error("PR should still be open when CI fix budget remains")
 	}
 
-	// Watch excluded when BOTH budgets are exhausted
+	// Watch still open — conflict fix budget remains
 	db.IncrementCIFixCount(42) // now ci_fix_count=3
 	watches, _ = db.OpenPRWatches(3, 3)
+	if len(watches) != 1 {
+		t.Error("PR should still be open when conflict fix budget remains")
+	}
+
+	// Watch excluded when ALL budgets are exhausted
+	for i := 0; i < 3; i++ {
+		db.IncrementConflictFixCount(42)
+	}
+	watches, _ = db.OpenPRWatches(3, 3)
 	if len(watches) != 0 {
-		t.Error("PR should not appear when both budgets are exhausted")
+		t.Error("PR should not appear when all budgets are exhausted")
+	}
+}
+
+func TestDB_PRWatch_ConflictFixCount(t *testing.T) {
+	db := openTestDB(t)
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
+
+	if err := db.IncrementConflictFixCount(42); err != nil {
+		t.Fatal(err)
+	}
+
+	watches, _ := db.OpenPRWatches(3, 3)
+	if len(watches) != 1 {
+		t.Fatalf("expected 1 watch, got %d", len(watches))
+	}
+	if watches[0].ConflictFixCount != 1 {
+		t.Errorf("conflict_fix_count: got %d, want 1", watches[0].ConflictFixCount)
+	}
+
+	// Conflict fix count is independent of review fix count
+	if watches[0].FixCount != 0 {
+		t.Errorf("fix_count should be 0, got %d", watches[0].FixCount)
 	}
 }
 

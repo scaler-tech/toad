@@ -17,9 +17,10 @@ import (
 
 // WorktreeResult holds paths created by worktree setup.
 type WorktreeResult struct {
-	Path      string // ~/.toad/worktrees/<slug>-<id>
-	Branch    string // toad/<slug>
-	StaleBase bool   // true if fetch failed and worktree uses potentially outdated code
+	Path       string // ~/.toad/worktrees/<slug>-<id>
+	Branch     string // toad/<slug>
+	StaleBase  bool   // true if fetch failed and worktree uses potentially outdated code
+	BaseCommit string // HEAD commit before Claude runs — used as diff baseline for review fixes
 }
 
 // CreateWorktree creates a git worktree for an isolated tadpole run.
@@ -109,12 +110,20 @@ func CheckoutWorktree(ctx context.Context, repoPath, branch string) (*WorktreeRe
 		}
 	}
 
-	return &WorktreeResult{Path: wtPath, Branch: branch}, nil
+	// Capture HEAD before Claude runs — used as diff baseline for validation
+	baseCommit, err := gitOutput(ctx, wtPath, "rev-parse", "HEAD")
+	if err != nil {
+		slog.Warn("failed to capture base commit", "error", err)
+	}
+
+	return &WorktreeResult{Path: wtPath, Branch: branch, BaseCommit: baseCommit}, nil
 }
 
 // pushBranch pushes the current branch to origin without creating a PR.
+// Uses --force-with-lease so pushes succeed after rebases while still
+// protecting against overwriting concurrent changes.
 func pushBranch(ctx context.Context, worktreePath, branch string) error {
-	return gitRunCtx(ctx, worktreePath, "push", "origin", branch)
+	return gitRunCtx(ctx, worktreePath, "push", "--force-with-lease", "origin", branch)
 }
 
 // RemoveWorktree force-removes a worktree and prunes. Best-effort cleanup.
@@ -173,4 +182,16 @@ func gitRunCtx(ctx context.Context, dir string, args ...string) error {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }

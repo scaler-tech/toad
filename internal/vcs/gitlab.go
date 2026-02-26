@@ -126,6 +126,40 @@ func mapGitLabState(state string) string {
 	}
 }
 
+func (g *GitLabProvider) GetMergeability(ctx context.Context, prNumber int, repoPath string) (string, error) {
+	cmd := g.glabCmd(ctx, repoPath,
+		"mr", "view", strconv.Itoa(prNumber), "--output", "json",
+	)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	var mr struct {
+		MergeStatus string `json:"merge_status"`
+		HasConflict bool   `json:"has_conflicts"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &mr); err != nil {
+		return "", fmt.Errorf("parsing MR mergeability: %w", err)
+	}
+
+	if mr.HasConflict {
+		return "CONFLICTING", nil
+	}
+	switch strings.ToLower(mr.MergeStatus) {
+	case "can_be_merged":
+		return "MERGEABLE", nil
+	case "cannot_be_merged", "cannot_be_merged_recheck":
+		return "CONFLICTING", nil
+	default:
+		return "UNKNOWN", nil
+	}
+}
+
 // glabPipeline represents a pipeline from the GitLab API.
 type glabPipeline struct {
 	ID     int    `json:"id"`

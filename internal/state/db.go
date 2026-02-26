@@ -105,6 +105,7 @@ func migrate(db *sql.DB) error {
 			last_comment_id        INTEGER DEFAULT 0,
 			fix_count              INTEGER DEFAULT 0,
 			ci_fix_count           INTEGER DEFAULT 0,
+			conflict_fix_count     INTEGER DEFAULT 0,
 			repo_path              TEXT DEFAULT '',
 			ci_exhausted_notified  BOOLEAN DEFAULT FALSE,
 			created_at             DATETIME NOT NULL,
@@ -165,6 +166,15 @@ func migrate(db *sql.DB) error {
 	if ciExhaustedExists == 0 {
 		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN ci_exhausted_notified BOOLEAN DEFAULT FALSE`); err != nil {
 			slog.Warn("migration: failed to add ci_exhausted_notified column", "error", err)
+		}
+	}
+
+	// Add conflict_fix_count column for existing databases that predate merge conflict watching.
+	var conflictFixCountExists int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'conflict_fix_count'`).Scan(&conflictFixCountExists)
+	if conflictFixCountExists == 0 {
+		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN conflict_fix_count INTEGER DEFAULT 0`); err != nil {
+			slog.Warn("migration: failed to add conflict_fix_count column", "error", err)
 		}
 	}
 
@@ -336,11 +346,11 @@ func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slack
 	return err
 }
 
-// OpenPRWatches returns all PRs being monitored (not closed, under either fix limit).
+// OpenPRWatches returns all PRs being monitored (not closed, under any fix limit).
 func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, error) {
 	rows, err := d.db.Query(
-		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count, repo_path, ci_exhausted_notified FROM pr_watches WHERE closed = FALSE AND (fix_count < ? OR ci_fix_count < ?)",
-		maxReviewRounds, maxCIFixRounds,
+		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count, conflict_fix_count, repo_path, ci_exhausted_notified FROM pr_watches WHERE closed = FALSE AND (fix_count < ? OR ci_fix_count < ? OR conflict_fix_count < ?)",
+		maxReviewRounds, maxCIFixRounds, maxReviewRounds,
 	)
 	if err != nil {
 		return nil, err
@@ -350,7 +360,7 @@ func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, err
 	var watches []*PRWatch
 	for rows.Next() {
 		var w PRWatch
-		if err := rows.Scan(&w.PRNumber, &w.PRURL, &w.Branch, &w.RunID, &w.SlackChannel, &w.SlackThread, &w.LastCommentID, &w.FixCount, &w.CIFixCount, &w.RepoPath, &w.CIExhaustedNotified); err != nil {
+		if err := rows.Scan(&w.PRNumber, &w.PRURL, &w.Branch, &w.RunID, &w.SlackChannel, &w.SlackThread, &w.LastCommentID, &w.FixCount, &w.CIFixCount, &w.ConflictFixCount, &w.RepoPath, &w.CIExhaustedNotified); err != nil {
 			return nil, err
 		}
 		watches = append(watches, &w)
@@ -371,6 +381,15 @@ func (d *DB) UpdatePRWatchLastComment(prNumber, lastCommentID int) error {
 func (d *DB) IncrementCIFixCount(prNumber int) error {
 	_, err := d.db.Exec(
 		"UPDATE pr_watches SET ci_fix_count = ci_fix_count + 1 WHERE pr_number = ?",
+		prNumber,
+	)
+	return err
+}
+
+// IncrementConflictFixCount bumps the merge conflict fix attempt counter for a PR watch.
+func (d *DB) IncrementConflictFixCount(prNumber int) error {
+	_, err := d.db.Exec(
+		"UPDATE pr_watches SET conflict_fix_count = conflict_fix_count + 1 WHERE pr_number = ?",
 		prNumber,
 	)
 	return err
@@ -702,6 +721,7 @@ type PRWatch struct {
 	LastCommentID       int
 	FixCount            int
 	CIFixCount          int
+	ConflictFixCount    int
 	RepoPath            string
 	CIExhaustedNotified bool
 }
