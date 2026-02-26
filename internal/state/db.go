@@ -109,7 +109,8 @@ func migrate(db *sql.DB) error {
 			repo_path              TEXT DEFAULT '',
 			ci_exhausted_notified  BOOLEAN DEFAULT FALSE,
 			created_at             DATETIME NOT NULL,
-			closed                 BOOLEAN DEFAULT FALSE
+			closed                 BOOLEAN DEFAULT FALSE,
+			final_state            TEXT DEFAULT ''
 		);
 
 		CREATE TABLE IF NOT EXISTS daemon_stats (
@@ -184,6 +185,15 @@ func migrate(db *sql.DB) error {
 	if investigatingExists == 0 {
 		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN investigating BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
 			slog.Warn("migration: failed to add investigating column", "error", err)
+		}
+	}
+
+	// Add final_state column for existing databases that predate merge rate tracking.
+	var finalStateExists int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'final_state'`).Scan(&finalStateExists)
+	if finalStateExists == 0 {
+		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN final_state TEXT DEFAULT ''`); err != nil {
+			slog.Warn("migration: failed to add final_state column", "error", err)
 		}
 	}
 
@@ -444,11 +454,11 @@ func (d *DB) MarkCIExhaustedNotified(prNumber int) error {
 	return err
 }
 
-// ClosePRWatch marks a PR watch as closed (merged/closed).
-func (d *DB) ClosePRWatch(prNumber int) error {
+// ClosePRWatch marks a PR watch as closed with its final state (e.g. "MERGED", "CLOSED").
+func (d *DB) ClosePRWatch(prNumber int, finalState string) error {
 	ctx, cancel := dbCtx()
 	defer cancel()
-	_, err := d.db.ExecContext(ctx, "UPDATE pr_watches SET closed = TRUE WHERE pr_number = ?", prNumber)
+	_, err := d.db.ExecContext(ctx, "UPDATE pr_watches SET closed = TRUE, final_state = ? WHERE pr_number = ?", finalState, prNumber)
 	return err
 }
 
@@ -508,6 +518,42 @@ func (d *DB) Stats() (*Stats, error) {
 		return nil, fmt.Errorf("counting threads: %w", err)
 	}
 
+	return &s, nil
+}
+
+// MergeStats holds aggregate PR outcome metrics.
+type MergeStats struct {
+	PRsCreated int
+	PRsMerged  int
+	PRsClosed  int
+	PRsOpen    int
+}
+
+// MergeRate returns the merge rate as a percentage (0-100), or -1 if no PRs exist.
+func (s *MergeStats) MergeRate() float64 {
+	total := s.PRsMerged + s.PRsClosed
+	if total == 0 {
+		return -1
+	}
+	return float64(s.PRsMerged) / float64(total) * 100
+}
+
+// MergeStats returns aggregate PR outcome metrics from pr_watches.
+func (d *DB) MergeStats() (*MergeStats, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	var s MergeStats
+	err := d.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN UPPER(final_state) = 'MERGED' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN closed = TRUE AND UPPER(final_state) != 'MERGED' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN closed = FALSE THEN 1 ELSE 0 END), 0)
+		FROM pr_watches`,
+	).Scan(&s.PRsCreated, &s.PRsMerged, &s.PRsClosed, &s.PRsOpen)
+	if err != nil {
+		return nil, fmt.Errorf("querying merge stats: %w", err)
+	}
 	return &s, nil
 }
 

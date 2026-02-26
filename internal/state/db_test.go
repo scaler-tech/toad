@@ -270,7 +270,7 @@ func TestDB_PRWatch(t *testing.T) {
 func TestDB_PRWatch_ClosedExcluded(t *testing.T) {
 	db := openTestDB(t)
 	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
-	db.ClosePRWatch(42)
+	db.ClosePRWatch(42, "MERGED")
 
 	watches, _ := db.OpenPRWatches(3, 3)
 	if len(watches) != 0 {
@@ -948,5 +948,55 @@ func TestKeywordOverlap(t *testing.T) {
 				t.Errorf("expected overlap == 0, got %.2f", score)
 			}
 		})
+	}
+}
+
+func TestDB_MergeStats(t *testing.T) {
+	db := openTestDB(t)
+
+	// Empty DB — no PRs
+	stats, err := db.MergeStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.PRsCreated != 0 || stats.PRsMerged != 0 || stats.PRsClosed != 0 {
+		t.Errorf("empty DB: expected all zeros, got created=%d merged=%d closed=%d", stats.PRsCreated, stats.PRsMerged, stats.PRsClosed)
+	}
+	if rate := stats.MergeRate(); rate != -1 {
+		t.Errorf("empty DB: expected merge rate -1, got %.1f", rate)
+	}
+
+	// Create 3 PRs
+	db.SavePRWatch(1, "https://github.com/pr/1", "fix-a", "run-1", "C1", "ts-1", "/repos/test")
+	db.SavePRWatch(2, "https://github.com/pr/2", "fix-b", "run-2", "C1", "ts-2", "/repos/test")
+	db.SavePRWatch(3, "https://github.com/pr/3", "fix-c", "run-3", "C1", "ts-3", "/repos/test")
+
+	stats, _ = db.MergeStats()
+	if stats.PRsCreated != 3 {
+		t.Errorf("expected 3 created, got %d", stats.PRsCreated)
+	}
+	if stats.PRsOpen != 3 {
+		t.Errorf("expected 3 open, got %d", stats.PRsOpen)
+	}
+
+	// Merge PR #1, close PR #2
+	db.ClosePRWatch(1, "MERGED")
+	db.ClosePRWatch(2, "CLOSED")
+
+	stats, _ = db.MergeStats()
+	if stats.PRsMerged != 1 {
+		t.Errorf("expected 1 merged, got %d", stats.PRsMerged)
+	}
+	if stats.PRsClosed != 1 {
+		t.Errorf("expected 1 closed, got %d", stats.PRsClosed)
+	}
+	if stats.PRsOpen != 1 {
+		t.Errorf("expected 1 open, got %d", stats.PRsOpen)
+	}
+
+	// Merge rate: 1 merged / (1 merged + 1 closed) = 50%
+	rate := stats.MergeRate()
+	if rate < 49.9 || rate > 50.1 {
+		t.Errorf("expected merge rate ~50%%, got %.1f%%", rate)
 	}
 }

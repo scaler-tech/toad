@@ -69,6 +69,7 @@ type apiResponse struct {
 	Daemon        *apiDaemon          `json:"daemon"`
 	Integrations  []apiIntegration    `json:"integrations"`
 	Stats         *state.Stats        `json:"stats"`
+	MergeStats    *apiMergeStats      `json:"merge_stats,omitempty"`
 	Active        []apiRun            `json:"active"`
 	History       []apiRun            `json:"history"`
 	Watches       []apiWatch          `json:"watches"`
@@ -78,6 +79,14 @@ type apiResponse struct {
 	CCUsage       *apiCCUsage         `json:"cc_usage,omitempty"`
 	PRNoun        string              `json:"pr_noun"`
 	Now           int64               `json:"now"`
+}
+
+type apiMergeStats struct {
+	PRsCreated int     `json:"prs_created"`
+	PRsMerged  int     `json:"prs_merged"`
+	PRsClosed  int     `json:"prs_closed"`
+	PRsOpen    int     `json:"prs_open"`
+	MergeRate  float64 `json:"merge_rate"` // -1 if no completed PRs
 }
 
 type apiOpportunity struct {
@@ -363,6 +372,16 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 
 		if digestCounts, err := db.DigestOpportunityCounts(); err == nil {
 			resp.DigestCounts = digestCounts
+		}
+
+		if ms, err := db.MergeStats(); err == nil {
+			resp.MergeStats = &apiMergeStats{
+				PRsCreated: ms.PRsCreated,
+				PRsMerged:  ms.PRsMerged,
+				PRsClosed:  ms.PRsClosed,
+				PRsOpen:    ms.PRsOpen,
+				MergeRate:  ms.MergeRate(),
+			}
 		}
 
 		if cfg != nil {
@@ -783,7 +802,7 @@ const dashboardHTML = `<!DOCTYPE html>
 <!-- Stats cards -->
 <div class="stats" id="stats-row">
   <div class="stat-card"><div class="label">Tadpole Runs</div><div class="value" id="s-total">-</div><div class="sub" id="s-breakdown"></div></div>
-  <div class="stat-card"><div class="label">Success Rate</div><div class="value" id="s-rate">-</div><div class="sub" id="s-rate-sub"></div></div>
+  <div class="stat-card"><div class="label">Merge Rate</div><div class="value" id="s-merge">-</div><div class="sub" id="s-merge-sub"></div></div>
   <div class="stat-card"><div class="label">Avg Duration</div><div class="value" id="s-dur">-</div><div class="sub">&nbsp;</div></div>
   <div class="stat-card"><div class="label">Ribbits</div><div class="value" id="s-ribbits">-</div><div class="sub" id="s-ribbits-sub"></div></div>
   <div class="stat-card"><div class="label">Toad King</div><div class="value" id="s-king">-</div><div class="sub" id="s-king-sub">&nbsp;</div></div>
@@ -976,11 +995,24 @@ async function refresh() {
     document.getElementById('s-breakdown').textContent =
       st.Succeeded + ' passed, ' + st.Failed + ' failed' +
       (active.length > 0 ? ', ' + active.length + ' active' : '');
-    document.getElementById('s-rate').textContent = fmtRate(st.TotalRuns, st.Succeeded);
-    document.getElementById('s-rate').style.color =
-      st.TotalRuns > 0 && (st.Succeeded / st.TotalRuns) >= 0.8 ? 'var(--green)' : 'var(--amber)';
-    document.getElementById('s-rate-sub').textContent =
-      st.Succeeded + '/' + st.TotalRuns + ' succeeded';
+    // Merge rate card
+    const ms = d.merge_stats || {};
+    if (ms.prs_created > 0 && ms.merge_rate >= 0) {
+      document.getElementById('s-merge').textContent = Math.round(ms.merge_rate) + '%';
+      document.getElementById('s-merge').style.color =
+        ms.merge_rate >= 70 ? 'var(--green)' : ms.merge_rate >= 40 ? 'var(--amber)' : 'var(--red)';
+      document.getElementById('s-merge-sub').textContent =
+        ms.prs_merged + ' merged / ' + (ms.prs_merged + ms.prs_closed) + ' resolved'
+        + (ms.prs_open > 0 ? ', ' + ms.prs_open + ' open' : '');
+    } else if (ms.prs_created > 0) {
+      document.getElementById('s-merge').textContent = '-';
+      document.getElementById('s-merge').style.color = 'var(--dim)';
+      document.getElementById('s-merge-sub').textContent = ms.prs_open + ' open, none resolved yet';
+    } else {
+      document.getElementById('s-merge').textContent = '-';
+      document.getElementById('s-merge').style.color = 'var(--dim)';
+      document.getElementById('s-merge-sub').textContent = 'no PRs yet';
+    }
     document.getElementById('s-dur').textContent = fmtDuration(st.AvgDuration / 1e9);
     document.getElementById('s-ribbits').textContent = num(dm.ribbits || 0);
     document.getElementById('s-ribbits-sub').textContent =

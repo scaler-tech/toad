@@ -120,7 +120,7 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 	}
 	if !strings.EqualFold(prState, "open") {
 		slog.Info("PR closed/merged, stopping watch", "pr", watch.PRNumber, "state", prState)
-		return w.db.ClosePRWatch(watch.PRNumber)
+		return w.db.ClosePRWatch(watch.PRNumber, strings.ToUpper(prState))
 	}
 
 	// 2. Check for merge conflicts (takes priority — can't review/CI a conflicting PR)

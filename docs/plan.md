@@ -191,13 +191,13 @@ Inspired by [Stripe Minions](https://stripe.dev/blog/minions-stripes-one-shot-en
 
 ## Phase 3.5: Robustness & Bug Fixes
 
-**Status: In progress**
+**Status: Complete** (all critical fixes and robustness items done; test coverage items remain)
 
 Quick wins from the Feb 2026 full review. All are targeted, small changes.
 
 ### Sprint 1: Critical fixes
 
-- [ ] Fix Unicode-unsafe PR title truncation
+- [x] Fix Unicode-unsafe PR title truncation
   - **File:** `internal/tadpole/runner.go` — `ship()` function
   - **Bug:** `len(title) > 70` counts bytes, not characters. `title[:67]` can split a multibyte character (emoji, accented chars), producing corrupted UTF-8 in the PR title.
   - **Fix:** Convert to runes for length check and truncation:
@@ -211,7 +211,7 @@ Quick wins from the Feb 2026 full review. All are targeted, small changes.
 
 - [x] Remove `--dangerously-skip-permissions` from digest analyze call *(done in v0.1.6)*
 
-- [ ] Log ALTER TABLE migration errors
+- [x] Log ALTER TABLE migration errors
   - **File:** `internal/state/db.go` — `migrate()` function, lines 131-134
   - **Bug:** `db.Exec(ALTER TABLE ...)` return values are discarded. If the ALTER fails (disk full, permissions, schema corruption), toad continues and later crashes with "no such column: dismissed".
   - **Fix:**
@@ -276,7 +276,7 @@ Quick wins from the Feb 2026 full review. All are targeted, small changes.
     ```
   - **Test:** Add test cases in `runner_test.go` for each redaction pattern and truncation.
 
-- [ ] Make PR review fix round limit configurable
+- [x] Make PR review fix round limit configurable
   - **Files:** `internal/config/config.go`, `internal/state/db.go`, `internal/reviewer/reviewer.go`
   - **Problem:** `fix_count < 3` is hardcoded in the SQL query in `db.go:288` and the max round count in `reviewer.go`.
   - **Fix:**
@@ -291,7 +291,7 @@ Quick wins from the Feb 2026 full review. All are targeted, small changes.
        ```
     3. Thread the config value through `reviewer.NewWatcher` → `poll()` → `OpenPRWatches()`
 
-- [x] Make history cap configurable
+- [x] Make history cap configurable *(done)*
   - **Files:** `internal/config/config.go`, `internal/state/state.go`
   - **Problem:** `state.go:161` hardcodes `if len(m.history) > 50`. High-throughput teams want to see more history in the dashboard.
   - **Fix:**
@@ -358,7 +358,7 @@ The competitive landscape has shifted (Feb 2026). Copilot Coding Agent is GA, De
 
 ### Sprint 2: Adoption metrics
 
-- [ ] Track merge rate — add `merged` boolean to `runs` table. Poll `gh pr view --json state` periodically (piggyback on reviewer poll). Dashboard shows: PRs created, PRs merged, merge rate.
+- [x] Track merge rate — `final_state` column on `pr_watches` captures MERGED vs CLOSED when reviewer detects PR is no longer open. `MergeStats()` query aggregates outcomes. Dashboard shows merge rate card with merged/resolved/open counts.
 - [ ] Track review round effectiveness — how often does a review fix round result in approval? Store per-round outcomes.
 - [ ] Dashboard: ROI summary — "Toad has shipped X PRs, Y were merged (Z% merge rate)" with time-to-merge stats.
 
@@ -444,11 +444,11 @@ The competitive landscape has shifted (Feb 2026). Copilot Coding Agent is GA, De
 
 ### Phase 3.5
 
-- [ ] PR titles with emoji/unicode characters render correctly (no byte truncation)
+- [x] PR titles with emoji/unicode characters render correctly (rune-based truncation)
 - [x] Digest analyze does not use `--dangerously-skip-permissions`
-- [ ] DB migration errors are logged, not silently swallowed
+- [x] DB migration errors are logged, not silently swallowed
 - [x] Thread context failure retries or warns user before spawning with empty context
-- [ ] Reviewer fix round limit is configurable via `limits.max_review_rounds`
+- [x] Reviewer fix round limit is configurable via `limits.max_review_rounds`
 - [ ] `internal/reviewer/` has unit tests covering comment filtering and fix task construction
 - [ ] Digest investigation gate has tests covering feasible/not-feasible/error paths
 
@@ -456,4 +456,4 @@ The competitive landscape has shifted (Feb 2026). Copilot Coding Agent is GA, De
 
 - [x] `toad init` enables digest in dry-run mode by default
 - [x] Dashboard shows Toad King investigation results (approved/dismissed with reasoning)
-- [ ] Dashboard shows merge rate and ROI summary
+- [x] Dashboard shows merge rate card (merged/resolved/open counts with color coding)

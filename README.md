@@ -1,110 +1,101 @@
 # 🐸 toad
 
-An AI-powered coding agent that lives in your Slack workspace. Drop a bug report or feature request in any channel, and toad spawns an autonomous agent that writes the code, runs your tests, and opens a PR — all in minutes.
+**The AI teammate that finds bugs before your users do.**
 
-## 🐸 The pond — what is toad?
+Toad is a self-hosted Go daemon that watches your Slack channels, identifies bugs from conversations and alerts, verifies them against your codebase, and opens fix PRs — all before anyone files a ticket. It's like having a senior engineer who reads every message and quietly fixes things.
 
-Toad turns Slack into an engineering intake queue. Instead of bugs and feature requests piling up, toad listens, understands, and acts. It's built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and designed for teams that want AI handling the small stuff so humans can focus on the big stuff.
+## 👑 What makes toad different
 
-Everything in toad is named after the lifecycle of a frog. Here's the glossary:
+Most AI coding tools wait for you to ask. Toad doesn't.
 
-| Term | What it means |
-|------|---------------|
-| 🐸 **Toad** | The daemon itself — sits in your Slack pond, watching for messages |
-| 🥚 **Triage** | Every message gets classified by Haiku in ~1 second: is it a bug? feature? question? how big? |
-| 🐸 **Ribbit** | A codebase-aware reply to a question — Sonnet reads your code with read-only tools and answers in-thread |
-| 🐣 **Tadpole** | An autonomous coding agent — creates a git worktree, invokes Claude Code, validates with your tests, and opens a PR |
-| 👑 **Toad King** | The digest engine — passively watches all messages, batch-analyzes them, and auto-spawns tadpoles for obvious one-shot fixes |
-| 🔁 **PR Watch** | After a tadpole ships a PR, toad watches for review comments and auto-spawns fix tadpoles (up to 3 rounds) |
+**The Toad King** passively monitors every message in your Slack workspace, batch-analyzes them with Haiku, investigates feasibility against your actual codebase, and autonomously spawns fix agents for high-confidence one-shot bugs. No @mentions, no tickets, no human in the loop until PR review.
+
+On top of that, toad handles the full reactive path too — @mention it with a bug report and get a PR in minutes, ask it a question and get a codebase-grounded answer in seconds.
+
+**Why toad over Copilot, Devin, or Claude Code?**
+
+| | Toad | Copilot Agent | Devin | Claude Code |
+|---|---|---|---|---|
+| Proactive bug detection | Yes (Toad King) | No | No | No |
+| Self-hosted (code stays local) | Yes | No | No | No |
+| PR review feedback loop | Yes (3 rounds) | No | No | No |
+| CI failure auto-fix | Yes | No | No | No |
+| Cost | Your existing Claude sub | Per-seat | Per-seat | Per-seat |
+| Slack-native | Yes | No | Coming | Coming |
 
 ## 🐣 How it works
 
 ```
 Slack message → Triage (Haiku, ~1s) → Route by category:
-  🐣 bug/feature  → spawn tadpole → worktree → Claude Code → validate → PR
-  🐸 question     → ribbit reply (Sonnet + read-only codebase tools)
-  👀 passive bug  → ribbit with 🐸 CTA to spawn tadpole on demand
+  👑 Toad King   → passive batch analysis → investigate → auto-fix PR
+  🐣 bug/feature → spawn tadpole → worktree → Claude Code → validate → PR
+  🐸 question    → ribbit reply (Sonnet + read-only codebase tools)
 ```
 
-**Tadpoles** run the full lifecycle autonomously: create a git worktree, invoke Claude Code to make changes, validate with your test/lint commands, retry on failure, then push and open a PR. The PR is the review gate — toad ships fast and lets humans approve.
+**Tadpoles** run the full lifecycle autonomously: create a git worktree, invoke Claude Code, validate with your test/lint commands, retry on failure, push and open a PR. After shipping, toad watches for review comments and CI failures, auto-spawning fix tadpoles for up to 3 rounds.
 
-**Ribbits** are for when you just need an answer. Mention toad with a question and it reads your codebase using Sonnet with read-only tools (Glob, Grep, Read), then replies in-thread with context-aware answers. Thread memory means follow-ups stay coherent.
+**Ribbits** are for when you just need an answer. Mention toad with a question and it reads your codebase with read-only tools, then replies in-thread. Thread memory means follow-ups stay coherent.
 
-**The Toad King** (optional) goes a step further — it passively collects every non-bot message in your channels, batch-analyzes them with Haiku on an interval, and auto-spawns tadpoles for high-confidence one-shot fixes. Think of it as a vigilant frog that catches bugs before anyone files them.
+## 🐸 The glossary
+
+Everything in toad is named after the lifecycle of a frog:
+
+| Term | What it means |
+|------|---------------|
+| 🐸 **Toad** | The daemon — sits in your Slack pond, watching |
+| 🥚 **Triage** | Every message classified by Haiku in ~1s |
+| 🐸 **Ribbit** | Codebase-aware answer to a question |
+| 🐣 **Tadpole** | Autonomous coding agent — worktree, Claude Code, validate, PR |
+| 👑 **Toad King** | Passive monitoring → investigation → auto-fix |
+| 🔁 **PR Watch** | Review comment and CI failure auto-fixing |
 
 ## 📋 Requirements
 
-- Go 1.25+
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude`)
-- [GitHub CLI](https://cli.github.com) (`gh`), authenticated
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude`), authenticated
+- [GitHub CLI](https://cli.github.com) (`gh`) or [GitLab CLI](https://gitlab.com/gitlab-org/cli) (`glab`), authenticated
 - A Slack app with Socket Mode enabled
 
 ## 🚀 Install
 
 ### macOS and Linux
 
-Install with [Homebrew](https://brew.sh/) (recommended):
-
 ```bash
 brew tap cdre-ai/tap https://github.com/cdre-ai/homebrew-tap
 brew install --cask toad
 ```
 
-> **macOS security note:** If macOS blocks the app with "cannot be opened because the developer cannot be verified", the cask's post-install hook should handle this automatically. If not:
-> ```bash
-> xattr -d com.apple.quarantine $(which toad)
-> ```
+> **macOS security note:** If macOS blocks the app, the cask's post-install hook should handle it. If not: `xattr -d com.apple.quarantine $(which toad)`
 
 ### Windows
-
-Install with [Scoop](https://scoop.sh/):
 
 ```bash
 scoop bucket add cdre-ai https://github.com/cdre-ai/homebrew-tap
 scoop install toad
 ```
 
-### Binary releases
-
-Download pre-built binaries for Windows, macOS, or Linux from the [latest release](https://github.com/cdre-ai/toad/releases/latest).
-
-### Go install
+### Other options
 
 ```bash
+# Binary releases
+# Download from https://github.com/cdre-ai/toad/releases/latest
+
+# Go install
 go install github.com/cdre-ai/toad@latest
-```
 
-### Build from source
-
-```bash
-git clone https://github.com/cdre-ai/toad.git
-cd toad
-make build
+# Build from source
+git clone https://github.com/cdre-ai/toad.git && cd toad && make build
 ```
 
 ## 🔧 Quick start
 
-### 1. Run the setup wizard
-
 ```bash
-toad init
+toad init    # Setup wizard — Slack tokens, repo config, Toad King opt-in
+toad         # Start the daemon
 ```
 
-This walks you through creating a Slack app, entering tokens, configuring your repo, and optional features. It saves everything to `.toad.yaml`.
+Toad connects to Slack via Socket Mode, auto-joins public channels, and starts listening. Mention `@toad` in any channel with a question or bug report and watch it work.
 
-### 2. Start the daemon
-
-```bash
-toad
-```
-
-Toad connects to Slack via Socket Mode, auto-joins public channels, and starts listening.
-
-### 3. Try it out
-
-Mention `@toad` in any channel with a question or bug report and watch it work.
-
-> For detailed Slack app setup, configuration options, and advanced features, see the **[Setup Guide](SETUP.md)**.
+> For detailed Slack app setup, configuration, and advanced features, see the **[Setup Guide](SETUP.md)**.
 
 ## 🐸 CLI commands
 
@@ -121,53 +112,39 @@ Mention `@toad` in any channel with a question or bug report and watch it work.
 
 ```
 cmd/
-  root.go          Cobra command: toad (daemon), message routing
-  run.go           toad run (CLI one-shot)
-  init.go          toad init (setup wizard)
-  status.go        toad status (web dashboard)
-  version.go       toad version (build info via ldflags)
-  update.go        toad update (self-update via Homebrew)
+  root.go          Daemon, message routing
+  run.go           CLI one-shot mode
+  init.go          Setup wizard
+  status.go        Web dashboard
 
 internal/
   slack/           Socket Mode client, event routing, dedup
-  triage/          Haiku classification (category, size, keywords, files)
-  ribbit/          Sonnet responses with read-only codebase tools
-  tadpole/         Worktree, Claude runner, validation, shipping, pool
+  triage/          Haiku classification
+  ribbit/          Sonnet Q&A with read-only tools
+  tadpole/         Worktree, Claude runner, validation, shipping
   state/           In-memory + SQLite state, crash recovery
-  reviewer/        PR review comment watcher, fix tadpole spawning
-  digest/          Toad King: batch analysis, auto-spawn with guardrails
-  issuetracker/    Generic issue tracker interface (Linear integration)
-  update/          Version checking and self-update
-  config/          YAML config with cascading defaults
-  tui/             Shared theme for init wizard
-  log/             Structured logging setup
+  reviewer/        PR review + CI watcher, fix tadpole spawning
+  digest/          Toad King: batch analysis, investigation, auto-spawn
+  config/          YAML config with cascading defaults, multi-repo profiles
+  vcs/             GitHub + GitLab provider abstraction
+  issuetracker/    Linear integration
 ```
 
-### 💾 State & recovery
+### Key design decisions
 
-State is persisted to SQLite (`~/.toad/state.db`) with WAL mode. On startup, toad marks stale runs as failed and cleans orphaned worktrees. The dashboard reads directly from SQLite, so it works even when the daemon is stopped.
-
-### 🏊 Concurrency
-
-Separate semaphores keep Q&A responsive while tadpoles run:
-- **Ribbit pool**: `max_concurrent * 3` (fast, seconds)
-- **Tadpole pool**: `max_concurrent` (slow, minutes)
+- **Single binary, zero infra** — Go binary, git worktrees, your Claude subscription. No Docker, no cloud.
+- **Three-tier intelligence** — Haiku for triage (~$0.001), Sonnet for investigation (read-only), Sonnet for execution (full tools).
+- **6-layer guardrails on proactive spawning** — disabled by default, 0.95 confidence threshold, category + size restrictions, hourly cap, existing validation + human PR review.
+- **Write-through state** — in-memory cache + SQLite for crash recovery and dashboard.
 
 ## 🛠️ Development
 
 ```bash
-make build                  # Build binary
-make test                   # Run tests with race detector
-make lint                   # Run golangci-lint
-make vet                    # Run go vet
-make fmt                    # Format code
-make clean                  # Remove binary and dist/
-```
-
-To test a single package:
-
-```bash
-go test ./internal/state/
+make build    # Build binary
+make test     # Run tests with race detector
+make lint     # Run golangci-lint
+make vet      # Run go vet
+make fmt      # Format code
 ```
 
 ## 📄 License
