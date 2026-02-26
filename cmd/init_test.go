@@ -297,28 +297,6 @@ func TestDetectDefaultBranch_Fallback(t *testing.T) {
 	}
 }
 
-func TestParseIntOr(t *testing.T) {
-	tests := []struct {
-		input    string
-		fallback int
-		want     int
-	}{
-		{"5", 0, 5},
-		{"0", 1, 0},
-		{"", 10, 10},
-		{"abc", 3, 3},
-		{"-1", 5, 5},
-		{"  42  ", 0, 42},
-	}
-
-	for _, tt := range tests {
-		got := parseIntOr(tt.input, tt.fallback)
-		if got != tt.want {
-			t.Errorf("parseIntOr(%q, %d) = %d, want %d", tt.input, tt.fallback, got, tt.want)
-		}
-	}
-}
-
 func TestParseCSV(t *testing.T) {
 	tests := []struct {
 		input string

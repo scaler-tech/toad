@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -199,8 +200,13 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 
 	// 10. Set up message handler — dispatch into goroutines so the event loop stays responsive
+	var messageWg sync.WaitGroup
 	slackClient.OnMessage(func(ctx context.Context, msg *islack.IncomingMessage) {
-		go handleMessage(ctx, msg, cfg, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, tadpolePool, digestEngine, tracker, resolver, repoPaths)
+		messageWg.Add(1)
+		go func() {
+			defer messageWg.Done()
+			handleMessage(ctx, msg, cfg, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, tadpolePool, digestEngine, tracker, resolver, repoPaths)
+		}()
 	})
 
 	// 11. Handle graceful shutdown
@@ -284,13 +290,18 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
+	poolDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down...")
+		messageWg.Wait()
 		tadpolePool.Shutdown(context.Background())
+		close(poolDone)
 	}()
 
-	return slackClient.Run(ctx)
+	slackErr := slackClient.Run(ctx)
+	<-poolDone
+	return slackErr
 }
 
 func handleMessage(
@@ -1173,6 +1184,9 @@ func hasFailedTadpole(threadContext []string) bool {
 
 // truncate returns the first n runes of s, appending "..." if truncated.
 func truncate(s string, n int) string {
+	if n <= 3 {
+		return "..."
+	}
 	runes := []rune(s)
 	if len(runes) <= n {
 		return s

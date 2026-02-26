@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Resolver maps triage output to a specific repo using file-existence verification.
@@ -71,6 +72,9 @@ func (r *Resolver) verifyFiles(fileHints []string) map[string]int {
 	}
 
 	for _, hint := range fileHints {
+		if strings.Contains(hint, "..") || strings.HasPrefix(hint, "/") {
+			continue
+		}
 		for _, p := range r.profiles {
 			candidate := filepath.Join(p.Path, hint)
 			if _, err := os.Stat(candidate); err == nil {

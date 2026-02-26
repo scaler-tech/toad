@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/hergen/toad/internal/config"
@@ -111,13 +110,4 @@ func suggestCommands(stack, repoPath string) (testCmd, lintCmd string) {
 		}
 	}
 	return testCmd, lintCmd
-}
-
-// parseIntOr parses a string as int, returning fallback on failure.
-func parseIntOr(s string, fallback int) int {
-	n, err := strconv.Atoi(strings.TrimSpace(s))
-	if err != nil || n < 0 {
-		return fallback
-	}
-	return n
 }

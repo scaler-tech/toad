@@ -88,6 +88,8 @@ func Validate(ctx context.Context, worktreePath string, cfg ValidateConfig) (*Va
 	// Determine which services are affected and which commands to run
 	checks := resolveChecks(changedFiles, cfg)
 
+	var failReasons []string
+
 	for _, check := range checks {
 		runDir := filepath.Join(worktreePath, check.path)
 
@@ -103,7 +105,7 @@ func Validate(ctx context.Context, worktreePath string, cfg ValidateConfig) (*Va
 			if err != nil {
 				result.TestPassed = false
 				result.Passed = false
-				result.FailReason = fmt.Sprintf("tests failed (%s)", label)
+				failReasons = append(failReasons, fmt.Sprintf("tests failed (%s)", label))
 				slog.Warn("validation: tests failed", "service", label, "error", err)
 			} else {
 				slog.Info("validation: tests passed", "service", label)
@@ -122,16 +124,16 @@ func Validate(ctx context.Context, worktreePath string, cfg ValidateConfig) (*Va
 			if err != nil {
 				result.LintPassed = false
 				result.Passed = false
-				if !result.TestPassed {
-					result.FailReason = fmt.Sprintf("tests and lint failed (%s)", label)
-				} else {
-					result.FailReason = fmt.Sprintf("lint failed (%s)", label)
-				}
+				failReasons = append(failReasons, fmt.Sprintf("lint failed (%s)", label))
 				slog.Warn("validation: lint failed", "service", label, "error", err)
 			} else {
 				slog.Info("validation: lint passed", "service", label)
 			}
 		}
+	}
+
+	if len(failReasons) > 0 {
+		result.FailReason = strings.Join(failReasons, "; ")
 	}
 
 	return result, nil
@@ -264,11 +266,4 @@ func shellRun(ctx context.Context, dir, command string) (string, error) {
 	cmd.Stderr = &combined
 	err := cmd.Run()
 	return combined.String(), err
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "\n... (truncated)"
 }

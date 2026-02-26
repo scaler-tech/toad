@@ -69,7 +69,11 @@ func (t *Task) repoConfig(cfg *config.Config) *config.RepoConfig {
 // Execute runs the full tadpole lifecycle: worktree → claude → validate → retry → ship.
 func (r *Runner) Execute(ctx context.Context, task Task) error {
 	start := time.Now()
-	runID := fmt.Sprintf("tadpole-%d", start.UnixMilli())
+	hex, err := randomHex(4)
+	if err != nil {
+		return fmt.Errorf("generating run ID: %w", err)
+	}
+	runID := fmt.Sprintf("tadpole-%d-%s", start.UnixMilli(), hex)
 
 	repo := task.repoConfig(r.cfg)
 	vcsProvider := r.vcs(repo.Path)
@@ -108,7 +112,6 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	r.stateManager.Update(runID, "starting")
 
 	var wt *WorktreeResult
-	var err error
 	if task.ExistingBranch != "" {
 		wt, err = CheckoutWorktree(ctx, repo.Path, task.ExistingBranch)
 	} else {
@@ -119,8 +122,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	}
 	defer RemoveWorktree(context.WithoutCancel(ctx), repo.Path, wt.Path)
 
-	run.Branch = wt.Branch
-	run.WorktreePath = wt.Path
+	r.stateManager.SetWorktreeInfo(runID, wt.Branch, wt.Path)
 	slog.Info("worktree created", "path", wt.Path, "branch", wt.Branch)
 
 	if wt.StaleBase {

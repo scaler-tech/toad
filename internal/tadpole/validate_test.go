@@ -6,36 +6,6 @@ import (
 	"github.com/hergen/toad/internal/config"
 )
 
-func TestTruncate_UnderLimit(t *testing.T) {
-	got := truncate("short", 100)
-	if got != "short" {
-		t.Errorf("expected 'short', got %q", got)
-	}
-}
-
-func TestTruncate_AtLimit(t *testing.T) {
-	input := "12345"
-	got := truncate(input, 5)
-	if got != "12345" {
-		t.Errorf("expected '12345', got %q", got)
-	}
-}
-
-func TestTruncate_OverLimit(t *testing.T) {
-	input := "1234567890"
-	got := truncate(input, 5)
-	if got != "12345\n... (truncated)" {
-		t.Errorf("expected truncated string, got %q", got)
-	}
-}
-
-func TestTruncate_Empty(t *testing.T) {
-	got := truncate("", 10)
-	if got != "" {
-		t.Errorf("expected empty string, got %q", got)
-	}
-}
-
 func TestResolveChecks_NoServices(t *testing.T) {
 	cfg := ValidateConfig{
 		TestCommand: "go test ./...",

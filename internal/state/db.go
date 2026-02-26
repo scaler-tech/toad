@@ -273,7 +273,9 @@ func (d *DB) ActiveRuns() ([]*Run, error) {
 
 // History returns completed runs, most recent first.
 func (d *DB) History(limit int) ([]*Run, error) {
-	rows, err := d.db.Query(
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := d.db.QueryContext(ctx,
 		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, started_at, result_json FROM runs WHERE status IN ('done', 'failed') ORDER BY started_at DESC LIMIT ?",
 		limit,
 	)
@@ -286,8 +288,10 @@ func (d *DB) History(limit int) ([]*Run, error) {
 
 // HasWorktree checks if any active run references the given worktree path.
 func (d *DB) HasWorktree(path string) bool {
+	ctx, cancel := dbCtx()
+	defer cancel()
 	var count int
-	err := d.db.QueryRow(
+	err := d.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM runs WHERE worktree_path = ? AND status NOT IN ('done', 'failed')",
 		path,
 	).Scan(&count)
@@ -300,7 +304,9 @@ func (d *DB) HasWorktree(path string) bool {
 
 // SaveThreadMemory stores triage + response context for a thread.
 func (d *DB) SaveThreadMemory(threadTS, channel, triageJSON, response string) error {
-	_, err := d.db.Exec(`
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx, `
 		INSERT OR REPLACE INTO thread_memory (thread_ts, channel, triage_json, response, created_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		threadTS, channel, triageJSON, response, time.Now(),
@@ -310,7 +316,9 @@ func (d *DB) SaveThreadMemory(threadTS, channel, triageJSON, response string) er
 
 // GetThreadMemory retrieves cached context for a thread.
 func (d *DB) GetThreadMemory(threadTS string) (*ThreadMemory, error) {
-	row := d.db.QueryRow(
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row := d.db.QueryRowContext(ctx,
 		"SELECT thread_ts, channel, triage_json, response, created_at FROM thread_memory WHERE thread_ts = ?",
 		threadTS,
 	)
@@ -327,8 +335,10 @@ func (d *DB) GetThreadMemory(threadTS string) (*ThreadMemory, error) {
 
 // PruneThreadMemory removes thread memories older than the given duration.
 func (d *DB) PruneThreadMemory(olderThan time.Duration) (int, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
 	cutoff := time.Now().Add(-olderThan)
-	result, err := d.db.Exec("DELETE FROM thread_memory WHERE created_at < ?", cutoff)
+	result, err := d.db.ExecContext(ctx, "DELETE FROM thread_memory WHERE created_at < ?", cutoff)
 	if err != nil {
 		return 0, err
 	}
@@ -338,9 +348,18 @@ func (d *DB) PruneThreadMemory(olderThan time.Duration) (int, error) {
 
 // SavePRWatch registers a PR for review comment monitoring.
 func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slackThread, repoPath string) error {
-	_, err := d.db.Exec(`
-		INSERT OR REPLACE INTO pr_watches (pr_number, pr_url, branch, run_id, slack_channel, slack_thread, repo_path, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx, `
+		INSERT INTO pr_watches (pr_number, pr_url, branch, run_id, slack_channel, slack_thread, repo_path, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(pr_number) DO UPDATE SET
+			pr_url = excluded.pr_url,
+			branch = excluded.branch,
+			run_id = excluded.run_id,
+			slack_channel = excluded.slack_channel,
+			slack_thread = excluded.slack_thread,
+			repo_path = excluded.repo_path`,
 		prNumber, prURL, branch, runID, slackChannel, slackThread, repoPath, time.Now(),
 	)
 	return err
@@ -348,7 +367,9 @@ func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slack
 
 // OpenPRWatches returns all PRs being monitored (not closed, under any fix limit).
 func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, error) {
-	rows, err := d.db.Query(
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := d.db.QueryContext(ctx,
 		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count, conflict_fix_count, repo_path, ci_exhausted_notified FROM pr_watches WHERE closed = FALSE AND (fix_count < ? OR ci_fix_count < ? OR conflict_fix_count < ?)",
 		maxReviewRounds, maxCIFixRounds, maxReviewRounds,
 	)
@@ -368,18 +389,33 @@ func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, err
 	return watches, rows.Err()
 }
 
-// UpdatePRWatchLastComment updates the last seen comment ID and increments fix count.
+// UpdatePRWatchLastComment updates the last seen comment ID.
 func (d *DB) UpdatePRWatchLastComment(prNumber, lastCommentID int) error {
-	_, err := d.db.Exec(
-		"UPDATE pr_watches SET last_comment_id = ?, fix_count = fix_count + 1 WHERE pr_number = ?",
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx,
+		"UPDATE pr_watches SET last_comment_id = ? WHERE pr_number = ?",
 		lastCommentID, prNumber,
+	)
+	return err
+}
+
+// IncrementReviewFixCount bumps the review fix attempt counter for a PR watch.
+func (d *DB) IncrementReviewFixCount(prNumber int) error {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx,
+		"UPDATE pr_watches SET fix_count = fix_count + 1 WHERE pr_number = ?",
+		prNumber,
 	)
 	return err
 }
 
 // IncrementCIFixCount bumps the CI fix attempt counter for a PR watch.
 func (d *DB) IncrementCIFixCount(prNumber int) error {
-	_, err := d.db.Exec(
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx,
 		"UPDATE pr_watches SET ci_fix_count = ci_fix_count + 1 WHERE pr_number = ?",
 		prNumber,
 	)
@@ -388,7 +424,9 @@ func (d *DB) IncrementCIFixCount(prNumber int) error {
 
 // IncrementConflictFixCount bumps the merge conflict fix attempt counter for a PR watch.
 func (d *DB) IncrementConflictFixCount(prNumber int) error {
-	_, err := d.db.Exec(
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx,
 		"UPDATE pr_watches SET conflict_fix_count = conflict_fix_count + 1 WHERE pr_number = ?",
 		prNumber,
 	)
@@ -397,7 +435,9 @@ func (d *DB) IncrementConflictFixCount(prNumber int) error {
 
 // MarkCIExhaustedNotified marks that the CI exhaustion notification has been sent for a PR.
 func (d *DB) MarkCIExhaustedNotified(prNumber int) error {
-	_, err := d.db.Exec(
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx,
 		"UPDATE pr_watches SET ci_exhausted_notified = TRUE WHERE pr_number = ?",
 		prNumber,
 	)
@@ -406,7 +446,9 @@ func (d *DB) MarkCIExhaustedNotified(prNumber int) error {
 
 // ClosePRWatch marks a PR watch as closed (merged/closed).
 func (d *DB) ClosePRWatch(prNumber int) error {
-	_, err := d.db.Exec("UPDATE pr_watches SET closed = TRUE WHERE pr_number = ?", prNumber)
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx, "UPDATE pr_watches SET closed = TRUE WHERE pr_number = ?", prNumber)
 	return err
 }
 
@@ -603,7 +645,9 @@ func keywordOverlap(a, b map[string]bool) float64 {
 
 // RecentDigestOpportunities returns the most recent digest opportunities, newest first.
 func (d *DB) RecentDigestOpportunities(limit int) ([]*DigestOpportunity, error) {
-	rows, err := d.db.Query(
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := d.db.QueryContext(ctx,
 		"SELECT id, summary, category, confidence, est_size, channel, message, keywords, dry_run, dismissed, reasoning, investigating, created_at FROM digest_opportunities ORDER BY created_at DESC LIMIT ?",
 		limit,
 	)
@@ -674,7 +718,9 @@ func (d *DB) WriteDaemonStats(stats *DaemonStats) error {
 	if err != nil {
 		return fmt.Errorf("marshaling daemon stats: %w", err)
 	}
-	_, err = d.db.Exec(`
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err = d.db.ExecContext(ctx, `
 		INSERT OR REPLACE INTO daemon_stats (id, stats_json, updated_at)
 		VALUES (1, ?, ?)`,
 		string(data), time.Now(),
@@ -684,8 +730,10 @@ func (d *DB) WriteDaemonStats(stats *DaemonStats) error {
 
 // ReadDaemonStats reads the daemon's live stats. Returns nil if never written.
 func (d *DB) ReadDaemonStats() (*DaemonStats, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
 	var data string
-	err := d.db.QueryRow("SELECT stats_json FROM daemon_stats WHERE id = 1").Scan(&data)
+	err := d.db.QueryRowContext(ctx, "SELECT stats_json FROM daemon_stats WHERE id = 1").Scan(&data)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -701,7 +749,9 @@ func (d *DB) ReadDaemonStats() (*DaemonStats, error) {
 
 // ClearDaemonStats removes daemon stats (called on clean shutdown).
 func (d *DB) ClearDaemonStats() error {
-	_, err := d.db.Exec("DELETE FROM daemon_stats")
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx, "DELETE FROM daemon_stats")
 	return err
 }
 

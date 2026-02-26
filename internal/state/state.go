@@ -140,10 +140,10 @@ func (m *Manager) Update(runID, status string) {
 	defer m.mu.Unlock()
 	if run, ok := m.runs[runID]; ok {
 		run.Status = status
-	}
-	if m.db != nil {
-		if err := m.db.UpdateStatus(runID, status); err != nil {
-			slog.Error("failed to persist status update", "id", runID, "error", err)
+		if m.db != nil {
+			if err := m.db.UpdateStatus(runID, status); err != nil {
+				slog.Error("failed to persist status update", "id", runID, "error", err)
+			}
 		}
 	}
 }
@@ -198,7 +198,8 @@ func (m *Manager) Active() []*Run {
 	defer m.mu.RUnlock()
 	runs := make([]*Run, 0, len(m.runs))
 	for _, r := range m.runs {
-		runs = append(runs, r)
+		cp := *r
+		runs = append(runs, &cp)
 	}
 	return runs
 }
@@ -208,6 +209,19 @@ func (m *Manager) History() []*Run {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]*Run, len(m.history))
-	copy(out, m.history)
+	for i, r := range m.history {
+		cp := *r
+		out[i] = &cp
+	}
 	return out
+}
+
+// SetWorktreeInfo updates the branch and worktree path for a tracked run.
+func (m *Manager) SetWorktreeInfo(runID, branch, wtPath string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if run, ok := m.runs[runID]; ok {
+		run.Branch = branch
+		run.WorktreePath = wtPath
+	}
 }

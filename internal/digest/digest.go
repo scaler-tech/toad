@@ -4,6 +4,7 @@ package digest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -130,6 +131,7 @@ func New(cfg *config.DigestConfig, triageModel string, spawn SpawnFunc, notify N
 		repoPaths:   repoPaths,
 		db:          db,
 		tracker:     tracker,
+		spawnHour:   time.Now().Hour(),
 	}
 	if len(profiles) > 1 {
 		e.repoProfiles = config.FormatForPrompt(profiles)
@@ -153,7 +155,7 @@ func (e *Engine) Stats() DigestStats {
 	interval := time.Duration(e.cfg.BatchMinutes) * time.Minute
 	lastFlush := time.Unix(e.lastFlush.Load(), 0)
 	nextFlush := lastFlush.Add(interval)
-	if lastFlush.IsZero() {
+	if e.lastFlush.Load() == 0 {
 		nextFlush = time.Time{}
 	}
 
@@ -476,8 +478,8 @@ func (e *Engine) analyzeWithRetry(ctx context.Context, ch chunk, timeout time.Du
 		return opps, nil
 	}
 
-	// Only retry on signal: killed (timeout) — not on parse errors or API failures
-	if !strings.Contains(err.Error(), "signal: killed") {
+	// Only retry on signal: killed (timeout) or deadline exceeded — not on parse errors or API failures
+	if !strings.Contains(err.Error(), "signal: killed") && !errors.Is(err, context.DeadlineExceeded) {
 		slog.Warn("digest chunk analysis failed", "error", err, "label", ch.label)
 		return nil, err
 	}

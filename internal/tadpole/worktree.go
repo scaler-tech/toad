@@ -46,7 +46,7 @@ func CreateWorktree(ctx context.Context, repoPath, slug, defaultBranch string) (
 	}
 
 	wtPath := filepath.Join(wtDir, slug+"-"+id)
-	branch := "toad/" + slug
+	branch := "toad/" + slug + "-" + id
 
 	// Create worktree from existing local ref (fast, no network, minimal locking)
 	slog.Info("creating worktree", "path", wtPath, "branch", branch)
@@ -126,7 +126,7 @@ func pushBranch(ctx context.Context, worktreePath, branch string) error {
 	return gitRunCtx(ctx, worktreePath, "push", "--force-with-lease", "origin", branch)
 }
 
-// RemoveWorktree force-removes a worktree and prunes. Best-effort cleanup.
+// RemoveWorktree force-removes a worktree and prunes.
 // Applies a 30-second timeout on top of the provided context.
 func RemoveWorktree(ctx context.Context, repoPath, wtPath string) error {
 	slog.Info("removing worktree", "path", wtPath)
@@ -134,16 +134,23 @@ func RemoveWorktree(ctx context.Context, repoPath, wtPath string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	var errs []string
 	if err := gitRunCtx(ctx, repoPath, "worktree", "remove", "--force", wtPath); err != nil {
 		slog.Warn("worktree remove failed, trying manual cleanup", "error", err)
-		_ = os.RemoveAll(wtPath)
+		if rmErr := os.RemoveAll(wtPath); rmErr != nil {
+			errs = append(errs, fmt.Sprintf("remove: %v; manual cleanup: %v", err, rmErr))
+		}
 	}
 
 	// Prune stale worktree references
 	if err := gitRunCtx(ctx, repoPath, "worktree", "prune"); err != nil {
 		slog.Warn("worktree prune failed", "error", err)
+		errs = append(errs, fmt.Sprintf("prune: %v", err))
 	}
 
+	if len(errs) > 0 {
+		return fmt.Errorf("worktree cleanup: %s", strings.Join(errs, "; "))
+	}
 	return nil
 }
 

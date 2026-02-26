@@ -230,6 +230,7 @@ func Validate(cfg *Config) error {
 	if cfg.VCS.Platform != "" && !validPlatforms[strings.ToLower(cfg.VCS.Platform)] {
 		return fmt.Errorf("unsupported VCS platform %q — supported: github, gitlab", cfg.VCS.Platform)
 	}
+	cfg.VCS.Platform = strings.ToLower(cfg.VCS.Platform)
 	if err := ValidateRepos(cfg); err != nil {
 		return err
 	}

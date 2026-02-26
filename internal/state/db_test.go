@@ -285,6 +285,7 @@ func TestDB_PRWatch_FixCountLimit(t *testing.T) {
 	// Increment review fix count 3 times
 	for i := 0; i < 3; i++ {
 		db.UpdatePRWatchLastComment(42, i+1)
+		db.IncrementReviewFixCount(42)
 	}
 
 	// PR should still appear — CI fix budget is not exhausted
@@ -352,6 +353,7 @@ func TestDB_PRWatch_CIFixCount(t *testing.T) {
 	// Watch stays open when only review budget is exhausted but CI fix budget remains
 	for i := 0; i < 3; i++ {
 		db.UpdatePRWatchLastComment(42, i+1)
+		db.IncrementReviewFixCount(42)
 	}
 	watches, _ = db.OpenPRWatches(3, 3)
 	if len(watches) != 1 {
