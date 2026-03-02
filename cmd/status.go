@@ -1184,7 +1184,19 @@ async function refresh() {
           }
           const dimStyle = o.dismissed ? 'opacity:0.55;' : '';
           const rowStyle = (hidden || dimStyle) ? ' style="' + hidden + dimStyle + '"' : '';
-          const reasonTip = o.reasoning ? '<br><span style="color:var(--dim);font-size:11px">' + esc(o.reasoning).substring(0, 120) + '</span>' : '';
+          let reasonTip = '';
+          if (o.reasoning) {
+            const full = esc(o.reasoning);
+            if (full.length <= 120) {
+              reasonTip = '<br><span style="color:var(--dim);font-size:11px">' + full + '</span>';
+            } else {
+              const id = 'reason-' + i;
+              reasonTip = '<br><span style="color:var(--dim);font-size:11px">'
+                + '<span id="' + id + '-short">' + full.substring(0, 120) + '… <a href="#" onclick="event.preventDefault();document.getElementById(\'' + id + '-short\').style.display=\'none\';document.getElementById(\'' + id + '-full\').style.display=\'inline\';" style="color:var(--accent)">more</a></span>'
+                + '<span id="' + id + '-full" style="display:none">' + full + ' <a href="#" onclick="event.preventDefault();document.getElementById(\'' + id + '-full\').style.display=\'none\';document.getElementById(\'' + id + '-short\').style.display=\'inline\';" style="color:var(--accent)">less</a></span>'
+                + '</span>';
+            }
+          }
           ohtml += '<tr' + rowStyle + '><td>' + relTimeAgo(o.created_at, now) + '</td>'
             + '<td style="white-space:normal">' + esc(o.summary) + reasonTip + '</td>'
             + '<td>' + esc(o.category) + '</td>'
