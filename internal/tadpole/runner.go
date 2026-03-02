@@ -201,6 +201,14 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 
 	var prURL string
 	if task.ExistingBranch != "" {
+		// Guard: reject if the fix produced a net-zero diff against the default branch.
+		// This catches CI/review fix tadpoles that effectively revert all original changes.
+		netDiffCmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "origin/"+repo.DefaultBranch)
+		netDiffCmd.Dir = wt.Path
+		if netDiffOut, netErr := netDiffCmd.Output(); netErr == nil && strings.TrimSpace(string(netDiffOut)) == "" {
+			return fail("net-zero diff against " + repo.DefaultBranch + " — fix reverted the original changes")
+		}
+
 		// Review fix: just push to existing branch, PR already exists
 		r.updateStatus(task, statusTS, ":rocket: Pushing fix...")
 		if err := pushBranch(ctx, wt.Path, wt.Branch); err != nil {
@@ -348,15 +356,27 @@ func (r *Runner) ship(ctx context.Context, vcsProvider vcs.Provider, worktreePat
 	}
 
 	slog.Info("creating PR", "title", title, "branch", branch)
-	prURL, err := vcsProvider.CreatePR(ctx, vcs.CreatePROpts{
-		RepoPath: worktreePath,
-		Branch:   branch,
-		Title:    title,
-		Body:     body,
-		Labels:   prLabels,
+	var prURL string
+	prCreateErr := retryTransient(3, 5*time.Second, func() error {
+		var createErr error
+		prURL, createErr = vcsProvider.CreatePR(ctx, vcs.CreatePROpts{
+			RepoPath: worktreePath,
+			Branch:   branch,
+			Title:    title,
+			Body:     body,
+			Labels:   prLabels,
+		})
+		return createErr
 	})
-	if err != nil {
-		return "", err
+	if prCreateErr != nil {
+		// PR creation failed after retries — clean up the orphaned remote branch
+		slog.Warn("PR creation failed, deleting orphaned remote branch", "branch", branch)
+		delCmd := exec.CommandContext(ctx, "git", "push", "origin", "--delete", branch)
+		delCmd.Dir = worktreePath
+		if delErr := delCmd.Run(); delErr != nil {
+			slog.Warn("failed to delete orphaned remote branch", "branch", branch, "error", delErr)
+		}
+		return "", prCreateErr
 	}
 
 	// Enable auto-merge if configured — the PR will merge automatically once
@@ -476,6 +496,37 @@ func buildTadpolePrompt(task Task, maxFiles int, repoPaths map[string]string) st
 	}
 
 	return sb.String()
+}
+
+// retryTransient retries fn up to maxAttempts times with a fixed delay between attempts.
+// Only retries when the error message suggests a transient HTTP failure (5xx, timeout).
+func retryTransient(maxAttempts int, delay time.Duration, fn func() error) error {
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err = fn()
+		if err == nil {
+			return nil
+		}
+		if !isTransientError(err) {
+			return err
+		}
+		if attempt < maxAttempts-1 {
+			slog.Warn("transient error, retrying", "attempt", attempt+1, "max", maxAttempts, "error", err)
+			time.Sleep(delay)
+		}
+	}
+	return err
+}
+
+// isTransientError returns true if the error looks like a transient HTTP/network failure.
+func isTransientError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, pattern := range []string{"502", "503", "504", "bad gateway", "service unavailable", "gateway timeout", "timed out", "connection reset"} {
+		if strings.Contains(msg, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildRetryPrompt(vr *ValidationResult) string {

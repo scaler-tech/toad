@@ -248,7 +248,7 @@ func TestDB_PruneThreadMemory(t *testing.T) {
 func TestDB_PRWatch(t *testing.T) {
 	db := openTestDB(t)
 
-	if err := db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test"); err != nil {
+	if err := db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test", "fix the bug", "fix the bug in the login flow"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -265,11 +265,17 @@ func TestDB_PRWatch(t *testing.T) {
 	if watches[0].Branch != "fix-bug" {
 		t.Errorf("branch: got %q, want %q", watches[0].Branch, "fix-bug")
 	}
+	if watches[0].OriginalSummary != "fix the bug" {
+		t.Errorf("original_summary: got %q, want %q", watches[0].OriginalSummary, "fix the bug")
+	}
+	if watches[0].OriginalDescription != "fix the bug in the login flow" {
+		t.Errorf("original_description: got %q, want %q", watches[0].OriginalDescription, "fix the bug in the login flow")
+	}
 }
 
 func TestDB_PRWatch_ClosedExcluded(t *testing.T) {
 	db := openTestDB(t)
-	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test", "fix the bug", "fix the bug in the login flow")
 	db.ClosePRWatch(42, "MERGED")
 
 	watches, _ := db.OpenPRWatches(3, 3)
@@ -280,7 +286,7 @@ func TestDB_PRWatch_ClosedExcluded(t *testing.T) {
 
 func TestDB_PRWatch_FixCountLimit(t *testing.T) {
 	db := openTestDB(t)
-	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test", "fix the bug", "fix the bug in the login flow")
 
 	// Increment review fix count 3 times
 	for i := 0; i < 3; i++ {
@@ -318,7 +324,7 @@ func TestDB_PRWatch_FixCountLimit(t *testing.T) {
 
 func TestDB_PRWatch_CIFixCount(t *testing.T) {
 	db := openTestDB(t)
-	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test", "fix the bug", "fix the bug in the login flow")
 
 	// Increment CI fix count
 	if err := db.IncrementCIFixCount(42); err != nil {
@@ -379,7 +385,7 @@ func TestDB_PRWatch_CIFixCount(t *testing.T) {
 
 func TestDB_PRWatch_ConflictFixCount(t *testing.T) {
 	db := openTestDB(t)
-	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test", "fix the bug", "fix the bug in the login flow")
 
 	if err := db.IncrementConflictFixCount(42); err != nil {
 		t.Fatal(err)
@@ -401,7 +407,7 @@ func TestDB_PRWatch_ConflictFixCount(t *testing.T) {
 
 func TestDB_PRWatch_CIExhaustedNotified(t *testing.T) {
 	db := openTestDB(t)
-	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test")
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test", "fix the bug", "fix the bug in the login flow")
 
 	// Initially not notified
 	watches, _ := db.OpenPRWatches(3, 3)
@@ -967,9 +973,9 @@ func TestDB_MergeStats(t *testing.T) {
 	}
 
 	// Create 3 PRs
-	db.SavePRWatch(1, "https://github.com/pr/1", "fix-a", "run-1", "C1", "ts-1", "/repos/test")
-	db.SavePRWatch(2, "https://github.com/pr/2", "fix-b", "run-2", "C1", "ts-2", "/repos/test")
-	db.SavePRWatch(3, "https://github.com/pr/3", "fix-c", "run-3", "C1", "ts-3", "/repos/test")
+	db.SavePRWatch(1, "https://github.com/pr/1", "fix-a", "run-1", "C1", "ts-1", "/repos/test", "fix a", "")
+	db.SavePRWatch(2, "https://github.com/pr/2", "fix-b", "run-2", "C1", "ts-2", "/repos/test", "fix b", "")
+	db.SavePRWatch(3, "https://github.com/pr/3", "fix-c", "run-3", "C1", "ts-3", "/repos/test", "fix c", "")
 
 	stats, _ = db.MergeStats()
 	if stats.PRsCreated != 3 {

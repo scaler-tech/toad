@@ -162,7 +162,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			slog.Warn("could not extract PR number for review tracking", "url", prURL, "error", err)
 			return
 		}
-		prWatcher.TrackPR(prNum, prURL, branch, runID, task.SlackChannel, task.SlackThreadTS, repoPath)
+		prWatcher.TrackPR(prNum, prURL, branch, runID, task.SlackChannel, task.SlackThreadTS, repoPath, task.Summary, task.Description)
 	})
 
 	// Build path → name map for cross-repo prompts and path scrubbing

@@ -32,6 +32,7 @@ type Watcher struct {
 	maxReviewRounds int
 	maxCIFixRounds  int
 	triageModel     string
+	pollTick        uint64
 }
 
 // NewWatcher creates a PR review watcher.
@@ -73,8 +74,8 @@ func (w *Watcher) Run(ctx context.Context) {
 }
 
 // TrackPR registers a PR for review comment monitoring.
-func (w *Watcher) TrackPR(prNumber int, prURL, branch, runID, channel, thread, repoPath string) {
-	if err := w.db.SavePRWatch(prNumber, prURL, branch, runID, channel, thread, repoPath); err != nil {
+func (w *Watcher) TrackPR(prNumber int, prURL, branch, runID, channel, thread, repoPath, summary, description string) {
+	if err := w.db.SavePRWatch(prNumber, prURL, branch, runID, channel, thread, repoPath, summary, description); err != nil {
 		slog.Error("failed to track PR for review", "pr", prNumber, "error", err)
 	} else {
 		slog.Info("tracking PR for review comments", "pr", prNumber, "branch", branch, "repo", repoPath)
@@ -82,19 +83,33 @@ func (w *Watcher) TrackPR(prNumber int, prURL, branch, runID, channel, thread, r
 }
 
 func (w *Watcher) poll(ctx context.Context) {
+	w.pollTick++
+
 	watches, err := w.db.OpenPRWatches(w.maxReviewRounds, w.maxCIFixRounds)
 	if err != nil {
 		slog.Error("failed to get open PR watches", "error", err)
 		return
 	}
 
-	slog.Debug("PR watcher polling", "open_watches", len(watches))
-
+	// Back off polling for older watches to reduce API calls.
+	// Fresh watches (<4h) poll every tick, older watches less frequently.
+	var active int
+	now := time.Now()
 	for _, watch := range watches {
+		age := now.Sub(watch.CreatedAt)
+		switch {
+		case age > 24*time.Hour && w.pollTick%15 != 0:
+			continue // ~30 min interval
+		case age > 4*time.Hour && w.pollTick%5 != 0:
+			continue // ~10 min interval
+		}
+		active++
 		if err := w.checkPR(ctx, watch); err != nil {
 			slog.Warn("failed to check PR", "pr", watch.PRNumber, "error", err)
 		}
 	}
+
+	slog.Debug("PR watcher polling", "open_watches", len(watches), "checked", active)
 }
 
 func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
@@ -177,13 +192,19 @@ func (w *Watcher) checkMergeConflicts(ctx context.Context, vcsProvider vcs.Provi
 		defaultBranch = repo.DefaultBranch
 	}
 
+	conflictDesc := fmt.Sprintf(
+		"Rebase branch onto %s and resolve all merge conflicts on %s #%d.\n\n"+
+			"The branch has merge conflicts with the default branch. Rebase onto origin/%s, "+
+			"resolve any conflicts preserving the intent of the branch's changes, "+
+			"then stage and commit the resolved files.",
+		defaultBranch, vcsProvider.PRNoun(), watch.PRNumber, defaultBranch)
+	if watch.OriginalSummary != "" {
+		conflictDesc += fmt.Sprintf("\n\n## Original PR intent\n\n%s\n\nWhen resolving conflicts, keep the branch's changes that implement this intent.",
+			watch.OriginalSummary)
+	}
+
 	task := tadpole.Task{
-		Description: fmt.Sprintf(
-			"Rebase branch onto %s and resolve all merge conflicts on %s #%d.\n\n"+
-				"The branch has merge conflicts with the default branch. Rebase onto origin/%s, "+
-				"resolve any conflicts preserving the intent of the branch's changes, "+
-				"then stage and commit the resolved files.",
-			defaultBranch, vcsProvider.PRNoun(), watch.PRNumber, defaultBranch),
+		Description:    conflictDesc,
 		Summary:        fmt.Sprintf("resolve merge conflicts on %s #%d", vcsProvider.PRNoun(), watch.PRNumber),
 		Category:       "bug",
 		EstSize:        "small",
@@ -297,8 +318,14 @@ func (w *Watcher) checkReviewComments(ctx context.Context, vcsProvider vcs.Provi
 		commentRefs = append(commentRefs, vcs.PRCommentRef{ID: c.ID, Source: c.Source})
 	}
 
+	reviewDesc := triage.TaskDescription
+	if watch.OriginalSummary != "" {
+		reviewDesc = fmt.Sprintf("## Original PR intent\n\n%s\n\nIMPORTANT: Do NOT revert the original changes. Address the review feedback while preserving the PR's intent.\n\n---\n\n%s",
+			watch.OriginalSummary, reviewDesc)
+	}
+
 	task := tadpole.Task{
-		Description:    triage.TaskDescription,
+		Description:    reviewDesc,
 		Summary:        fmt.Sprintf("fix review comments on %s #%d", vcsProvider.PRNoun(), watch.PRNumber),
 		Category:       "bug",
 		EstSize:        "small",
@@ -410,6 +437,15 @@ func (w *Watcher) checkCI(ctx context.Context, vcsProvider vcs.Provider, watch *
 
 	var taskDesc strings.Builder
 	fmt.Fprintf(&taskDesc, "Fix CI failures on %s #%d.\n\n", vcsProvider.PRNoun(), watch.PRNumber)
+
+	if watch.OriginalSummary != "" {
+		fmt.Fprintf(&taskDesc, "## Original PR intent\n\n%s\n\n", watch.OriginalSummary)
+		if watch.OriginalDescription != "" {
+			fmt.Fprintf(&taskDesc, "<original_task>\n%s\n</original_task>\n\n", watch.OriginalDescription)
+		}
+		taskDesc.WriteString("IMPORTANT: Do NOT revert the original changes. Fix CI while preserving the PR's intent.\n\n")
+	}
+
 	if logs != "" {
 		taskDesc.WriteString("The CI pipeline is failing. Fix the issues shown in the logs below.\n\n")
 		taskDesc.WriteString("CI failure logs:\n\n```\n")

@@ -110,7 +110,9 @@ func migrate(db *sql.DB) error {
 			ci_exhausted_notified  BOOLEAN DEFAULT FALSE,
 			created_at             DATETIME NOT NULL,
 			closed                 BOOLEAN DEFAULT FALSE,
-			final_state            TEXT DEFAULT ''
+			final_state            TEXT DEFAULT '',
+			original_summary       TEXT DEFAULT '',
+			original_description   TEXT DEFAULT ''
 		);
 
 		CREATE TABLE IF NOT EXISTS daemon_stats (
@@ -194,6 +196,19 @@ func migrate(db *sql.DB) error {
 	if finalStateExists == 0 {
 		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN final_state TEXT DEFAULT ''`); err != nil {
 			slog.Warn("migration: failed to add final_state column", "error", err)
+		}
+	}
+
+	// Add original_summary/original_description columns so CI/review fix tadpoles
+	// know the original PR intent and don't blindly revert changes.
+	var origSummaryExists int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'original_summary'`).Scan(&origSummaryExists)
+	if origSummaryExists == 0 {
+		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN original_summary TEXT DEFAULT ''`); err != nil {
+			slog.Warn("migration: failed to add original_summary column", "error", err)
+		}
+		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN original_description TEXT DEFAULT ''`); err != nil {
+			slog.Warn("migration: failed to add original_description column", "error", err)
 		}
 	}
 
@@ -357,20 +372,22 @@ func (d *DB) PruneThreadMemory(olderThan time.Duration) (int, error) {
 }
 
 // SavePRWatch registers a PR for review comment monitoring.
-func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slackThread, repoPath string) error {
+func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slackThread, repoPath, originalSummary, originalDescription string) error {
 	ctx, cancel := dbCtx()
 	defer cancel()
 	_, err := d.db.ExecContext(ctx, `
-		INSERT INTO pr_watches (pr_number, pr_url, branch, run_id, slack_channel, slack_thread, repo_path, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO pr_watches (pr_number, pr_url, branch, run_id, slack_channel, slack_thread, repo_path, original_summary, original_description, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(pr_number) DO UPDATE SET
 			pr_url = excluded.pr_url,
 			branch = excluded.branch,
 			run_id = excluded.run_id,
 			slack_channel = excluded.slack_channel,
 			slack_thread = excluded.slack_thread,
-			repo_path = excluded.repo_path`,
-		prNumber, prURL, branch, runID, slackChannel, slackThread, repoPath, time.Now(),
+			repo_path = excluded.repo_path,
+			original_summary = excluded.original_summary,
+			original_description = excluded.original_description`,
+		prNumber, prURL, branch, runID, slackChannel, slackThread, repoPath, originalSummary, originalDescription, time.Now(),
 	)
 	return err
 }
@@ -380,7 +397,7 @@ func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, err
 	ctx, cancel := dbCtx()
 	defer cancel()
 	rows, err := d.db.QueryContext(ctx,
-		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count, conflict_fix_count, repo_path, ci_exhausted_notified FROM pr_watches WHERE closed = FALSE AND (fix_count < ? OR ci_fix_count < ? OR conflict_fix_count < ?)",
+		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count, conflict_fix_count, repo_path, ci_exhausted_notified, COALESCE(original_summary, ''), COALESCE(original_description, ''), created_at FROM pr_watches WHERE closed = FALSE AND (fix_count < ? OR ci_fix_count < ? OR conflict_fix_count < ?)",
 		maxReviewRounds, maxCIFixRounds, maxReviewRounds,
 	)
 	if err != nil {
@@ -391,7 +408,7 @@ func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, err
 	var watches []*PRWatch
 	for rows.Next() {
 		var w PRWatch
-		if err := rows.Scan(&w.PRNumber, &w.PRURL, &w.Branch, &w.RunID, &w.SlackChannel, &w.SlackThread, &w.LastCommentID, &w.FixCount, &w.CIFixCount, &w.ConflictFixCount, &w.RepoPath, &w.CIExhaustedNotified); err != nil {
+		if err := rows.Scan(&w.PRNumber, &w.PRURL, &w.Branch, &w.RunID, &w.SlackChannel, &w.SlackThread, &w.LastCommentID, &w.FixCount, &w.CIFixCount, &w.ConflictFixCount, &w.RepoPath, &w.CIExhaustedNotified, &w.OriginalSummary, &w.OriginalDescription, &w.CreatedAt); err != nil {
 			return nil, err
 		}
 		watches = append(watches, &w)
@@ -820,6 +837,9 @@ type PRWatch struct {
 	ConflictFixCount    int
 	RepoPath            string
 	CIExhaustedNotified bool
+	OriginalSummary     string
+	OriginalDescription string
+	CreatedAt           time.Time
 }
 
 // ThreadMemory holds cached context for a Slack thread.
