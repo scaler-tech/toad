@@ -242,6 +242,11 @@ func (w *Watcher) checkMergeConflicts(ctx context.Context, vcsProvider vcs.Provi
 		slog.Warn("failed to increment conflict fix count", "pr", watch.PRNumber, "error", err)
 	}
 
+	// Reset CI fix budget — the conflict fix will push new commits, so CI restarts fresh.
+	if err := w.db.ResetCIFixCount(watch.PRNumber); err != nil {
+		slog.Warn("failed to reset CI fix count after conflict fix", "pr", watch.PRNumber, "error", err)
+	}
+
 	return true, nil
 }
 
@@ -377,6 +382,11 @@ func (w *Watcher) checkReviewComments(ctx context.Context, vcsProvider vcs.Provi
 
 	if err := w.db.IncrementReviewFixCount(watch.PRNumber); err != nil {
 		slog.Warn("failed to increment review fix count", "pr", watch.PRNumber, "error", err)
+	}
+
+	// Reset CI fix budget — the review fix will push new commits, so CI restarts fresh.
+	if err := w.db.ResetCIFixCount(watch.PRNumber); err != nil {
+		slog.Warn("failed to reset CI fix count", "pr", watch.PRNumber, "error", err)
 	}
 
 	return true, nil

@@ -460,6 +460,18 @@ func (d *DB) IncrementConflictFixCount(prNumber int) error {
 	return err
 }
 
+// ResetCIFixCount resets the CI fix counter and exhaustion flag for a PR watch.
+// Called when a new push is made (e.g. after a review fix), so CI gets a fresh budget.
+func (d *DB) ResetCIFixCount(prNumber int) error {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx,
+		"UPDATE pr_watches SET ci_fix_count = 0, ci_exhausted_notified = FALSE WHERE pr_number = ?",
+		prNumber,
+	)
+	return err
+}
+
 // MarkCIExhaustedNotified marks that the CI exhaustion notification has been sent for a PR.
 func (d *DB) MarkCIExhaustedNotified(prNumber int) error {
 	ctx, cancel := dbCtx()

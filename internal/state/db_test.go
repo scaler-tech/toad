@@ -383,6 +383,40 @@ func TestDB_PRWatch_CIFixCount(t *testing.T) {
 	}
 }
 
+func TestDB_PRWatch_ResetCIFixCount(t *testing.T) {
+	db := openTestDB(t)
+	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test", "fix the bug", "fix the bug in the login flow")
+
+	// Exhaust CI budget
+	db.IncrementCIFixCount(42)
+	db.IncrementCIFixCount(42)
+	db.MarkCIExhaustedNotified(42)
+
+	watches, _ := db.OpenPRWatches(3, 3)
+	if len(watches) != 1 {
+		t.Fatalf("expected 1 watch, got %d", len(watches))
+	}
+	if watches[0].CIFixCount != 2 {
+		t.Fatalf("ci_fix_count: got %d, want 2", watches[0].CIFixCount)
+	}
+	if !watches[0].CIExhaustedNotified {
+		t.Fatal("expected ci_exhausted_notified=true")
+	}
+
+	// Reset
+	if err := db.ResetCIFixCount(42); err != nil {
+		t.Fatal(err)
+	}
+
+	watches, _ = db.OpenPRWatches(3, 3)
+	if watches[0].CIFixCount != 0 {
+		t.Errorf("ci_fix_count after reset: got %d, want 0", watches[0].CIFixCount)
+	}
+	if watches[0].CIExhaustedNotified {
+		t.Error("ci_exhausted_notified should be false after reset")
+	}
+}
+
 func TestDB_PRWatch_ConflictFixCount(t *testing.T) {
 	db := openTestDB(t)
 	db.SavePRWatch(42, "https://github.com/pr/42", "fix-bug", "run-1", "C123", "ts-1", "/repos/test", "fix the bug", "fix the bug in the login flow")
