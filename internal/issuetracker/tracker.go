@@ -9,6 +9,16 @@ import (
 	"github.com/hergen/toad/internal/config"
 )
 
+// IssueDetails holds the title and description of an issue, used to enrich
+// investigation prompts with ticket context.
+type IssueDetails struct {
+	ID          string // "PLF-3198"
+	InternalID  string // provider's internal UUID
+	Title       string
+	Description string
+	URL         string
+}
+
 // IssueStatus represents the current state and assignment of an issue.
 type IssueStatus struct {
 	State        string    // e.g. "In Progress", "Todo", "Done"
@@ -47,9 +57,17 @@ func (r *IssueRef) BranchPrefix() string {
 
 // Tracker is the interface for issue tracker integrations.
 type Tracker interface {
-	// ExtractIssueRef extracts an issue reference from message text.
+	// ExtractIssueRef extracts the first issue reference from message text.
 	// Returns nil if no issue reference is found.
 	ExtractIssueRef(text string) *IssueRef
+
+	// ExtractAllIssueRefs extracts all issue references from message text.
+	// Returns nil if no issue references are found.
+	ExtractAllIssueRefs(text string) []*IssueRef
+
+	// GetIssueDetails fetches the title and description of an issue.
+	// Returns nil, nil if the provider doesn't support detail lookups.
+	GetIssueDetails(ctx context.Context, ref *IssueRef) (*IssueDetails, error)
 
 	// CreateIssue creates a new issue in the tracker.
 	CreateIssue(ctx context.Context, opts CreateIssueOpts) (*IssueRef, error)
@@ -76,7 +94,11 @@ type CreateIssueOpts struct {
 // NoopTracker is a no-op implementation that returns nil for everything.
 type NoopTracker struct{}
 
-func (NoopTracker) ExtractIssueRef(string) *IssueRef                                { return nil }
+func (NoopTracker) ExtractIssueRef(string) *IssueRef       { return nil }
+func (NoopTracker) ExtractAllIssueRefs(string) []*IssueRef { return nil }
+func (NoopTracker) GetIssueDetails(context.Context, *IssueRef) (*IssueDetails, error) {
+	return nil, nil
+}
 func (NoopTracker) CreateIssue(context.Context, CreateIssueOpts) (*IssueRef, error) { return nil, nil }
 func (NoopTracker) ShouldCreateIssues() bool                                        { return false }
 func (NoopTracker) GetIssueStatus(context.Context, *IssueRef) (*IssueStatus, error) { return nil, nil }

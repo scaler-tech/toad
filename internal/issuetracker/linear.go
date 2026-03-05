@@ -60,43 +60,147 @@ func (lt *LinearTracker) ShouldCreateIssues() bool {
 	return lt.createIssues
 }
 
-// ExtractIssueRef extracts a Linear issue reference from message text.
+// ExtractIssueRef extracts the first Linear issue reference from message text.
 // Tries URL match first, then falls back to bare ID.
 func (lt *LinearTracker) ExtractIssueRef(text string) *IssueRef {
-	// Try URL match first — more specific and includes the full URL
-	if m := linearURLRe.FindStringSubmatch(text); len(m) > 1 {
-		url := linearURLRe.FindString(text)
-		return &IssueRef{
+	refs := lt.ExtractAllIssueRefs(text)
+	if len(refs) == 0 {
+		return nil
+	}
+	return refs[0]
+}
+
+// ExtractAllIssueRefs extracts all Linear issue references from message text.
+// URL matches take priority and appear first, followed by bare IDs.
+func (lt *LinearTracker) ExtractAllIssueRefs(text string) []*IssueRef {
+	var refs []*IssueRef
+	seen := map[string]bool{}
+
+	// URL matches first — more specific and include the full URL
+	for _, m := range linearURLRe.FindAllStringSubmatch(text, -1) {
+		if len(m) < 2 || seen[m[1]] {
+			continue
+		}
+		seen[m[1]] = true
+		refs = append(refs, &IssueRef{
 			Provider: "linear",
 			ID:       m[1],
-			URL:      url,
-		}
+			URL:      m[0],
+		})
 	}
 
-	// Fall back to bare ID, filtering out common acronyms like HTTP-200
+	// Bare IDs, filtering out common acronyms and already-seen URL matches
 	for _, match := range bareIDRe.FindAllStringSubmatch(text, -1) {
 		if len(match) < 2 {
 			continue
 		}
 		id := match[1]
-		// Extract the alphabetic prefix (everything before the dash)
-		prefix := id
-		for i, ch := range id {
-			if ch == '-' {
-				prefix = id[:i]
-				break
-			}
+		if seen[id] {
+			continue
 		}
+		prefix := issuePrefix(id)
 		if commonAcronyms[prefix] {
 			continue
 		}
-		return &IssueRef{
+		seen[id] = true
+		refs = append(refs, &IssueRef{
 			Provider: "linear",
 			ID:       id,
-		}
+		})
 	}
 
-	return nil
+	return refs
+}
+
+// issuePrefix extracts the alphabetic prefix from an issue ID (e.g. "PLF" from "PLF-3198").
+func issuePrefix(id string) string {
+	for i, ch := range id {
+		if ch == '-' {
+			return id[:i]
+		}
+	}
+	return id
+}
+
+// GetIssueDetails fetches the title and description of a Linear issue.
+func (lt *LinearTracker) GetIssueDetails(ctx context.Context, ref *IssueRef) (*IssueDetails, error) {
+	if lt.apiToken == "" {
+		return nil, nil
+	}
+
+	teamKey, number, err := parseIssueIdentifier(ref.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	query := `query IssueDetails($filter: IssueFilter!) {
+		issues(filter: $filter, first: 1) {
+			nodes {
+				id
+				identifier
+				title
+				description
+				url
+			}
+		}
+	}`
+
+	variables := map[string]any{
+		"filter": map[string]any{
+			"number": map[string]any{"eq": number},
+			"team":   map[string]any{"key": map[string]any{"eq": teamKey}},
+		},
+	}
+
+	data, err := lt.doGraphQL(ctx, query, variables)
+	if err != nil {
+		return nil, fmt.Errorf("fetching issue details: %w", err)
+	}
+
+	var result struct {
+		Issues struct {
+			Nodes []struct {
+				ID          string `json:"id"`
+				Identifier  string `json:"identifier"`
+				Title       string `json:"title"`
+				Description string `json:"description"`
+				URL         string `json:"url"`
+			} `json:"nodes"`
+		} `json:"issues"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("parsing issue details: %w", err)
+	}
+
+	if len(result.Issues.Nodes) == 0 {
+		return nil, nil
+	}
+
+	node := result.Issues.Nodes[0]
+	return &IssueDetails{
+		ID:          node.Identifier,
+		InternalID:  node.ID,
+		Title:       node.Title,
+		Description: node.Description,
+		URL:         node.URL,
+	}, nil
+}
+
+// parseIssueIdentifier splits "PLF-3198" into ("PLF", 3198).
+func parseIssueIdentifier(id string) (string, int, error) {
+	prefix := issuePrefix(id)
+	if prefix == id {
+		return "", 0, fmt.Errorf("invalid issue identifier: %s", id)
+	}
+	numStr := id[len(prefix)+1:]
+	var num int
+	for _, ch := range numStr {
+		if ch < '0' || ch > '9' {
+			return "", 0, fmt.Errorf("invalid issue number in: %s", id)
+		}
+		num = num*10 + int(ch-'0')
+	}
+	return prefix, num, nil
 }
 
 // doGraphQL sends a GraphQL request to the Linear API and returns the raw
@@ -283,6 +387,11 @@ func (lt *LinearTracker) GetIssueStatus(ctx context.Context, ref *IssueRef) (*Is
 		return nil, nil
 	}
 
+	teamKey, number, err := parseIssueIdentifier(ref.ID)
+	if err != nil {
+		return nil, fmt.Errorf("parsing issue ID: %w", err)
+	}
+
 	query := `query IssueByIdentifier($filter: IssueFilter!) {
 		issues(filter: $filter, first: 1) {
 			nodes {
@@ -296,7 +405,8 @@ func (lt *LinearTracker) GetIssueStatus(ctx context.Context, ref *IssueRef) (*Is
 
 	variables := map[string]any{
 		"filter": map[string]any{
-			"identifier": map[string]any{"eq": ref.ID},
+			"number": map[string]any{"eq": number},
+			"team":   map[string]any{"key": map[string]any{"eq": teamKey}},
 		},
 	}
 

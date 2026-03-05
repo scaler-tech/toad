@@ -518,6 +518,17 @@ func (f *fakeTracker) ExtractIssueRef(text string) *issuetracker.IssueRef {
 	return f.extractRef
 }
 
+func (f *fakeTracker) ExtractAllIssueRefs(text string) []*issuetracker.IssueRef {
+	if f.extractRef != nil {
+		return []*issuetracker.IssueRef{f.extractRef}
+	}
+	return nil
+}
+
+func (f *fakeTracker) GetIssueDetails(_ context.Context, _ *issuetracker.IssueRef) (*issuetracker.IssueDetails, error) {
+	return nil, nil
+}
+
 func (f *fakeTracker) CreateIssue(_ context.Context, _ issuetracker.CreateIssueOpts) (*issuetracker.IssueRef, error) {
 	f.createCalled = true
 	return f.createRef, nil

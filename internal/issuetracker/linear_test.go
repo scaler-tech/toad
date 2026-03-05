@@ -210,6 +210,102 @@ func TestBranchPrefix(t *testing.T) {
 	}
 }
 
+func TestExtractAllIssueRefs(t *testing.T) {
+	lt := &LinearTracker{}
+
+	tests := []struct {
+		name    string
+		text    string
+		wantIDs []string
+	}{
+		{
+			name:    "no refs",
+			text:    "just some text",
+			wantIDs: nil,
+		},
+		{
+			name:    "single bare ID",
+			text:    "fix PLF-3198",
+			wantIDs: []string{"PLF-3198"},
+		},
+		{
+			name:    "multiple bare IDs",
+			text:    "REP-1577 is about reporting, PLF-3198 is about platform, ENV-42 is about environment",
+			wantIDs: []string{"REP-1577", "PLF-3198", "ENV-42"},
+		},
+		{
+			name:    "URL and bare IDs",
+			text:    "see https://linear.app/team/issue/PLF-3198/slug and also REP-1577",
+			wantIDs: []string{"PLF-3198", "REP-1577"},
+		},
+		{
+			name:    "dedup URL and bare same ID",
+			text:    "PLF-3198 see https://linear.app/team/issue/PLF-3198",
+			wantIDs: []string{"PLF-3198"},
+		},
+		{
+			name:    "filters acronyms",
+			text:    "HTTP-200 PLF-42 JSON-5",
+			wantIDs: []string{"PLF-42"},
+		},
+		{
+			name:    "multiple URLs",
+			text:    "https://linear.app/t/issue/PLF-1/a and https://linear.app/t/issue/PLF-2/b",
+			wantIDs: []string{"PLF-1", "PLF-2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			refs := lt.ExtractAllIssueRefs(tt.text)
+			var gotIDs []string
+			for _, r := range refs {
+				gotIDs = append(gotIDs, r.ID)
+			}
+			if len(gotIDs) != len(tt.wantIDs) {
+				t.Fatalf("got %v, want %v", gotIDs, tt.wantIDs)
+			}
+			for i := range gotIDs {
+				if gotIDs[i] != tt.wantIDs[i] {
+					t.Errorf("ref[%d] = %q, want %q", i, gotIDs[i], tt.wantIDs[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParseIssueIdentifier(t *testing.T) {
+	tests := []struct {
+		id      string
+		wantKey string
+		wantNum int
+		wantErr bool
+	}{
+		{"PLF-3198", "PLF", 3198, false},
+		{"REP-1", "REP", 1, false},
+		{"AB-0", "AB", 0, false},
+		{"NONUM", "", 0, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.id, func(t *testing.T) {
+			key, num, err := parseIssueIdentifier(tt.id)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if key != tt.wantKey || num != tt.wantNum {
+				t.Errorf("got (%q, %d), want (%q, %d)", key, num, tt.wantKey, tt.wantNum)
+			}
+		})
+	}
+}
+
 func TestNoopTracker(t *testing.T) {
 	tracker := NoopTracker{}
 

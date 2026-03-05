@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/hergen/toad/internal/digest"
 )
 
 func TestBuildTaskDescription_NoContext(t *testing.T) {
@@ -355,6 +357,56 @@ func TestParseInvestigateResult_StrayBraces(t *testing.T) {
 	)
 	if !result.Feasible {
 		t.Error("expected feasible=true — parser should skip stray braces in prose")
+	}
+}
+
+func TestParseInvestigateResult_IssueID(t *testing.T) {
+	result := parseInvestigateResult(
+		`{"feasible": true, "task_spec": "Add refrigerants to seeder", "reasoning": "Clear fix", "issue_id": "PLF-3198"}`,
+		false,
+	)
+	if !result.Feasible {
+		t.Error("expected feasible=true")
+	}
+	if result.IssueID != "PLF-3198" {
+		t.Errorf("expected issue_id PLF-3198, got %q", result.IssueID)
+	}
+}
+
+func TestParseInvestigateResult_EmptyIssueID(t *testing.T) {
+	result := parseInvestigateResult(
+		`{"feasible": true, "task_spec": "Fix bug", "reasoning": "Found it", "issue_id": ""}`,
+		false,
+	)
+	if result.IssueID != "" {
+		t.Errorf("expected empty issue_id, got %q", result.IssueID)
+	}
+}
+
+func TestFormatTicketContext_Empty(t *testing.T) {
+	result := formatTicketContext(nil)
+	if result != "" {
+		t.Errorf("expected empty string for nil tickets, got %q", result)
+	}
+}
+
+func TestFormatTicketContext_WithTickets(t *testing.T) {
+	tickets := []digest.TicketContext{
+		{ID: "PLF-3198", Title: "Add R449A refrigerant", Description: "Need to add R449A to the F-gas seeder", URL: "https://linear.app/t/issue/PLF-3198"},
+		{ID: "REP-1577", Title: "Fix report crash"},
+	}
+	result := formatTicketContext(tickets)
+	if !searchString(result, "PLF-3198") {
+		t.Error("expected PLF-3198 in output")
+	}
+	if !searchString(result, "REP-1577") {
+		t.Error("expected REP-1577 in output")
+	}
+	if !searchString(result, "Add R449A refrigerant") {
+		t.Error("expected ticket title in output")
+	}
+	if !searchString(result, "<linked_tickets>") {
+		t.Error("expected linked_tickets tags")
 	}
 }
 

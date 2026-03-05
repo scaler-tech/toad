@@ -41,15 +41,25 @@ type Opportunity struct {
 	Repo       string   `json:"repo"`
 }
 
+// TicketContext holds details about a ticket referenced in a Slack message,
+// fetched from the issue tracker to enrich investigation prompts.
+type TicketContext struct {
+	ID          string // "PLF-3198"
+	Title       string
+	Description string
+	URL         string
+}
+
 // InvestigateResult holds the outcome of a ribbit investigation.
 type InvestigateResult struct {
 	Feasible  bool   // whether ribbit thinks this is a clear, small fix
 	TaskSpec  string // refined task description for the tadpole
 	Reasoning string // why feasible/not (for logging)
+	IssueID   string // ticket ID selected by investigation (e.g. "PLF-3198"), empty if none
 }
 
 // InvestigateFunc investigates an opportunity against the codebase before spawning.
-type InvestigateFunc func(ctx context.Context, opp Opportunity, msg Message) (*InvestigateResult, error)
+type InvestigateFunc func(ctx context.Context, opp Opportunity, msg Message, tickets []TicketContext) (*InvestigateResult, error)
 
 // SpawnFunc spawns a tadpole task.
 type SpawnFunc func(ctx context.Context, task tadpole.Task) error
@@ -307,12 +317,35 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			}
 		}
 
+		// Fetch ticket details for all issue references in the message.
+		// These enrich the investigation prompt so the LLM can pick the right ticket.
+		var tickets []TicketContext
+		var allRefs []*issuetracker.IssueRef
+		if e.tracker != nil {
+			allRefs = e.tracker.ExtractAllIssueRefs(msg.Text)
+			for _, ref := range allRefs {
+				tc := TicketContext{ID: ref.ID, URL: ref.URL}
+				details, err := e.tracker.GetIssueDetails(ctx, ref)
+				if err != nil {
+					slog.Warn("failed to fetch ticket details", "id", ref.ID, "error", err)
+				} else if details != nil {
+					tc.Title = details.Title
+					tc.Description = details.Description
+					if tc.URL == "" {
+						tc.URL = details.URL
+					}
+				}
+				tickets = append(tickets, tc)
+			}
+		}
+
 		// Investigation gate: have ribbit check the codebase before spawning
 		dismissed := false
 		reasoning := ""
+		investigatedIssueID := ""
 		taskDescription := msg.Text
 		if e.investigate != nil {
-			result, err := e.investigate(ctx, opp, msg)
+			result, err := e.investigate(ctx, opp, msg, tickets)
 			if err != nil {
 				slog.Warn("digest investigation failed", "error", err, "summary", opp.Summary)
 				dismissed = true
@@ -327,6 +360,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 					"summary", opp.Summary, "reasoning", result.Reasoning)
 				taskDescription = result.TaskSpec
 				reasoning = result.Reasoning
+				investigatedIssueID = result.IssueID
 			}
 		}
 
@@ -377,10 +411,25 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			"channel", msg.ChannelName,
 		)
 
-		// Detect or create issue tracker reference
+		// Detect or create issue tracker reference.
+		// Priority: investigation-selected ticket > task_spec extraction > msg.Text extraction > create new.
 		var issueRef *issuetracker.IssueRef
 		if e.tracker != nil {
-			issueRef = e.tracker.ExtractIssueRef(msg.Text)
+			if investigatedIssueID != "" {
+				for _, ref := range allRefs {
+					if ref.ID == investigatedIssueID {
+						issueRef = ref
+						slog.Info("using investigation-selected ticket", "id", ref.ID)
+						break
+					}
+				}
+			}
+			if issueRef == nil {
+				issueRef = e.tracker.ExtractIssueRef(taskDescription)
+			}
+			if issueRef == nil {
+				issueRef = e.tracker.ExtractIssueRef(msg.Text)
+			}
 			if issueRef == nil && e.tracker.ShouldCreateIssues() {
 				ref, err := e.tracker.CreateIssue(ctx, issuetracker.CreateIssueOpts{
 					Title:       opp.Summary,
@@ -443,8 +492,15 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 		// Post a message explaining the autonomous detection before spawning,
 		// so people understand why a tadpole is working on this thread.
 		if e.notify != nil {
-			e.notify(msg.Channel, threadTS,
-				":crown: Spotted this while monitoring the channel — sending a tadpole to investigate and fix.")
+			spawnMsg := ":crown: Spotted this while monitoring the channel — sending a tadpole to investigate and fix."
+			if issueRef != nil {
+				if issueRef.URL != "" {
+					spawnMsg += fmt.Sprintf("\n:ticket: Linked to <%s|%s>", issueRef.URL, issueRef.ID)
+				} else {
+					spawnMsg += fmt.Sprintf("\n:ticket: Linked to %s", issueRef.ID)
+				}
+			}
+			e.notify(msg.Channel, threadTS, spawnMsg)
 		}
 
 		if err := e.spawn(ctx, task); err != nil {
