@@ -107,6 +107,8 @@ type apiOpportunity struct {
 	Confidence    float64 `json:"confidence"`
 	EstSize       string  `json:"est_size"`
 	Channel       string  `json:"channel"`
+	ChannelID     string  `json:"channel_id,omitempty"`
+	ThreadTS      string  `json:"thread_ts,omitempty"`
 	DryRun        bool    `json:"dry_run"`
 	Dismissed     bool    `json:"dismissed"`
 	Investigating bool    `json:"investigating"`
@@ -382,6 +384,8 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 				Confidence:    o.Confidence,
 				EstSize:       o.EstSize,
 				Channel:       o.Channel,
+				ChannelID:     o.ChannelID,
+				ThreadTS:      o.ThreadTS,
 				DryRun:        o.DryRun,
 				Dismissed:     o.Dismissed,
 				Investigating: o.Investigating,
@@ -1596,7 +1600,7 @@ async function refresh() {
         ohtml = '<div class="empty">Toad King is monitoring your channels (' + modeLabel + ' mode). Opportunities will appear here as they are identified.</div>';
         document.getElementById('opps-wrap').innerHTML = ohtml;
       } else {
-        ohtml = '<table><tr><th style="width:80px">When</th><th>Summary</th><th style="width:70px">Category</th><th style="width:80px">Confidence</th><th style="width:60px">Size</th><th style="width:80px">Status</th></tr>';
+        ohtml = '<table><tr><th style="width:80px">When</th><th>Summary</th><th style="width:70px">Category</th><th style="width:80px">Confidence</th><th style="width:60px">Size</th><th style="width:80px">Status</th><th style="width:28px"></th></tr>';
         for (let i = 0; i < opps.length; i++) {
           const o = opps[i];
           const hidden = !oppsExpanded && i >= MAX_VISIBLE ? ' display:none;' : '';
@@ -1623,12 +1627,21 @@ async function refresh() {
               reasonTip = '<br><span style="color:var(--dim);font-size:11px">' + full.substring(0, 120) + '… <a href="#" onclick="event.preventDefault();toggleReason(' + i + ')" style="color:var(--accent)">more</a></span>';
             }
           }
+          let slackLink = '';
+          if (o.channel_id && o.thread_ts) {
+            const ts = o.thread_ts.replace('.', '');
+            const url = 'https://slack.com/archives/' + o.channel_id + '/p' + ts;
+            slackLink = '<a href="' + url + '" target="_blank" rel="noopener" title="View in Slack" style="color:var(--muted);text-decoration:none;opacity:0.6;transition:opacity 0.15s" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">'
+              + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>'
+              + '</a>';
+          }
           ohtml += '<tr' + rowStyle + '><td>' + relTimeAgo(o.created_at, now) + '</td>'
             + '<td style="white-space:normal">' + esc(o.summary) + reasonTip + '</td>'
             + '<td>' + esc(o.category) + '</td>'
             + '<td class="mono">' + (o.confidence * 100).toFixed(0) + '%</td>'
             + '<td>' + esc(o.est_size) + '</td>'
-            + '<td>' + obadge + '</td></tr>';
+            + '<td>' + obadge + '</td>'
+            + '<td style="text-align:center">' + slackLink + '</td></tr>';
         }
         ohtml += '</table>';
         if (opps.length > MAX_VISIBLE) {

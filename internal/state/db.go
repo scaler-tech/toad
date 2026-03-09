@@ -195,6 +195,18 @@ func migrate(db *sql.DB) error {
 		}
 	}
 
+	// Add channel_id and thread_ts columns for Slack deep links from the dashboard.
+	var channelIDExists int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('digest_opportunities') WHERE name = 'channel_id'`).Scan(&channelIDExists)
+	if channelIDExists == 0 {
+		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN channel_id TEXT DEFAULT ''`); err != nil {
+			slog.Warn("migration: failed to add channel_id column", "error", err)
+		}
+		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN thread_ts TEXT DEFAULT ''`); err != nil {
+			slog.Warn("migration: failed to add thread_ts column", "error", err)
+		}
+	}
+
 	// Add final_state column for existing databases that predate merge rate tracking.
 	var finalStateExists int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'final_state'`).Scan(&finalStateExists)
@@ -599,6 +611,8 @@ type DigestOpportunity struct {
 	Confidence    float64
 	EstSize       string
 	Channel       string
+	ChannelID     string
+	ThreadTS      string
 	Message       string
 	Keywords      string
 	DryRun        bool
@@ -614,10 +628,10 @@ func (d *DB) SaveDigestOpportunity(opp *DigestOpportunity) error {
 	ctx, cancel := dbCtx()
 	defer cancel()
 	result, err := d.db.ExecContext(ctx, `
-		INSERT INTO digest_opportunities (summary, category, confidence, est_size, channel, message, keywords, dry_run, dismissed, reasoning, investigating, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO digest_opportunities (summary, category, confidence, est_size, channel, channel_id, thread_ts, message, keywords, dry_run, dismissed, reasoning, investigating, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		opp.Summary, opp.Category, opp.Confidence, opp.EstSize,
-		opp.Channel, opp.Message, opp.Keywords, opp.DryRun,
+		opp.Channel, opp.ChannelID, opp.ThreadTS, opp.Message, opp.Keywords, opp.DryRun,
 		opp.Dismissed, opp.Reasoning, opp.Investigating, opp.CreatedAt,
 	)
 	if err != nil {
@@ -728,7 +742,7 @@ func (d *DB) RecentDigestOpportunities(limit int) ([]*DigestOpportunity, error) 
 	ctx, cancel := dbCtx()
 	defer cancel()
 	rows, err := d.db.QueryContext(ctx,
-		"SELECT id, summary, category, confidence, est_size, channel, message, keywords, dry_run, dismissed, reasoning, investigating, created_at FROM digest_opportunities ORDER BY created_at DESC LIMIT ?",
+		"SELECT id, summary, category, confidence, est_size, channel, COALESCE(channel_id,''), COALESCE(thread_ts,''), message, keywords, dry_run, dismissed, reasoning, investigating, created_at FROM digest_opportunities ORDER BY created_at DESC LIMIT ?",
 		limit,
 	)
 	if err != nil {
@@ -739,7 +753,7 @@ func (d *DB) RecentDigestOpportunities(limit int) ([]*DigestOpportunity, error) 
 	var opps []*DigestOpportunity
 	for rows.Next() {
 		var opp DigestOpportunity
-		if err := rows.Scan(&opp.ID, &opp.Summary, &opp.Category, &opp.Confidence, &opp.EstSize, &opp.Channel, &opp.Message, &opp.Keywords, &opp.DryRun, &opp.Dismissed, &opp.Reasoning, &opp.Investigating, &opp.CreatedAt); err != nil {
+		if err := rows.Scan(&opp.ID, &opp.Summary, &opp.Category, &opp.Confidence, &opp.EstSize, &opp.Channel, &opp.ChannelID, &opp.ThreadTS, &opp.Message, &opp.Keywords, &opp.DryRun, &opp.Dismissed, &opp.Reasoning, &opp.Investigating, &opp.CreatedAt); err != nil {
 			return nil, err
 		}
 		opps = append(opps, &opp)
