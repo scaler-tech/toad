@@ -179,7 +179,7 @@ func (h *SlashCommandHandler) handleMCPConnect(cmd slack.SlashCommand) {
   }
 }`, endpoint, token)
 
-	codeCmd := fmt.Sprintf("claude mcp add --transport http -H \"Authorization: Bearer %s\" toad %s", token, endpoint)
+	codeCmd := fmt.Sprintf("claude mcp add toad %s --transport http -H \"Authorization: Bearer %s\"", endpoint, token)
 
 	text := fmt.Sprintf("Your MCP token has been created (role: *%s*).\n\n"+
 		"*Claude Code* — run this in your terminal:\n```\n%s\n```\n\n"+
