@@ -9,7 +9,7 @@ import (
 func validTestCfg() *Config {
 	cfg := defaults()
 	dir, _ := os.Getwd()
-	cfg.Repos = []RepoConfig{{Name: "test", Path: dir, Primary: true}}
+	cfg.Repos.List = []RepoConfig{{Name: "test", Path: dir, Primary: true}}
 	return cfg
 }
 
@@ -212,7 +212,7 @@ func TestPrimaryRepo_NoPrimary(t *testing.T) {
 func TestValidateRepos_DuplicateNames(t *testing.T) {
 	dir := t.TempDir()
 	cfg := defaults()
-	cfg.Repos = []RepoConfig{
+	cfg.Repos.List = []RepoConfig{
 		{Name: "dup", Path: dir},
 		{Name: "dup", Path: dir},
 	}
@@ -225,13 +225,26 @@ func TestValidateRepos_DuplicateNames(t *testing.T) {
 func TestValidateRepos_MultiplePrimary(t *testing.T) {
 	dir := t.TempDir()
 	cfg := defaults()
-	cfg.Repos = []RepoConfig{
+	cfg.Repos.List = []RepoConfig{
 		{Name: "a", Path: dir, Primary: true},
 		{Name: "b", Path: dir, Primary: true},
 	}
 	err := ValidateRepos(cfg)
 	if err == nil {
 		t.Error("expected error for multiple primary repos")
+	}
+}
+
+func TestApplyEnv_LogLevel(t *testing.T) {
+	cfg := defaults()
+
+	os.Setenv("TOAD_LOG_LEVEL", "debug")
+	defer os.Unsetenv("TOAD_LOG_LEVEL")
+
+	applyEnv(cfg)
+
+	if cfg.Log.Level != "debug" {
+		t.Errorf("expected log level 'debug' from env, got %q", cfg.Log.Level)
 	}
 }
 

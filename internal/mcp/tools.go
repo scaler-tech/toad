@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -13,13 +14,14 @@ import (
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
+	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/triage"
 )
 
 type logsArgs struct {
 	Lines  int    `json:"lines" jsonschema:"Number of recent log lines to return (default 50)"`
 	Level  string `json:"level,omitempty" jsonschema:"Filter by log level (DEBUG INFO WARN ERROR)"`
-	Search string `json:"search,omitempty" jsonschema:"Case-insensitive substring search"`
+	Search string `json:"search,omitempty" jsonschema:"Substring or regex filter (regex if valid pattern, e.g. 'invalid.*<')"`
 	Since  string `json:"since,omitempty" jsonschema:"Time filter: duration like 1h or absolute RFC3339"`
 }
 
@@ -77,7 +79,17 @@ func readLogs(logFile string, maxLines int, level, search, since string) (string
 	}
 
 	levelUpper := strings.ToUpper(level)
-	searchLower := strings.ToLower(search)
+
+	// Try compiling search as regex; fall back to case-insensitive substring.
+	var searchRe *regexp.Regexp
+	var searchLower string
+	if search != "" {
+		if re, err := regexp.Compile("(?i)" + search); err == nil {
+			searchRe = re
+		} else {
+			searchLower = strings.ToLower(search)
+		}
+	}
 
 	// Filter from end for tail behavior, collect matches.
 	var matched []string
@@ -91,7 +103,9 @@ func readLogs(logFile string, maxLines int, level, search, since string) (string
 			continue
 		}
 
-		if searchLower != "" && !strings.Contains(strings.ToLower(line), searchLower) {
+		if searchRe != nil && !searchRe.MatchString(line) {
+			continue
+		} else if searchLower != "" && !strings.Contains(strings.ToLower(line), searchLower) {
 			continue
 		}
 
@@ -288,4 +302,61 @@ func RegisterAskTool(srv *gomcp.Server, deps *AskDeps) {
 			Content: []gomcp.Content{&gomcp.TextContent{Text: resp.Text}},
 		}, nil, nil
 	})
+}
+
+// PRWatchReader abstracts PR watch queries for testability.
+type PRWatchReader interface {
+	OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*state.PRWatch, error)
+}
+
+type watchesArgs struct {
+	// no args needed — returns all open watches
+}
+
+// RegisterWatchesTool registers the watches tool on the given MCP server.
+func RegisterWatchesTool(srv *gomcp.Server, db PRWatchReader) {
+	gomcp.AddTool(srv, &gomcp.Tool{
+		Name:        "watches",
+		Description: "List open PR watches being monitored by the review watcher. Dev-only access.",
+	}, func(ctx context.Context, req *gomcp.CallToolRequest, args watchesArgs) (*gomcp.CallToolResult, any, error) {
+		tok := tokenFromContext(ctx)
+		if tok == nil || tok.Role != "dev" {
+			return nil, nil, fmt.Errorf("access denied: dev role required")
+		}
+
+		// Use high limits to return all open watches.
+		watches, err := db.OpenPRWatches(100, 100)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading PR watches: %w", err)
+		}
+
+		if len(watches) == 0 {
+			return &gomcp.CallToolResult{
+				Content: []gomcp.Content{&gomcp.TextContent{Text: "No open PR watches."}},
+			}, nil, nil
+		}
+
+		result := formatWatches(watches)
+		return &gomcp.CallToolResult{
+			Content: []gomcp.Content{&gomcp.TextContent{Text: result}},
+		}, nil, nil
+	})
+}
+
+func formatWatches(watches []*state.PRWatch) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d open PR watches:\n\n", len(watches))
+	for _, w := range watches {
+		age := time.Since(w.CreatedAt).Truncate(time.Minute)
+		fmt.Fprintf(&b, "PR #%d  %s\n", w.PRNumber, w.PRURL)
+		fmt.Fprintf(&b, "  Branch: %s\n", w.Branch)
+		fmt.Fprintf(&b, "  Age: %s\n", age)
+		fmt.Fprintf(&b, "  Review fixes: %d  CI fixes: %d  Conflict fixes: %d\n",
+			w.FixCount, w.CIFixCount, w.ConflictFixCount)
+		if w.OriginalSummary != "" {
+			fmt.Fprintf(&b, "  Summary: %s\n", w.OriginalSummary)
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

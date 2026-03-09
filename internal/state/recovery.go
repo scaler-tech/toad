@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/scaler-tech/toad/internal/toadpath"
 )
 
 // RecoverResult summarizes what was cleaned up on startup.
@@ -47,13 +49,13 @@ func RecoverOnStartup(db *DB) (*RecoverResult, error) {
 	}
 
 	// 2. Scan for orphaned worktree directories not tracked in the DB
-	homeDir, err := os.UserHomeDir()
+	home, err := toadpath.Home()
 	if err != nil {
 		slog.Warn("cannot check for orphan worktrees", "error", err)
 		return result, nil
 	}
 
-	wtDir := filepath.Join(homeDir, ".toad", "worktrees")
+	wtDir := filepath.Join(home, "worktrees")
 	entries, err := os.ReadDir(wtDir)
 	if err != nil {
 		// No worktrees dir is fine — nothing to clean

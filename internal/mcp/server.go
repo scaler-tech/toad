@@ -3,10 +3,12 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -21,12 +23,23 @@ type TokenValidator interface {
 	ValidateMCPToken(token string) (*state.MCPToken, error)
 }
 
+// HealthInfo holds live daemon status for the health endpoint.
+type HealthInfo struct {
+	mu             sync.RWMutex
+	StartedAt      time.Time
+	Version        string
+	ActiveTadpoles int
+	ActiveRibbits  int
+	SlackConnected bool
+}
+
 // Server wraps the MCP server and its dependencies.
 type Server struct {
 	mcpServer *gomcp.Server
 	cfg       config.MCPConfig
 	db        TokenValidator
 	httpSrv   *http.Server
+	health    *HealthInfo
 }
 
 // New creates a new MCP server.
@@ -40,6 +53,7 @@ func New(cfg config.MCPConfig, db TokenValidator) *Server {
 		mcpServer: mcpSrv,
 		cfg:       cfg,
 		db:        db,
+		health:    &HealthInfo{StartedAt: time.Now()},
 	}
 }
 
@@ -53,6 +67,7 @@ func (s *Server) Start(ctx context.Context) error {
 	)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/health", s.handleHealth)
 	mux.Handle("/mcp", authMiddleware(s.db, handler))
 
 	s.httpSrv = &http.Server{
@@ -81,6 +96,34 @@ func (s *Server) Start(ctx context.Context) error {
 // MCPServer returns the underlying MCP server for tool registration.
 func (s *Server) MCPServer() *gomcp.Server {
 	return s.mcpServer
+}
+
+// Health returns the server's health info for external inspection.
+func (s *Server) Health() *HealthInfo {
+	return s.health
+}
+
+// SetHealth atomically updates health info fields via a callback.
+func (s *Server) SetHealth(fn func(*HealthInfo)) {
+	s.health.mu.Lock()
+	defer s.health.mu.Unlock()
+	fn(s.health)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	s.health.mu.RLock()
+	defer s.health.mu.RUnlock()
+
+	resp := map[string]any{
+		"status":          "ok",
+		"version":         s.health.Version,
+		"uptime_seconds":  int(time.Since(s.health.StartedAt).Seconds()),
+		"active_tadpoles": s.health.ActiveTadpoles,
+		"active_ribbits":  s.health.ActiveRibbits,
+		"slack_connected": s.health.SlackConnected,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func authMiddleware(db TokenValidator, next http.Handler) http.Handler {

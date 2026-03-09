@@ -7,12 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/scaler-tech/toad/internal/toadpath"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
 	Slack        SlackConfig        `yaml:"slack"`
-	Repos        []RepoConfig       `yaml:"repos"`
+	Repos        ReposConfig        `yaml:"repos"`
 	Limits       LimitsConfig       `yaml:"limits"`
 	Triage       TriageConfig       `yaml:"triage"`
 	Claude       ClaudeConfig       `yaml:"claude"` // Deprecated: use Agent.Model and Agent.AppendSystemPrompt
@@ -34,6 +35,11 @@ type SlackConfig struct {
 type Triggers struct {
 	Emoji    string   `yaml:"emoji"`
 	Keywords []string `yaml:"keywords"`
+}
+
+type ReposConfig struct {
+	SyncMinutes int          `yaml:"sync_minutes"` // periodic git fetch interval; 0 = disabled (default)
+	List        []RepoConfig `yaml:"list"`
 }
 
 type RepoConfig struct {
@@ -60,15 +66,16 @@ type ServiceConfig struct {
 }
 
 type LimitsConfig struct {
-	MaxConcurrent   int      `yaml:"max_concurrent"`
-	MaxTurns        int      `yaml:"max_turns"`
-	TimeoutMinutes  int      `yaml:"timeout_minutes"`
-	MaxFilesChanged int      `yaml:"max_files_changed"`
-	MaxRetries      int      `yaml:"max_retries"`
-	MaxReviewRounds int      `yaml:"max_review_rounds"`
-	MaxCIFixRounds  int      `yaml:"max_ci_fix_rounds"`
-	HistorySize     int      `yaml:"history_size"`
-	ReviewBots      []string `yaml:"review_bots"` // bot usernames whose PR comments can trigger fixes (e.g. "greptile[bot]")
+	MaxConcurrent    int      `yaml:"max_concurrent"`
+	MaxTurns         int      `yaml:"max_turns"`
+	TimeoutMinutes   int      `yaml:"timeout_minutes"`
+	MaxFilesChanged  int      `yaml:"max_files_changed"`
+	MaxRetries       int      `yaml:"max_retries"`
+	MaxReviewRounds  int      `yaml:"max_review_rounds"`
+	MaxCIFixRounds   int      `yaml:"max_ci_fix_rounds"`
+	HistorySize      int      `yaml:"history_size"`
+	ReviewBots       []string `yaml:"review_bots"`        // bot usernames whose PR comments can trigger fixes (e.g. "greptile[bot]")
+	WorktreeTTLHours int      `yaml:"worktree_ttl_hours"` // auto-remove worktrees older than this (0 = disabled)
 }
 
 type TriageConfig struct {
@@ -134,7 +141,7 @@ type MCPConfig struct {
 }
 
 func defaults() *Config {
-	homeDir, _ := os.UserHomeDir()
+	home, _ := toadpath.Home()
 
 	return &Config{
 		Slack: SlackConfig{
@@ -144,14 +151,15 @@ func defaults() *Config {
 			},
 		},
 		Limits: LimitsConfig{
-			MaxConcurrent:   2,
-			MaxTurns:        30,
-			TimeoutMinutes:  10,
-			MaxFilesChanged: 5,
-			MaxRetries:      1,
-			MaxReviewRounds: 3,
-			MaxCIFixRounds:  2,
-			HistorySize:     50,
+			MaxConcurrent:    2,
+			MaxTurns:         30,
+			TimeoutMinutes:   10,
+			MaxFilesChanged:  5,
+			MaxRetries:       1,
+			MaxReviewRounds:  3,
+			MaxCIFixRounds:   2,
+			HistorySize:      50,
+			WorktreeTTLHours: 24,
 		},
 		Triage: TriageConfig{
 			Model:     "haiku",
@@ -184,7 +192,7 @@ func defaults() *Config {
 		},
 		Log: LogConfig{
 			Level: "info",
-			File:  filepath.Join(homeDir, ".toad", "toad.log"),
+			File:  filepath.Join(home, "toad.log"),
 		},
 		MCP: MCPConfig{
 			Enabled: false,
@@ -199,8 +207,8 @@ func defaults() *Config {
 func Load() (*Config, error) {
 	cfg := defaults()
 
-	homeDir, _ := os.UserHomeDir()
-	globalPath := filepath.Join(homeDir, ".toad", "config.yaml")
+	home, _ := toadpath.Home()
+	globalPath := filepath.Join(home, "config.yaml")
 	if err := loadFile(cfg, globalPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("loading global config: %w", err)
 	}
@@ -222,12 +230,12 @@ func Load() (*Config, error) {
 	}
 
 	// Apply defaults and normalize paths for individual repos
-	for i := range cfg.Repos {
-		if cfg.Repos[i].DefaultBranch == "" {
-			cfg.Repos[i].DefaultBranch = "main"
+	for i := range cfg.Repos.List {
+		if cfg.Repos.List[i].DefaultBranch == "" {
+			cfg.Repos.List[i].DefaultBranch = "main"
 		}
-		if cfg.Repos[i].Path != "" {
-			cfg.Repos[i].Path, _ = filepath.Abs(cfg.Repos[i].Path)
+		if cfg.Repos.List[i].Path != "" {
+			cfg.Repos.List[i].Path, _ = filepath.Abs(cfg.Repos.List[i].Path)
 		}
 	}
 
@@ -256,6 +264,9 @@ func applyEnv(cfg *Config) {
 	// Per-repo host overrides must be set via YAML (repos[].vcs.host).
 	if v := os.Getenv("TOAD_GITLAB_HOST"); v != "" {
 		cfg.VCS.Host = v
+	}
+	if v := os.Getenv("TOAD_LOG_LEVEL"); v != "" {
+		cfg.Log.Level = v
 	}
 }
 
@@ -298,13 +309,13 @@ func Validate(cfg *Config) error {
 
 // ValidateRepos checks that repos configuration is valid.
 func ValidateRepos(cfg *Config) error {
-	if len(cfg.Repos) == 0 {
+	if len(cfg.Repos.List) == 0 {
 		return fmt.Errorf("at least one repo is required")
 	}
 	names := make(map[string]bool)
 	primaryCount := 0
 	validPlatforms := map[string]bool{"github": true, "gitlab": true}
-	for _, r := range cfg.Repos {
+	for _, r := range cfg.Repos.List {
 		if r.Path == "" {
 			return fmt.Errorf("repo %q: path is required", r.Name)
 		}

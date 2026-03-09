@@ -66,8 +66,8 @@ func runTadpole(cmd *cobra.Command, args []string) error {
 	sm := state.NewManager()
 	runner := tadpole.NewRunner(cfg, agentProvider, nil, sm, vcsResolver)
 
-	repoPaths := make(map[string]string, len(cfg.Repos))
-	for _, r := range cfg.Repos {
+	repoPaths := make(map[string]string, len(cfg.Repos.List))
+	for _, r := range cfg.Repos.List {
 		repoPaths[r.Path] = r.Name
 	}
 
@@ -89,21 +89,21 @@ func runTadpole(cmd *cobra.Command, args []string) error {
 }
 
 func validateForCLI(cfg *config.Config) error {
-	if len(cfg.Repos) == 0 {
+	if len(cfg.Repos.List) == 0 {
 		return fmt.Errorf("at least one repo is required")
 	}
 	return nil
 }
 
 func resolveRepoForCLI(cfg *config.Config, name string) (*config.RepoConfig, error) {
-	if len(cfg.Repos) == 1 {
-		return &cfg.Repos[0], nil
+	if len(cfg.Repos.List) == 1 {
+		return &cfg.Repos.List[0], nil
 	}
 	if name != "" {
-		repo := config.RepoByName(cfg.Repos, name)
+		repo := config.RepoByName(cfg.Repos.List, name)
 		if repo == nil {
-			names := make([]string, len(cfg.Repos))
-			for i, r := range cfg.Repos {
+			names := make([]string, len(cfg.Repos.List))
+			for i, r := range cfg.Repos.List {
 				names[i] = r.Name
 			}
 			return nil, fmt.Errorf("unknown repo %q — available: %s", name, strings.Join(names, ", "))
@@ -111,8 +111,8 @@ func resolveRepoForCLI(cfg *config.Config, name string) (*config.RepoConfig, err
 		return repo, nil
 	}
 	// Multiple repos, no flag
-	names := make([]string, len(cfg.Repos))
-	for i, r := range cfg.Repos {
+	names := make([]string, len(cfg.Repos.List))
+	for i, r := range cfg.Repos.List {
 		names[i] = r.Name
 	}
 	return nil, fmt.Errorf("multiple repos configured — use --repo to specify: %s", strings.Join(names, ", "))

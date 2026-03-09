@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/scaler-tech/toad/internal/state"
 )
 
 func TestReadLogs(t *testing.T) {
@@ -39,15 +42,84 @@ func TestReadLogs(t *testing.T) {
 		t.Error("should not contain INFO when filtering ERROR")
 	}
 
-	// Search filter
+	// Search filter (substring)
 	result, _ = readLogs(logFile, 100, "", "ribbit", "")
 	if !strings.Contains(result, "ribbit complete") {
 		t.Errorf("expected ribbit line, got: %q", result)
+	}
+
+	// Search filter (regex)
+	result, _ = readLogs(logFile, 100, "", "triage.*timeout", "")
+	if !strings.Contains(result, "triage failed") {
+		t.Errorf("expected triage line via regex, got: %q", result)
+	}
+
+	// Regex is case-insensitive
+	result, _ = readLogs(logFile, 100, "", "RIBBIT.*complete", "")
+	if !strings.Contains(result, "ribbit complete") {
+		t.Errorf("expected case-insensitive regex match, got: %q", result)
+	}
+
+	// Invalid regex falls back to substring
+	result, _ = readLogs(logFile, 100, "", "[invalid", "")
+	if !strings.Contains(result, "No matching") {
+		t.Errorf("expected no matches for invalid regex as substring, got: %q", result)
 	}
 
 	// No matches
 	result, _ = readLogs(logFile, 100, "", "nonexistent", "")
 	if !strings.Contains(result, "No matching") {
 		t.Errorf("expected no matches message, got: %q", result)
+	}
+}
+
+func TestFormatWatches(t *testing.T) {
+	watches := []*state.PRWatch{
+		{
+			PRNumber:         9461,
+			PRURL:            "https://github.com/org/repo/pull/9461",
+			Branch:           "fix/upload-validation",
+			FixCount:         1,
+			CIFixCount:       2,
+			ConflictFixCount: 0,
+			OriginalSummary:  "Fix upload validation for empty CSV",
+			CreatedAt:        time.Now().Add(-2 * time.Hour),
+		},
+		{
+			PRNumber:  9462,
+			PRURL:     "https://github.com/org/repo/pull/9462",
+			Branch:    "feat/add-key-row",
+			CreatedAt: time.Now().Add(-30 * time.Minute),
+		},
+	}
+
+	result := formatWatches(watches)
+
+	if !strings.Contains(result, "2 open PR watches") {
+		t.Errorf("expected header with count, got: %q", result)
+	}
+	if !strings.Contains(result, "PR #9461") {
+		t.Error("expected PR 9461 in output")
+	}
+	if !strings.Contains(result, "PR #9462") {
+		t.Error("expected PR 9462 in output")
+	}
+	if !strings.Contains(result, "Review fixes: 1  CI fixes: 2") {
+		t.Error("expected fix counts in output")
+	}
+	if !strings.Contains(result, "Fix upload validation") {
+		t.Error("expected summary in output")
+	}
+	// PR 9462 has no summary, so "Summary:" should not appear for it
+	parts := strings.SplitN(result, "PR #9462", 2)
+	if len(parts) == 2 && strings.Contains(parts[1], "Summary:") {
+		t.Error("should not show Summary line when empty")
+	}
+}
+
+func TestFormatWatches_Empty(t *testing.T) {
+	result := formatWatches(nil)
+	if !strings.Contains(result, "0 open PR watches") {
+		t.Errorf("expected empty header, got: %q", result)
 	}
 }

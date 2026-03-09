@@ -103,26 +103,28 @@ slack:
 # Repositories
 # ──────────────────────────────────────────────
 repos:
-{{ range $i, $r := .Repos }}  - name: "{{ $r.Name }}"
-    path: "{{ $r.Path }}"
-{{ if $r.Primary }}    primary: true
-{{ end }}{{ if $r.TestCommand }}    test_command: "{{ $r.TestCommand }}"
-{{ end }}{{ if $r.LintCommand }}    lint_command: "{{ $r.LintCommand }}"
-{{ end }}    default_branch: "{{ $r.DefaultBranch }}"
-    auto_merge: {{ $r.AutoMerge }}
-    # merge_bot_fixups: false    # Auto-merge bot-authored PRs targeting toad branches (e.g. CI style fixes)
-{{ if $r.PRLabels }}    pr_labels:
-{{ range $r.PRLabels }}      - "{{ . }}"
-{{ end }}{{ end }}    # Per-service validation for monorepos:
-    # services:
-    #   - path: "web-app"
-    #     test_command: "make test"
-    #     lint_command: "make stan && make cs"
-    # Per-repo VCS override:
-    # vcs:
-    #   platform: "gitlab"
-    #   host: "gitlab.company.com"
-    #   bot_usernames: ["renovate-bot"]
+  # sync_minutes: 10            # Periodic git fetch interval (0 = disabled)
+  list:
+{{ range $i, $r := .Repos }}    - name: "{{ $r.Name }}"
+      path: "{{ $r.Path }}"
+{{ if $r.Primary }}      primary: true
+{{ end }}{{ if $r.TestCommand }}      test_command: "{{ $r.TestCommand }}"
+{{ end }}{{ if $r.LintCommand }}      lint_command: "{{ $r.LintCommand }}"
+{{ end }}      default_branch: "{{ $r.DefaultBranch }}"
+      auto_merge: {{ $r.AutoMerge }}
+      # merge_bot_fixups: false    # Auto-merge bot-authored PRs targeting toad branches (e.g. CI style fixes)
+{{ if $r.PRLabels }}      pr_labels:
+{{ range $r.PRLabels }}        - "{{ . }}"
+{{ end }}{{ end }}      # Per-service validation for monorepos:
+      # services:
+      #   - path: "web-app"
+      #     test_command: "make test"
+      #     lint_command: "make stan && make cs"
+      # Per-repo VCS override:
+      # vcs:
+      #   platform: "gitlab"
+      #   host: "gitlab.company.com"
+      #   bot_usernames: ["renovate-bot"]
 
 {{ end }}
 # ──────────────────────────────────────────────
@@ -137,6 +139,7 @@ limits:
   # max_review_rounds: 3      # Max rounds of PR review fixes
   # max_ci_fix_rounds: 2      # Max rounds of CI failure fixes
   # history_size: 50          # Max completed runs to keep in state
+  # worktree_ttl_hours: 24    # Auto-remove worktrees older than this (0 = disabled)
 
 # ──────────────────────────────────────────────
 # Triage — message classification
@@ -220,6 +223,7 @@ log:
 #   devs:                        # Slack user IDs with dev access (logs tool)
 #     - "U0123456789"
 #   message: ""                  # Optional message included in the connect DM
+
 `
 
 var configTemplate = template.Must(template.New("config").Parse(yamlTemplate))

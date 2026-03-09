@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scaler-tech/toad/internal/toadpath"
 	_ "modernc.org/sqlite" // SQLite driver
 )
 
@@ -28,17 +29,16 @@ type DB struct {
 
 // OpenDB opens or creates the SQLite database at ~/.toad/state.db.
 func OpenDB() (*DB, error) {
-	homeDir, err := os.UserHomeDir()
+	home, err := toadpath.Home()
 	if err != nil {
-		return nil, fmt.Errorf("getting home dir: %w", err)
+		return nil, fmt.Errorf("getting toad home: %w", err)
 	}
 
-	dbDir := filepath.Join(homeDir, ".toad")
-	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+	if err := os.MkdirAll(home, 0o755); err != nil {
 		return nil, fmt.Errorf("creating db directory: %w", err)
 	}
 
-	dbPath := filepath.Join(dbDir, "state.db")
+	dbPath := filepath.Join(home, "state.db")
 	return OpenDBAt(dbPath)
 }
 

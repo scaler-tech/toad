@@ -212,7 +212,7 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 	// Resolve PR noun once at construction time.
 	prNoun := "PR"
 	if cfg != nil {
-		primaryRepo := config.PrimaryRepo(cfg.Repos)
+		primaryRepo := config.PrimaryRepo(cfg.Repos.List)
 		resolved := config.ResolvedVCS(primaryRepo, cfg.VCS)
 		if p, err := vcs.NewProvider(vcs.ProviderConfig{Platform: resolved.Platform}); err == nil {
 			prNoun = p.PRNoun()
@@ -437,7 +437,7 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 				DigestEnabled:  cfg.Digest.Enabled,
 				DigestDryRun:   cfg.Digest.DryRun,
 			}
-			for _, r := range cfg.Repos {
+			for _, r := range cfg.Repos.List {
 				ac.Repos = append(ac.Repos, apiConfigRepo{Name: r.Name, Path: r.Path})
 			}
 			if cfg.Digest.Enabled {

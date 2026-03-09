@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/scaler-tech/toad/internal/issuetracker"
 	toadlog "github.com/scaler-tech/toad/internal/log"
 	toadmcp "github.com/scaler-tech/toad/internal/mcp"
+	"github.com/scaler-tech/toad/internal/preflight"
 	"github.com/scaler-tech/toad/internal/reviewer"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
@@ -90,13 +92,18 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		toadlog.Setup(cfg.Log.Level, cfg.Log.File)
 	}
 
-	// 4. Print version and check for updates
+	// 4. Preflight checks — fail fast on missing tools or bad repo paths
+	if results := preflight.Run(cfg); len(preflight.Errors(results)) > 0 {
+		return fmt.Errorf("%s", preflight.FormatErrors(preflight.Errors(results)))
+	}
+
+	// 5. Print version and check for updates
 	slog.Info("starting toad", "version", Version)
 	if info, checkErr := update.Check(Version); checkErr == nil && info != nil && info.Available {
 		slog.Warn("update available", "current", info.Current, "latest", info.Latest)
 	}
 
-	// 5. Check required CLI tools
+	// 6. Check required CLI tools
 	agentProvider, err := agent.NewProvider(cfg.Agent.Platform)
 	if err != nil {
 		return fmt.Errorf("agent config: %w", err)
@@ -127,8 +134,8 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build repo profiles and resolver for multi-repo routing
-	profiles := config.BuildProfiles(cfg.Repos)
-	resolver := config.NewResolver(profiles, cfg.Repos)
+	profiles := config.BuildProfiles(cfg.Repos.List)
+	resolver := config.NewResolver(profiles, cfg.Repos.List)
 
 	triageEngine := triage.New(agentProvider, cfg.Triage.Model, profiles)
 	ribbitEngine := ribbit.New(agentProvider, cfg)
@@ -149,7 +156,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	tracker := issuetracker.NewTracker(cfg.IssueTracker)
 
 	// 8. Initialize PR review watcher
-	prWatcher := reviewer.NewWatcher(stateDB, cfg.Repos, func(ctx context.Context, task tadpole.Task) error {
+	prWatcher := reviewer.NewWatcher(stateDB, cfg.Repos.List, func(ctx context.Context, task tadpole.Task) error {
 		return tadpolePool.Spawn(ctx, task)
 	}, slackClient, agentProvider, cfg.Limits.MaxReviewRounds, cfg.Limits.MaxCIFixRounds, cfg.Triage.Model, vcsResolver, cfg.Limits.ReviewBots)
 
@@ -158,8 +165,8 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		repoPath := ""
 		if task.Repo != nil {
 			repoPath = task.Repo.Path
-		} else if len(cfg.Repos) > 0 {
-			repoPath = cfg.Repos[0].Path
+		} else if len(cfg.Repos.List) > 0 {
+			repoPath = cfg.Repos.List[0].Path
 		}
 		prNum, err := vcsResolver(repoPath).ExtractPRNumber(prURL)
 		if err != nil {
@@ -170,8 +177,8 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	})
 
 	// Build path → name map for cross-repo prompts and path scrubbing
-	repoPaths := make(map[string]string, len(cfg.Repos))
-	for _, r := range cfg.Repos {
+	repoPaths := make(map[string]string, len(cfg.Repos.List))
+	for _, r := range cfg.Repos.List {
 		repoPaths[r.Path] = r.Name
 	}
 
@@ -184,11 +191,12 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		mcpSrv = toadmcp.New(cfg.MCP, stateDB)
 
 		toadmcp.RegisterLogsTool(mcpSrv.MCPServer(), cfg.Log.File)
+		toadmcp.RegisterWatchesTool(mcpSrv.MCPServer(), stateDB)
 		toadmcp.RegisterAskTool(mcpSrv.MCPServer(), &toadmcp.AskDeps{
 			Ribbit:   ribbitEngine,
 			Triage:   triageEngine,
 			Resolver: resolver,
-			Repos:    cfg.Repos,
+			Repos:    cfg.Repos.List,
 			Sessions: toadmcp.NewSessionStore(),
 			Sem:      ribbitSem,
 		})
@@ -256,8 +264,8 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	repoNames := make([]string, len(cfg.Repos))
-	for i, r := range cfg.Repos {
+	repoNames := make([]string, len(cfg.Repos.List))
+	for i, r := range cfg.Repos.List {
 		repoNames[i] = r.Name
 	}
 	slog.Info("toad is listening",
@@ -268,6 +276,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	// Start MCP server if enabled
 	if mcpSrv != nil {
+		mcpSrv.Health().Version = Version
 		go func() {
 			if err := mcpSrv.Start(ctx); err != nil {
 				slog.Error("MCP server error", "error", err)
@@ -277,6 +286,17 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	// Start PR review watcher
 	go prWatcher.Run(ctx)
+
+	// Start periodic repo sync if enabled
+	if cfg.Repos.SyncMinutes > 0 {
+		interval := time.Duration(cfg.Repos.SyncMinutes) * time.Minute
+		go syncRepos(ctx, cfg.Repos.List, interval)
+	}
+
+	// Start worktree TTL cleanup if configured
+	if cfg.Limits.WorktreeTTLHours > 0 {
+		go tadpole.CleanupStaleWorktrees(ctx, time.Duration(cfg.Limits.WorktreeTTLHours)*time.Hour)
+	}
 
 	// Start digest engine (Toad King) if enabled
 	if digestEngine != nil {
@@ -1039,8 +1059,8 @@ func investigateOpportunity(ctx context.Context, cfg *config.Config, agentProvid
 	prompt := fmt.Sprintf(investigatePrompt, opp.Summary, msg.ChannelName,
 		strings.Join(opp.Keywords, ", "), strings.Join(opp.FilesHint, ", "), msg.Text, ticketSection)
 
-	additionalDirs := make([]string, 0, len(cfg.Repos))
-	for _, r := range cfg.Repos {
+	additionalDirs := make([]string, 0, len(cfg.Repos.List))
+	for _, r := range cfg.Repos.List {
 		additionalDirs = append(additionalDirs, r.Path)
 	}
 
@@ -1049,8 +1069,8 @@ func investigateOpportunity(ctx context.Context, cfg *config.Config, agentProvid
 	var repoPath string
 	if repo != nil {
 		repoPath = repo.Path
-	} else if len(cfg.Repos) > 0 {
-		repoPath = cfg.Repos[0].Path
+	} else if len(cfg.Repos.List) > 0 {
+		repoPath = cfg.Repos.List[0].Path
 	} else {
 		return nil, fmt.Errorf("no repos configured")
 	}
@@ -1149,8 +1169,8 @@ func investigateTriggered(ctx context.Context, cfg *config.Config, agentProvider
 		strings.Join(triageResult.FilesHint, ", "),
 		messageText)
 
-	additionalDirs := make([]string, 0, len(cfg.Repos))
-	for _, r := range cfg.Repos {
+	additionalDirs := make([]string, 0, len(cfg.Repos.List))
+	for _, r := range cfg.Repos.List {
 		additionalDirs = append(additionalDirs, r.Path)
 	}
 
@@ -1158,8 +1178,8 @@ func investigateTriggered(ctx context.Context, cfg *config.Config, agentProvider
 	var repoPath string
 	if repo != nil {
 		repoPath = repo.Path
-	} else if len(cfg.Repos) > 0 {
-		repoPath = cfg.Repos[0].Path
+	} else if len(cfg.Repos.List) > 0 {
+		repoPath = cfg.Repos.List[0].Path
 	} else {
 		return nil, fmt.Errorf("no repos configured")
 	}
@@ -1379,12 +1399,62 @@ func truncate(s string, n int) string {
 	return string(runes[:n-3]) + "..."
 }
 
+// syncRepos periodically fetches and fast-forward pulls all configured repos.
+// This keeps the local checkout fresh for ribbit (read-only Q&A) and digest
+// investigations, which operate on the working tree without fetching.
+func syncRepos(ctx context.Context, repos []config.RepoConfig, interval time.Duration) {
+	slog.Info("repo sync started", "interval", interval, "repos", len(repos))
+
+	// Run immediately on startup, then on ticker.
+	syncAll(repos)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			syncAll(repos)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func syncAll(repos []config.RepoConfig) {
+	for _, repo := range repos {
+		fetchCmd := exec.Command("git", "fetch", "origin")
+		fetchCmd.Dir = repo.Path
+		if out, err := fetchCmd.CombinedOutput(); err != nil {
+			slog.Warn("repo sync fetch failed", "repo", repo.Name, "error", err, "output", strings.TrimSpace(string(out)))
+			continue
+		}
+
+		// Fast-forward pull if on the default branch (no-op if detached or on another branch).
+		branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+		branchCmd.Dir = repo.Path
+		branchOut, err := branchCmd.Output()
+		if err != nil {
+			continue
+		}
+		currentBranch := strings.TrimSpace(string(branchOut))
+		if currentBranch == repo.DefaultBranch {
+			pullCmd := exec.Command("git", "pull", "--ff-only")
+			pullCmd.Dir = repo.Path
+			if out, err := pullCmd.CombinedOutput(); err != nil {
+				slog.Warn("repo sync pull failed", "repo", repo.Name, "error", err, "output", strings.TrimSpace(string(out)))
+			}
+		}
+
+		slog.Debug("repo synced", "repo", repo.Name, "branch", currentBranch)
+	}
+}
+
 // buildVCSResolver constructs a VCS Resolver from config, merging per-repo
 // overrides with the global VCS settings. Each unique provider is Check()-ed
 // during construction.
 func buildVCSResolver(cfg *config.Config) (vcs.Resolver, error) {
-	repoVCS := make(map[string]vcs.ProviderConfig, len(cfg.Repos))
-	for _, r := range cfg.Repos {
+	repoVCS := make(map[string]vcs.ProviderConfig, len(cfg.Repos.List))
+	for _, r := range cfg.Repos.List {
 		resolved := config.ResolvedVCS(&r, cfg.VCS)
 		repoVCS[r.Path] = vcs.ProviderConfig{
 			Platform:     resolved.Platform,
@@ -1392,7 +1462,7 @@ func buildVCSResolver(cfg *config.Config) (vcs.Resolver, error) {
 			BotUsernames: resolved.BotUsernames,
 		}
 	}
-	primary := config.PrimaryRepo(cfg.Repos)
+	primary := config.PrimaryRepo(cfg.Repos.List)
 	fallbackVCS := config.ResolvedVCS(primary, cfg.VCS)
 	fallbackCfg := vcs.ProviderConfig{
 		Platform:     fallbackVCS.Platform,

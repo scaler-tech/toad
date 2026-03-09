@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/scaler-tech/toad/internal/toadpath"
 )
 
 // WorktreeResult holds paths created by worktree setup.
@@ -35,12 +37,12 @@ func CreateWorktree(ctx context.Context, repoPath, slug, defaultBranch string) (
 		return nil, fmt.Errorf("generating random id: %w", err)
 	}
 
-	homeDir, err := os.UserHomeDir()
+	home, err := toadpath.Home()
 	if err != nil {
-		return nil, fmt.Errorf("getting home dir: %w", err)
+		return nil, fmt.Errorf("getting toad home: %w", err)
 	}
 
-	wtDir := filepath.Join(homeDir, ".toad", "worktrees")
+	wtDir := filepath.Join(home, "worktrees")
 	if err := os.MkdirAll(wtDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating worktree directory: %w", err)
 	}
@@ -78,12 +80,12 @@ func CheckoutWorktree(ctx context.Context, repoPath, branch string) (*WorktreeRe
 		return nil, fmt.Errorf("generating random id: %w", err)
 	}
 
-	homeDir, err := os.UserHomeDir()
+	home, err := toadpath.Home()
 	if err != nil {
-		return nil, fmt.Errorf("getting home dir: %w", err)
+		return nil, fmt.Errorf("getting toad home: %w", err)
 	}
 
-	wtDir := filepath.Join(homeDir, ".toad", "worktrees")
+	wtDir := filepath.Join(home, "worktrees")
 	if err := os.MkdirAll(wtDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating worktree directory: %w", err)
 	}

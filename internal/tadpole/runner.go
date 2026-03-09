@@ -31,7 +31,7 @@ type Task struct {
 	TriageResult   *triage.Result
 	IssueRef       *issuetracker.IssueRef
 	ExistingBranch string             // if set, checkout this branch instead of creating new (review fixes)
-	Repo           *config.RepoConfig // resolved repo for this task (nil falls back to cfg.Repos[0])
+	Repo           *config.RepoConfig // resolved repo for this task (nil falls back to cfg.Repos.List[0])
 	RepoPaths      map[string]string  // path → name, for cross-repo prompts and scrubbing paths from output
 	PRNumber       int                // PR number that triggered this fix (for comment reactions)
 	CommentRefs    []vcs.PRCommentRef // comments to react 👍 on completion
@@ -60,12 +60,12 @@ func (r *Runner) OnShip(cb ShipCallback) {
 	r.onShip = cb
 }
 
-// repoConfig returns the resolved repo for this task, falling back to cfg.Repos[0].
+// repoConfig returns the resolved repo for this task, falling back to cfg.Repos.List[0].
 func (t *Task) repoConfig(cfg *config.Config) *config.RepoConfig {
 	if t.Repo != nil {
 		return t.Repo
 	}
-	return &cfg.Repos[0]
+	return &cfg.Repos.List[0]
 }
 
 // Execute runs the full tadpole lifecycle: worktree → agent → validate → retry → ship.
