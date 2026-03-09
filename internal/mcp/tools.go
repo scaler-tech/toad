@@ -17,10 +17,10 @@ import (
 )
 
 type logsArgs struct {
-	Lines  int    `json:"lines" jsonschema:"description=Number of recent log lines to return (default 50)"`
-	Level  string `json:"level,omitempty" jsonschema:"description=Filter by log level (DEBUG INFO WARN ERROR)"`
-	Search string `json:"search,omitempty" jsonschema:"description=Case-insensitive substring search"`
-	Since  string `json:"since,omitempty" jsonschema:"description=Time filter: duration like 1h or absolute RFC3339"`
+	Lines  int    `json:"lines" jsonschema:"Number of recent log lines to return (default 50)"`
+	Level  string `json:"level,omitempty" jsonschema:"Filter by log level (DEBUG INFO WARN ERROR)"`
+	Search string `json:"search,omitempty" jsonschema:"Case-insensitive substring search"`
+	Since  string `json:"since,omitempty" jsonschema:"Time filter: duration like 1h or absolute RFC3339"`
 }
 
 // RegisterLogsTool registers the logs tool on the given MCP server.
@@ -178,9 +178,9 @@ type AskDeps struct {
 }
 
 type askArgs struct {
-	Question     string `json:"question" jsonschema:"description=The question to ask about the codebase"`
-	Repo         string `json:"repo,omitempty" jsonschema:"description=Optional repo name (auto-detected if omitted)"`
-	ClearContext bool   `json:"clear_context,omitempty" jsonschema:"description=Reset conversation context"`
+	Question     string `json:"question" jsonschema:"The question to ask about the codebase"`
+	Repo         string `json:"repo,omitempty" jsonschema:"Optional repo name (auto-detected if omitted)"`
+	ClearContext bool   `json:"clear_context,omitempty" jsonschema:"Reset conversation context"`
 }
 
 // RegisterAskTool registers the ask tool on the given MCP server.
