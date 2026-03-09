@@ -288,7 +288,9 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	// Write daemon stats to SQLite every 10s for the dashboard
 	daemonStartedAt := time.Now()
+	statsDone := make(chan struct{})
 	go func() {
+		defer close(statsDone)
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
@@ -350,6 +352,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	slackErr := slackClient.Run(ctx)
 	<-poolDone
+	<-statsDone // wait for stats writer to finish before closing DB
 
 	if restartRequested.Load() {
 		binary, err := os.Executable()

@@ -71,7 +71,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("  " + dimStyle.Render("Upgrading toad..."))
-	upgradeCmd := exec.Command("brew", "upgrade", "--cask", "toad")
+	upgradeCmd := exec.Command("brew", "upgrade", "--cask", "scaler-tech/pkg/toad")
 	upgradeOutput, upgradeErr := upgradeCmd.CombinedOutput()
 	if upgradeErr != nil {
 		errMsg := strings.TrimSpace(string(upgradeOutput))
@@ -79,6 +79,9 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 			fmt.Println("  " + successStyle.Render(fmt.Sprintf("toad v%s is already installed.", info.Latest)))
 		} else {
 			fmt.Println("  " + errorStyle.Render(fmt.Sprintf("brew upgrade failed: %v", upgradeErr)))
+			if errMsg != "" {
+				fmt.Println("  " + dimStyle.Render(errMsg))
+			}
 		}
 		fmt.Println()
 		return nil

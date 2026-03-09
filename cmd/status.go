@@ -54,7 +54,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/api/update", apiUpdateHandler())
 	mux.HandleFunc("/api/restart", apiRestartHandler(db))
 	mux.HandleFunc("/api/auto-update", apiAutoUpdateHandler(db))
-
 	// Start auto-update background loop
 	go autoUpdateLoop(db)
 
@@ -63,6 +62,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+
+	// Resolve actual port (may differ from statusPort if 0 was used)
+	actualPort := ln.Addr().(*net.TCPAddr).Port
+	mux.HandleFunc("/api/reload-dashboard", apiReloadDashboardHandler(actualPort))
 
 	url := fmt.Sprintf("http://%s", ln.Addr().String())
 	fmt.Printf("toad dashboard: %s\n", url)
@@ -483,7 +486,7 @@ func apiUpdateHandler() http.HandlerFunc {
 				return
 			}
 
-			if out, err := exec.Command("brew", "upgrade", "--cask", "toad").CombinedOutput(); err != nil {
+			if out, err := exec.Command("brew", "upgrade", "--cask", "scaler-tech/pkg/toad").CombinedOutput(); err != nil {
 				msg := strings.TrimSpace(string(out))
 				if !strings.Contains(msg, "already installed") {
 					slog.Warn("update: brew upgrade failed", "output", msg)
@@ -526,6 +529,29 @@ func apiRestartHandler(db *state.DB) http.HandlerFunc {
 		}
 
 		json.NewEncoder(w).Encode(map[string]any{"ok": true, "pid": pid})
+	}
+}
+
+func apiReloadDashboardHandler(port int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+
+		// Give the response time to flush, then restart the dashboard process
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			binary, err := os.Executable()
+			if err != nil {
+				slog.Error("dashboard reload: could not find executable", "error", err)
+				return
+			}
+			// Ensure the new process uses the same port so the browser can reconnect
+			args := []string{binary, "status", "--port", fmt.Sprintf("%d", port)}
+			slog.Info("reloading dashboard process", "binary", binary, "port", port)
+			if err := execReplace(binary, args, os.Environ()); err != nil {
+				slog.Error("dashboard reload failed", "error", err)
+			}
+		}()
 	}
 }
 
@@ -591,7 +617,7 @@ func autoUpdateLoop(db *state.DB) {
 			continue
 		}
 
-		if out, err := exec.Command("brew", "upgrade", "--cask", "toad").CombinedOutput(); err != nil {
+		if out, err := exec.Command("brew", "upgrade", "--cask", "scaler-tech/pkg/toad").CombinedOutput(); err != nil {
 			msg := strings.TrimSpace(string(out))
 			if !strings.Contains(msg, "already installed") {
 				slog.Warn("auto-update: brew upgrade failed", "output", msg)
@@ -865,21 +891,42 @@ const dashboardHTML = `<!DOCTYPE html>
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 12px; padding: 24px; min-width: 420px; max-width: 560px;
   }
-  .modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
-  .modal .modal-status {
-    font-size: 13px; color: var(--dim); margin-bottom: 16px;
-  }
-  .modal .modal-runs { margin-bottom: 16px; }
-  .modal .modal-run {
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 10px; font-size: 13px;
-    border-bottom: 1px solid var(--border);
-  }
-  .modal .modal-run:last-child { border-bottom: none; }
-  .modal .modal-run .run-task { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .modal .modal-run .run-duration { color: var(--dim); font-family: monospace; font-size: 12px; }
-  .modal .modal-footer { text-align: right; }
+  .modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+  .modal .modal-footer { text-align: right; margin-top: 16px; }
   .modal .modal-footer .action-btn { margin-left: 8px; }
+  /* Restart checklist steps */
+  .restart-steps { display: flex; flex-direction: column; gap: 10px; }
+  .restart-step {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; color: #5a5a5f; transition: color 0.2s;
+  }
+  .restart-step.active { color: var(--text); }
+  .restart-step.done { color: var(--green); }
+  .restart-step.error { color: var(--red); }
+  .restart-step-icon {
+    width: 18px; height: 18px; display: flex;
+    align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .restart-step-icon .dot {
+    width: 6px; height: 6px; border-radius: 50%; background: #3a3a3e;
+  }
+  .restart-step.active .dot {
+    background: var(--green);
+    box-shadow: 0 0 6px rgba(76,175,80,0.5);
+    animation: stepPulse 1s ease-in-out infinite;
+  }
+  .restart-step.done .dot, .restart-step.error .dot { display: none; }
+  .restart-step-icon .check { display: none; font-size: 13px; }
+  .restart-step.done .check { display: inline; color: var(--green); }
+  .restart-step.error .check { display: inline; color: var(--red); }
+  .restart-step .step-detail {
+    font-size: 11px; color: var(--dim); margin-left: auto;
+    font-family: monospace; white-space: nowrap;
+  }
+  @keyframes stepPulse {
+    0%,100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.3); }
+  }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
   /* Integrations row */
@@ -1154,11 +1201,11 @@ const dashboardHTML = `<!DOCTYPE html>
 
 <div class="modal-overlay" id="restart-modal">
   <div class="modal">
-    <h3 id="modal-title">Restarting toad...</h3>
-    <div class="modal-status" id="modal-status">Waiting for in-flight work to finish</div>
-    <div class="modal-runs" id="modal-runs"></div>
+    <h3 id="modal-title">Restarting toad</h3>
+    <div class="restart-steps" id="restart-steps"></div>
     <div class="modal-footer">
       <span class="refresh-info" id="modal-elapsed"></span>
+      <button class="action-btn" onclick="hideRestartModal()" style="margin-left:8px">Close</button>
     </div>
   </div>
 </div>
@@ -1272,21 +1319,23 @@ async function refresh() {
     // Update available indicator
     const updateEl = document.getElementById('update-badge');
     const btnUpdate = document.getElementById('btn-update');
-    if (dm.update_available && dm.latest_version) {
+    // Sync auto-update toggle and hide manual buttons when auto-update is on
+    const autoToggle = document.getElementById('auto-update-toggle');
+    const autoOn = d.auto_update;
+    if (autoOn) {
+      autoToggle.classList.add('active');
+    } else {
+      autoToggle.classList.remove('active');
+    }
+    document.getElementById('btn-check-update').style.display = autoOn ? 'none' : '';
+
+    if (!autoOn && dm.update_available && dm.latest_version) {
       updateEl.textContent = 'v' + dm.latest_version + ' available';
       updateEl.style.display = '';
       btnUpdate.style.display = '';
     } else {
       updateEl.style.display = 'none';
       btnUpdate.style.display = 'none';
-    }
-
-    // Sync auto-update toggle
-    const autoToggle = document.getElementById('auto-update-toggle');
-    if (d.auto_update) {
-      autoToggle.classList.add('active');
-    } else {
-      autoToggle.classList.remove('active');
     }
 
     // Version mismatch between daemon and dashboard binary
@@ -1596,21 +1645,53 @@ async function refresh() {
 let restartModalOpen = false;
 let restartStartedAt = 0;
 let restartOrigPID = 0;
+let restartPhase = ''; // signal, drain, offline, done, error
+
+const RESTART_STEPS = [
+  { id: 'signal',  label: 'Sending restart signal' },
+  { id: 'drain',   label: 'Draining in-flight work' },
+  { id: 'restart', label: 'Restarting daemon' },
+  { id: 'online',  label: 'Daemon back online' },
+  { id: 'dash',    label: 'Reloading dashboard' },
+];
+
+function renderSteps() {
+  return RESTART_STEPS.map(s =>
+    '<div class="restart-step" id="rs-' + s.id + '">'
+    + '<span class="restart-step-icon"><span class="dot"></span><span class="check"></span></span>'
+    + '<span class="step-label">' + s.label + '</span>'
+    + '<span class="step-detail" id="rsd-' + s.id + '"></span>'
+    + '</div>'
+  ).join('');
+}
+
+function setStepState(id, state, detail) {
+  const el = document.getElementById('rs-' + id);
+  if (!el) return;
+  el.className = 'restart-step' + (state ? ' ' + state : '');
+  const checkEl = el.querySelector('.check');
+  if (state === 'done') checkEl.textContent = '\u2713';
+  else if (state === 'error') checkEl.textContent = '\u2717';
+  else checkEl.textContent = '';
+  const detailEl = document.getElementById('rsd-' + id);
+  if (detailEl) detailEl.textContent = detail || '';
+}
 
 function showRestartModal(title) {
   restartModalOpen = true;
   restartStartedAt = Date.now();
+  restartPhase = 'signal';
   document.getElementById('modal-title').textContent = title;
-  document.getElementById('modal-status').textContent = 'Sending restart signal...';
-  document.getElementById('modal-runs').innerHTML = '';
+  document.getElementById('restart-steps').innerHTML = renderSteps();
   document.getElementById('modal-elapsed').textContent = '';
   document.getElementById('restart-modal').classList.add('visible');
+  setStepState('signal', 'active');
 }
 
 function hideRestartModal() {
   restartModalOpen = false;
+  restartPhase = '';
   document.getElementById('restart-modal').classList.remove('visible');
-  // Reset button states
   const btn = document.getElementById('btn-restart');
   btn.disabled = false;
   btn.textContent = 'Restart';
@@ -1620,52 +1701,67 @@ function updateRestartModal(dm, active, now) {
   const elapsed = Math.round((Date.now() - restartStartedAt) / 1000);
   document.getElementById('modal-elapsed').textContent = fmtDuration(elapsed) + ' elapsed';
 
-  if (!dm.running) {
-    if (elapsed > 120) {
-      // Daemon hasn't come back after 2 minutes — something went wrong
-      document.getElementById('modal-status').textContent = 'Daemon did not come back online';
-      document.getElementById('modal-runs').innerHTML =
-        '<div style="text-align:center;padding:12px;color:var(--red)">&#x2717; Restart may have failed. Check logs or start toad manually.</div>';
-      document.getElementById('modal-elapsed').innerHTML =
-        '<button class="action-btn" onclick="hideRestartModal()">Dismiss</button>';
-      return;
+  if (restartPhase === 'done' || restartPhase === 'error') return;
+
+  // Phase: signal sent, waiting for draining to start
+  if (restartPhase === 'signal' && dm.draining) {
+    setStepState('signal', 'done');
+    setStepState('drain', 'active');
+    restartPhase = 'drain';
+  }
+
+  // Phase: draining — show active task count
+  if (restartPhase === 'drain') {
+    if (active.length > 0) {
+      const tasks = active.map(r => esc(r.task || r.branch)).join(', ');
+      setStepState('drain', 'active', active.length + ' task' + (active.length > 1 ? 's' : ''));
+    } else {
+      setStepState('drain', 'active');
     }
-    // Daemon went offline — either restarting or exec'd the new binary
-    document.getElementById('modal-status').textContent = 'Daemon is restarting...';
-    document.getElementById('modal-runs').innerHTML =
-      '<div style="text-align:center;padding:12px;color:var(--amber)"><span class="spinner" style="display:inline-block;width:14px;height:14px;border:2px solid transparent;border-top-color:var(--amber);border-radius:50%;animation:spin 0.8s linear infinite"></span> Waiting for daemon to come back online</div>';
+  }
+
+  // Daemon went offline — draining done, now restarting binary
+  if (!dm.running && (restartPhase === 'drain' || restartPhase === 'signal')) {
+    setStepState('signal', 'done');
+    setStepState('drain', 'done');
+    setStepState('restart', 'active');
+    restartPhase = 'offline';
+  }
+
+  // Timeout: daemon didn't come back after 2 minutes offline
+  if (restartPhase === 'offline' && elapsed > 120) {
+    setStepState('restart', 'error', 'timed out');
+    document.getElementById('modal-elapsed').innerHTML =
+      '<button class="action-btn" onclick="hideRestartModal()">Dismiss</button>';
+    restartPhase = 'error';
     return;
   }
 
+  // Detect restart complete: daemon is running, not draining, and uptime reset
   if (dm.running && !dm.draining && restartOrigPID) {
-    // Detect restart: PID changed, or uptime reset (syscall.Exec keeps same PID)
     const restarted = dm.pid !== restartOrigPID || (dm.uptime_s != null && dm.uptime_s < elapsed);
-    if (restarted) {
-      document.getElementById('modal-status').textContent = 'Restart complete!';
-      document.getElementById('modal-runs').innerHTML =
-        '<div style="text-align:center;padding:12px;color:var(--green)">&#x2714; Daemon restarted (PID ' + dm.pid + ')</div>';
-      setTimeout(hideRestartModal, 2000);
-      return;
-    }
-  }
-
-  if (dm.draining) {
-    if (active.length === 0) {
-      document.getElementById('modal-status').textContent = 'No more in-flight work. Restarting binary...';
-      document.getElementById('modal-runs').innerHTML = '';
-    } else {
-      document.getElementById('modal-status').textContent =
-        'Waiting for ' + active.length + ' in-flight ' + (active.length === 1 ? 'task' : 'tasks') + ' to finish';
-      let html = '';
-      for (const r of active) {
-        const dur = now - r.started_at;
-        html += '<div class="modal-run">'
-          + statusBadge(r.status, true)
-          + '<span class="run-task">' + esc(r.task || r.branch) + '</span>'
-          + '<span class="run-duration">' + fmtDuration(dur) + '</span>'
-          + '</div>';
-      }
-      document.getElementById('modal-runs').innerHTML = html;
+    if (restarted && restartPhase !== 'signal') {
+      setStepState('signal', 'done');
+      setStepState('drain', 'done');
+      setStepState('restart', 'done');
+      setStepState('online', 'done', 'PID ' + dm.pid);
+      setStepState('dash', 'active');
+      restartPhase = 'done';
+      // Reload dashboard process so it runs the new binary
+      setTimeout(async () => {
+        try {
+          await fetch('/api/reload-dashboard');
+        } catch (e) { /* expected — server restarts */ }
+        // Wait for new dashboard to come up, then reload page
+        const retryReload = setInterval(() => {
+          fetch('/api/data').then(() => {
+            clearInterval(retryReload);
+            window.location.reload();
+          }).catch(() => {});
+        }, 500);
+        // Give up after 10s
+        setTimeout(() => clearInterval(retryReload), 10000);
+      }, 500);
     }
   }
 }
@@ -1699,16 +1795,18 @@ async function doUpdate() {
     if (d.status === 'started' || d.status === 'running') {
       btn.textContent = 'Installing...';
       const poll = setInterval(async () => {
-        const cr = await fetch('/api/check-update');
-        const cd = await cr.json();
-        if (!cd.available) {
-          clearInterval(poll);
-          btn.textContent = 'Updated!';
-          btn.disabled = false;
-          refresh();
-          setTimeout(() => { btn.style.display = 'none'; }, 2000);
-        }
-      }, 5000);
+        try {
+          const cr = await fetch('/api/data');
+          const cd = await cr.json();
+          if (!cd.daemon || !cd.daemon.update_available) {
+            clearInterval(poll);
+            btn.textContent = 'Updated!';
+            btn.disabled = false;
+            refresh();
+            setTimeout(() => { btn.style.display = 'none'; }, 2000);
+          }
+        } catch (e) { /* retry */ }
+      }, 3000);
       setTimeout(() => { clearInterval(poll); btn.disabled = false; btn.textContent = 'Update'; }, 120000);
     }
   } catch (e) {
@@ -1723,15 +1821,21 @@ async function triggerRestart(title) {
     const resp = await fetch('/api/restart');
     const d = await resp.json();
     if (d.error) {
-      document.getElementById('modal-status').textContent = 'Error: ' + d.error;
-      setTimeout(hideRestartModal, 3000);
+      setStepState('signal', 'error', d.error);
+      restartPhase = 'error';
+      document.getElementById('modal-elapsed').innerHTML =
+        '<button class="action-btn" onclick="hideRestartModal()">Dismiss</button>';
       return;
     }
     restartOrigPID = d.pid || 0;
-    document.getElementById('modal-status').textContent = 'Draining in-flight work...';
+    setStepState('signal', 'done');
+    setStepState('drain', 'active');
+    restartPhase = 'drain';
   } catch (e) {
-    document.getElementById('modal-status').textContent = 'Failed to send restart signal';
-    setTimeout(hideRestartModal, 3000);
+    setStepState('signal', 'error', 'failed');
+    restartPhase = 'error';
+    document.getElementById('modal-elapsed').innerHTML =
+      '<button class="action-btn" onclick="hideRestartModal()">Dismiss</button>';
   }
 }
 
@@ -1751,6 +1855,10 @@ async function toggleAutoUpdate() {
     // silently fail, next refresh will sync state
   }
 }
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && restartModalOpen) hideRestartModal();
+});
 
 refresh();
 setInterval(refresh, 2000);

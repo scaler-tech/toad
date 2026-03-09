@@ -14,12 +14,13 @@ type Pool struct {
 	wg     sync.WaitGroup
 
 	mu      sync.Mutex
-	cancels []context.CancelFunc // cancel funcs for running tadpoles
+	nextID  uint64
+	cancels map[uint64]context.CancelFunc
 }
 
 // NewPool creates a tadpole pool with the given semaphore and runner.
 func NewPool(sem chan struct{}, runner *Runner) *Pool {
-	return &Pool{sem: sem, runner: runner}
+	return &Pool{sem: sem, runner: runner, cancels: make(map[uint64]context.CancelFunc)}
 }
 
 // Spawn acquires a semaphore slot and launches a tadpole in a goroutine.
@@ -39,14 +40,21 @@ func (p *Pool) Spawn(ctx context.Context, task Task) error {
 	execCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
 	p.mu.Lock()
-	p.cancels = append(p.cancels, cancel)
+	id := p.nextID
+	p.nextID++
+	p.cancels[id] = cancel
 	p.mu.Unlock()
 
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
 		defer func() { <-p.sem }()
-		defer cancel()
+		defer func() {
+			cancel()
+			p.mu.Lock()
+			delete(p.cancels, id)
+			p.mu.Unlock()
+		}()
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Error("tadpole panicked", "error", r, "task", task.Summary)
