@@ -76,21 +76,23 @@ func runStatus(cmd *cobra.Command, args []string) error {
 }
 
 type apiResponse struct {
-	Daemon         *apiDaemon          `json:"daemon"`
-	Integrations   []apiIntegration    `json:"integrations"`
-	Stats          *state.Stats        `json:"stats"`
-	MergeStats     *apiMergeStats      `json:"merge_stats,omitempty"`
-	Active         []apiRun            `json:"active"`
-	History        []apiRun            `json:"history"`
-	Watches        []apiWatch          `json:"watches"`
-	Opportunities  []apiOpportunity    `json:"opportunities"`
-	DigestCounts   *state.DigestCounts `json:"digest_counts,omitempty"`
-	Config         *apiConfig          `json:"config,omitempty"`
-	CCUsage        *apiCCUsage         `json:"cc_usage,omitempty"`
-	PRNoun         string              `json:"pr_noun"`
-	AutoUpdate     bool                `json:"auto_update"`
-	AutoRestarting bool                `json:"auto_restarting,omitempty"`
-	Now            int64               `json:"now"`
+	Daemon             *apiDaemon          `json:"daemon"`
+	Integrations       []apiIntegration    `json:"integrations"`
+	Stats              *state.Stats        `json:"stats"`
+	MergeStats         *apiMergeStats      `json:"merge_stats,omitempty"`
+	Active             []apiRun            `json:"active"`
+	History            []apiRun            `json:"history"`
+	Watches            []apiWatch          `json:"watches"`
+	Opportunities      []apiOpportunity    `json:"opportunities"`
+	DigestCounts       *state.DigestCounts `json:"digest_counts,omitempty"`
+	Config             *apiConfig          `json:"config,omitempty"`
+	CCUsage            *apiCCUsage         `json:"cc_usage,omitempty"`
+	PRNoun             string              `json:"pr_noun"`
+	AutoUpdate         bool                `json:"auto_update"`
+	AutoRestarting     bool                `json:"auto_restarting,omitempty"`
+	AutoRestartPID     int                 `json:"auto_restart_pid,omitempty"`
+	AutoRestartStarted int64               `json:"auto_restart_started,omitempty"`
+	Now                int64               `json:"now"`
 }
 
 type apiMergeStats struct {
@@ -434,6 +436,8 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 		}
 		versionMu.Lock()
 		resp.AutoRestarting = autoRestarting
+		resp.AutoRestartPID = autoRestartPID
+		resp.AutoRestartStarted = autoRestartStarted
 		versionMu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -656,6 +660,8 @@ func autoUpdateLoop(db *state.DB) {
 		if stats.PID > 0 {
 			versionMu.Lock()
 			autoRestarting = true
+			autoRestartPID = stats.PID
+			autoRestartStarted = stats.StartedAt.Unix()
 			versionMu.Unlock()
 			if err := signalRestart(stats.PID); err != nil {
 				slog.Warn("auto-update: failed to signal daemon", "pid", stats.PID, "error", err)
@@ -693,10 +699,12 @@ var (
 )
 
 var (
-	versionCache   *update.Info
-	versionCacheAt time.Time
-	versionMu      sync.Mutex
-	autoRestarting bool // set by autoUpdateLoop when restart is triggered
+	versionCache       *update.Info
+	versionCacheAt     time.Time
+	versionMu          sync.Mutex
+	autoRestarting     bool  // set by autoUpdateLoop when restart is triggered
+	autoRestartPID     int   // daemon PID before restart signal was sent
+	autoRestartStarted int64 // daemon started_at before restart signal was sent
 )
 
 func checkVersion() *update.Info {
@@ -1250,6 +1258,7 @@ const dashboardHTML = `<!DOCTYPE html>
     <div class="restart-steps" id="restart-steps"></div>
     <div class="modal-footer">
       <span class="refresh-info" id="modal-elapsed"></span>
+      <button class="action-btn" id="btn-force-reload" onclick="forceReloadDashboard()" style="display:none;margin-left:8px" title="Force the dashboard to restart on the new binary">Force reload</button>
       <button class="action-btn" onclick="hideRestartModal()" style="margin-left:8px">Close</button>
     </div>
   </div>
@@ -1396,9 +1405,11 @@ async function refresh() {
     document.getElementById('btn-restart').disabled = !dm.running || dm.draining;
 
     // Auto-update triggered restart: open modal automatically
+    // Use pre-restart PID/started_at from backend (captured before signal was sent)
+    // to avoid race where daemon already restarted before frontend polls.
     if (d.auto_restarting && !restartModalOpen) {
-      restartOrigPID = dm.pid || 0;
-      restartOrigStartedAt = dm.started_at || 0;
+      restartOrigPID = d.auto_restart_pid || dm.pid || 0;
+      restartOrigStartedAt = d.auto_restart_started || dm.started_at || 0;
       showRestartModal('Auto-updating toad...');
       setStepState('signal', 'done');
       setStepState('drain', 'active');
@@ -1749,8 +1760,15 @@ function showRestartModal(title) {
   document.getElementById('modal-title').textContent = title;
   document.getElementById('restart-steps').innerHTML = renderSteps();
   document.getElementById('modal-elapsed').textContent = '';
+  document.getElementById('btn-force-reload').style.display = 'none';
   document.getElementById('restart-modal').classList.add('visible');
   setStepState('signal', 'active');
+  // Show emergency force-reload button after 15s if still stuck
+  setTimeout(() => {
+    if (restartModalOpen && restartPhase !== 'done') {
+      document.getElementById('btn-force-reload').style.display = '';
+    }
+  }, 15000);
 }
 
 function hideRestartModal() {
@@ -1914,6 +1932,23 @@ async function doRestart() {
   btn.disabled = true;
   btn.classList.add('spinning');
   await triggerRestart('Restarting toad...');
+}
+
+async function forceReloadDashboard() {
+  const btn = document.getElementById('btn-force-reload');
+  btn.disabled = true;
+  btn.textContent = 'Reloading...';
+  try {
+    await fetch('/api/reload-dashboard');
+  } catch (e) { /* expected — server restarts */ }
+  // Poll until the new dashboard responds, then reload the page
+  const poll = setInterval(() => {
+    fetch('/api/data').then(() => {
+      clearInterval(poll);
+      window.location.reload();
+    }).catch(() => {});
+  }, 500);
+  setTimeout(() => { clearInterval(poll); btn.disabled = false; btn.textContent = 'Force reload'; }, 15000);
 }
 
 async function toggleAutoUpdate() {
