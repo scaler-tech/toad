@@ -11,7 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/hergen/toad/internal/tui"
+	"github.com/scaler-tech/toad/internal/tui"
 )
 
 // Key constants for repeated Bubble Tea key strings.

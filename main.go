@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/hergen/toad/cmd"
+	"github.com/scaler-tech/toad/cmd"
 )
 
 func main() {

@@ -60,7 +60,7 @@ Everything in toad is named after the lifecycle of a frog:
 ### macOS and Linux
 
 ```bash
-brew tap cdre-ai/tap https://github.com/cdre-ai/homebrew-tap
+brew tap scaler-tech/pkg https://github.com/scaler-tech/pkg
 brew install --cask toad
 ```
 
@@ -69,7 +69,7 @@ brew install --cask toad
 ### Windows
 
 ```bash
-scoop bucket add cdre-ai https://github.com/cdre-ai/homebrew-tap
+scoop bucket add scaler-tech https://github.com/scaler-tech/pkg
 scoop install toad
 ```
 
@@ -77,13 +77,13 @@ scoop install toad
 
 ```bash
 # Binary releases
-# Download from https://github.com/cdre-ai/toad/releases/latest
+# Download from https://github.com/scaler-tech/toad/releases/latest
 
 # Go install
-go install github.com/cdre-ai/toad@latest
+go install github.com/scaler-tech/toad@latest
 
 # Build from source
-git clone https://github.com/cdre-ai/toad.git && cd toad && make build
+git clone https://github.com/scaler-tech/toad.git && cd toad && make build
 ```
 
 ## 🔧 Quick start

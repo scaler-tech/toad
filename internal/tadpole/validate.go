@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hergen/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/config"
 )
 
 // ValidateConfig configures what validation checks to run.

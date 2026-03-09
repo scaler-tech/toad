@@ -1,4 +1,4 @@
-module github.com/hergen/toad
+module github.com/scaler-tech/toad
 
 go 1.25.0
 

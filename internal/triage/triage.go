@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hergen/toad/internal/agent"
-	"github.com/hergen/toad/internal/config"
-	islack "github.com/hergen/toad/internal/slack"
+	"github.com/scaler-tech/toad/internal/agent"
+	"github.com/scaler-tech/toad/internal/config"
+	islack "github.com/scaler-tech/toad/internal/slack"
 )
 
 // Result holds the triage classification of a Slack message.

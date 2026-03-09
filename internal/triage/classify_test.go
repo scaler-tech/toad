@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hergen/toad/internal/agent"
-	islack "github.com/hergen/toad/internal/slack"
+	"github.com/scaler-tech/toad/internal/agent"
+	islack "github.com/scaler-tech/toad/internal/slack"
 )
 
 func TestClassify_RunOptsWiring(t *testing.T) {

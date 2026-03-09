@@ -8,7 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/hergen/toad/internal/update"
+	"github.com/scaler-tech/toad/internal/update"
 )
 
 var updateCmd = &cobra.Command{
@@ -57,7 +57,7 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	if !hasBrew {
 		fmt.Println("  " + dimStyle.Render("Homebrew not found. Update manually:"))
 		fmt.Println()
-		fmt.Println("  " + dimStyle.Render("  go install github.com/cdre-ai/toad@latest"))
+		fmt.Println("  " + dimStyle.Render("  go install github.com/scaler-tech/toad@latest"))
 		fmt.Println("  " + dimStyle.Render("  or download from: "+info.ReleaseURL))
 		fmt.Println()
 		return nil

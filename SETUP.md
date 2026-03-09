@@ -55,7 +55,7 @@ Make sure the Claude Code CLI is authenticated (`claude` should work from your t
 ### macOS and Linux (Homebrew — recommended)
 
 ```bash
-brew tap cdre-ai/tap https://github.com/cdre-ai/homebrew-tap
+brew tap scaler-tech/pkg https://github.com/scaler-tech/pkg
 brew install --cask toad
 ```
 
@@ -67,24 +67,24 @@ brew install --cask toad
 ### Windows (Scoop)
 
 ```bash
-scoop bucket add cdre-ai https://github.com/cdre-ai/homebrew-tap
+scoop bucket add scaler-tech https://github.com/scaler-tech/pkg
 scoop install toad
 ```
 
 ### Binary releases
 
-Download pre-built binaries for Windows, macOS, or Linux from the [latest release](https://github.com/cdre-ai/toad/releases/latest).
+Download pre-built binaries for Windows, macOS, or Linux from the [latest release](https://github.com/scaler-tech/toad/releases/latest).
 
 ### Go install
 
 ```bash
-go install github.com/cdre-ai/toad@latest
+go install github.com/scaler-tech/toad@latest
 ```
 
 ### Build from source
 
 ```bash
-git clone https://github.com/cdre-ai/toad.git
+git clone https://github.com/scaler-tech/toad.git
 cd toad
 make build
 ```

@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hergen/toad/internal/agent"
-	"github.com/hergen/toad/internal/config"
-	islack "github.com/hergen/toad/internal/slack"
-	"github.com/hergen/toad/internal/state"
-	"github.com/hergen/toad/internal/tadpole"
-	"github.com/hergen/toad/internal/vcs"
+	"github.com/scaler-tech/toad/internal/agent"
+	"github.com/scaler-tech/toad/internal/config"
+	islack "github.com/scaler-tech/toad/internal/slack"
+	"github.com/scaler-tech/toad/internal/state"
+	"github.com/scaler-tech/toad/internal/tadpole"
+	"github.com/scaler-tech/toad/internal/vcs"
 )
 
 // SpawnFunc spawns a tadpole task. Typically wraps tadpole.Pool.Spawn.

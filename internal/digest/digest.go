@@ -12,11 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hergen/toad/internal/agent"
-	"github.com/hergen/toad/internal/config"
-	"github.com/hergen/toad/internal/issuetracker"
-	"github.com/hergen/toad/internal/state"
-	"github.com/hergen/toad/internal/tadpole"
+	"github.com/scaler-tech/toad/internal/agent"
+	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/state"
+	"github.com/scaler-tech/toad/internal/tadpole"
 )
 
 // Message represents a collected Slack message for batch analysis.

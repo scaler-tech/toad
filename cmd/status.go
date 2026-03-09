@@ -16,10 +16,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/hergen/toad/internal/config"
-	"github.com/hergen/toad/internal/state"
-	"github.com/hergen/toad/internal/update"
-	"github.com/hergen/toad/internal/vcs"
+	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/state"
+	"github.com/scaler-tech/toad/internal/update"
+	"github.com/scaler-tech/toad/internal/vcs"
 )
 
 var statusPort int

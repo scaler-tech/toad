@@ -25,7 +25,7 @@ type githubRelease struct {
 	HTMLURL string `json:"html_url"`
 }
 
-const releaseURL = "https://api.github.com/repos/cdre-ai/toad/releases/latest"
+const releaseURL = "https://api.github.com/repos/scaler-tech/toad/releases/latest"
 
 // Check fetches the latest release from GitHub and compares to current.
 // Returns nil Info (no error) if currentVersion is "dev" (local build).

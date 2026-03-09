@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hergen/toad/internal/agent"
-	"github.com/hergen/toad/internal/vcs"
+	"github.com/scaler-tech/toad/internal/agent"
+	"github.com/scaler-tech/toad/internal/vcs"
 )
 
 // stubVCS implements only the methods needed for triageComments testing.

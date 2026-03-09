@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hergen/toad/internal/config"
-	"github.com/hergen/toad/internal/issuetracker"
-	"github.com/hergen/toad/internal/tadpole"
+	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/tadpole"
 )
 
 func TestDedupChannel(t *testing.T) {

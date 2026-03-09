@@ -7,11 +7,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/hergen/toad/internal/agent"
-	"github.com/hergen/toad/internal/config"
-	toadlog "github.com/hergen/toad/internal/log"
-	"github.com/hergen/toad/internal/state"
-	"github.com/hergen/toad/internal/tadpole"
+	"github.com/scaler-tech/toad/internal/agent"
+	"github.com/scaler-tech/toad/internal/config"
+	toadlog "github.com/scaler-tech/toad/internal/log"
+	"github.com/scaler-tech/toad/internal/state"
+	"github.com/scaler-tech/toad/internal/tadpole"
 )
 
 var repoFlag string

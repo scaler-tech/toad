@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hergen/toad/internal/agent"
-	"github.com/hergen/toad/internal/config"
-	"github.com/hergen/toad/internal/triage"
+	"github.com/scaler-tech/toad/internal/agent"
+	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/triage"
 )
 
 func TestRespond_RunOptsWiring(t *testing.T) {

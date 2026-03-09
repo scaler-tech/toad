@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hergen/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/config"
 )
 
 // IssueDetails holds the title and description of an issue, used to enrich

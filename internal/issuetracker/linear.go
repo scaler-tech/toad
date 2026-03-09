@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/hergen/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/config"
 )
 
 // Linear URL pattern: https://linear.app/<team>/issue/PLF-3125/optional-slug

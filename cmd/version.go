@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/hergen/toad/internal/update"
+	"github.com/scaler-tech/toad/internal/update"
 )
 
 // Set via ldflags at build time.

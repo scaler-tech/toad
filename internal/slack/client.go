@@ -13,7 +13,7 @@ import (
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
 
-	"github.com/hergen/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/config"
 )
 
 // IncomingMessage represents a parsed Slack message ready for processing.

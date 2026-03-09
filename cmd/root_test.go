@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hergen/toad/internal/digest"
+	"github.com/scaler-tech/toad/internal/digest"
 )
 
 func TestBuildTaskDescription_NoContext(t *testing.T) {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/hergen/toad/internal/agent"
+	"github.com/scaler-tech/toad/internal/agent"
 )
 
 func TestAnalyze_RunOptsWiring(t *testing.T) {

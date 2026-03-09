@@ -11,13 +11,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hergen/toad/internal/agent"
-	"github.com/hergen/toad/internal/config"
-	"github.com/hergen/toad/internal/issuetracker"
-	islack "github.com/hergen/toad/internal/slack"
-	"github.com/hergen/toad/internal/state"
-	"github.com/hergen/toad/internal/triage"
-	"github.com/hergen/toad/internal/vcs"
+	"github.com/scaler-tech/toad/internal/agent"
+	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/issuetracker"
+	islack "github.com/scaler-tech/toad/internal/slack"
+	"github.com/scaler-tech/toad/internal/state"
+	"github.com/scaler-tech/toad/internal/triage"
+	"github.com/scaler-tech/toad/internal/vcs"
 )
 
 // Task describes the work for a tadpole to perform.

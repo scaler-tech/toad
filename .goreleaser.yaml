@@ -25,9 +25,9 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
-      - -X github.com/hergen/toad/cmd.Version={{.Version}}
-      - -X github.com/hergen/toad/cmd.Commit={{.Commit}}
-      - -X github.com/hergen/toad/cmd.BuildDate={{.Date}}
+      - -X github.com/scaler-tech/toad/cmd.Version={{.Version}}
+      - -X github.com/scaler-tech/toad/cmd.Commit={{.Commit}}
+      - -X github.com/scaler-tech/toad/cmd.BuildDate={{.Date}}
 
 archives:
   - formats: [tar.gz]
@@ -62,7 +62,7 @@ report_sizes: true
 
 release:
   github:
-    owner: cdre-ai
+    owner: scaler-tech
     name: toad
   mode: append
   footer: |
@@ -71,14 +71,14 @@ release:
     ## macOS and Linux
     ### Install with [`Homebrew`](https://brew.sh)
     ```console
-    brew tap cdre-ai/tap https://github.com/cdre-ai/homebrew-tap
+    brew tap scaler-tech/pkg https://github.com/scaler-tech/pkg
     brew install --cask toad
     ```
 
     ## Windows
     ### Install with [`Scoop`](https://scoop.sh)
     ```console
-    scoop bucket add cdre-ai https://github.com/cdre-ai/homebrew-tap
+    scoop bucket add scaler-tech https://github.com/scaler-tech/pkg
     scoop install toad
     ```
 
@@ -86,33 +86,11 @@ release:
     Alternatively, you can install the latest binary from this page.
 
     ### Manual downloads
-    Download for Windows [64bit](https://github.com/cdre-ai/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_Windows_64bit.zip) / [ARM64](https://github.com/cdre-ai/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_Windows_ARM64.zip)
-    Download for Linux [64bit](https://github.com/cdre-ai/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_Linux_64bit.tar.gz) / [ARM64](https://github.com/cdre-ai/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_Linux_ARM64.tar.gz)
-    Download for macOS [64bit](https://github.com/cdre-ai/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_macOS_64bit.tar.gz) / [ARM64](https://github.com/cdre-ai/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_macOS_ARM64.tar.gz)
+    Download for Windows [64bit](https://github.com/scaler-tech/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_Windows_64bit.zip) / [ARM64](https://github.com/scaler-tech/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_Windows_ARM64.zip)
+    Download for Linux [64bit](https://github.com/scaler-tech/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_Linux_64bit.tar.gz) / [ARM64](https://github.com/scaler-tech/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_Linux_ARM64.tar.gz)
+    Download for macOS [64bit](https://github.com/scaler-tech/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_macOS_64bit.tar.gz) / [ARM64](https://github.com/scaler-tech/toad/releases/download/v{{.Version}}/toad_v{{.Version}}_macOS_ARM64.tar.gz)
 
     For more options, check the `Assets` section below.
-
-homebrew_casks:
-  -
-    commit_author:
-      name: goreleaserbot
-      email: bot@goreleaser.com
-    commit_msg_template: "Brew cask update for {{ .ProjectName }} version {{ .Tag }}"
-    homepage: "https://github.com/cdre-ai/toad"
-    description: "AI-powered code assistant that lives in Slack"
-    caveats: "run 'toad --help' to get started"
-    url:
-      template: "https://github.com/cdre-ai/toad/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
-    repository:
-      owner: cdre-ai
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/toad"]
-          end
 
 scoops:
   -
@@ -120,11 +98,33 @@ scoops:
       name: goreleaserbot
       email: bot@goreleaser.com
     commit_msg_template: "Scoop update for {{ .ProjectName }} version {{ .Tag }}"
-    homepage: "https://github.com/cdre-ai/toad"
+    homepage: "https://github.com/scaler-tech/toad"
     description: "AI-powered code assistant that lives in Slack"
     license: MIT
     shortcuts: [["toad.exe", "toad"]]
     repository:
-      owner: cdre-ai
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+      owner: scaler-tech
+      name: pkg
+      token: "{{ .Env.GITHUB_TOKEN }}"
+
+homebrew_casks:
+  -
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "Brew cask update for {{ .ProjectName }} version {{ .Tag }}"
+    homepage: "https://github.com/scaler-tech/toad"
+    description: "AI-powered code assistant that lives in Slack"
+    caveats: "run 'toad --help' to get started"
+    url:
+      template: "https://github.com/scaler-tech/toad/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+    repository:
+      owner: scaler-tech
+      name: pkg
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/toad"]
+          end

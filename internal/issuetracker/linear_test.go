@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hergen/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/config"
 )
 
 func TestExtractIssueRef_LinearURL(t *testing.T) {

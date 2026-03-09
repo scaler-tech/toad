@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hergen/toad/internal/issuetracker"
-	"github.com/hergen/toad/internal/triage"
+	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/triage"
 )
 
 func TestBuildTadpolePrompt(t *testing.T) {

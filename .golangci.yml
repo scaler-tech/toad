@@ -47,12 +47,12 @@ linters:
         - (io.Closer).Close
         - (net/http.ResponseWriter).Write
         - (*encoding/json.Encoder).Encode
-        - (*github.com/hergen/toad/internal/slack.Client).ReplyInThread
-        - (*github.com/hergen/toad/internal/slack.Client).React
-        - (*github.com/hergen/toad/internal/slack.Client).RemoveReaction
-        - (*github.com/hergen/toad/internal/slack.Client).SwapReaction
-        - (*github.com/hergen/toad/internal/state.DB).ClearDaemonStats
-        - (*github.com/hergen/toad/internal/state.DB).WriteDaemonStats
+        - (*github.com/scaler-tech/toad/internal/slack.Client).ReplyInThread
+        - (*github.com/scaler-tech/toad/internal/slack.Client).React
+        - (*github.com/scaler-tech/toad/internal/slack.Client).RemoveReaction
+        - (*github.com/scaler-tech/toad/internal/slack.Client).SwapReaction
+        - (*github.com/scaler-tech/toad/internal/state.DB).ClearDaemonStats
+        - (*github.com/scaler-tech/toad/internal/state.DB).WriteDaemonStats
         - (*database/sql.DB).Close
         - (*database/sql.DB).Exec
 
