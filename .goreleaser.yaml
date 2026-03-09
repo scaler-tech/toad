@@ -60,41 +60,20 @@ changelog:
 
 report_sizes: true
 
-dockers:
-  - image_templates:
-      - "ghcr.io/scaler-tech/toad:{{ .Version }}-arm64"
-      - "ghcr.io/scaler-tech/toad:latest-arm64"
-    use: buildx
-    goos: linux
-    goarch: arm64
+dockers_v2:
+  - images:
+      - "ghcr.io/scaler-tech/toad"
+    tags:
+      - "{{ .Version }}"
+      - latest
     dockerfile: Dockerfile
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.title=toad"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.source=https://github.com/scaler-tech/toad"
-  - image_templates:
-      - "ghcr.io/scaler-tech/toad:{{ .Version }}-amd64"
-      - "ghcr.io/scaler-tech/toad:latest-amd64"
-    use: buildx
-    goos: linux
-    goarch: amd64
-    dockerfile: Dockerfile
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title=toad"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.source=https://github.com/scaler-tech/toad"
-
-docker_manifests:
-  - name_template: "ghcr.io/scaler-tech/toad:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/scaler-tech/toad:{{ .Version }}-arm64"
-      - "ghcr.io/scaler-tech/toad:{{ .Version }}-amd64"
-  - name_template: "ghcr.io/scaler-tech/toad:latest"
-    image_templates:
-      - "ghcr.io/scaler-tech/toad:latest-arm64"
-      - "ghcr.io/scaler-tech/toad:latest-amd64"
+    flags:
+      - "--cache-from=type=gha"
+      - "--cache-to=type=gha,mode=max"
+    labels:
+      "org.opencontainers.image.title": toad
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.source": "https://github.com/scaler-tech/toad"
 
 release:
   github:

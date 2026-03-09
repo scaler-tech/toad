@@ -35,11 +35,12 @@ RUN GLAB_VERSION=$(curl -fsSL https://gitlab.com/api/v4/projects/34675721/releas
     && dpkg -i /tmp/glab.deb \
     && rm /tmp/glab.deb
 
-# Copy pre-built toad binary (injected by GoReleaser)
-COPY toad /usr/local/bin/toad
+# Copy pre-built toad binary (injected by GoReleaser via TARGETPLATFORM)
+ARG TARGETPLATFORM
+COPY ${TARGETPLATFORM}/toad /usr/local/bin/toad
 
 # Create toad user (uid/gid 1000 to match EFS access point)
-RUN groupadd -g 1000 toad && useradd -u 1000 -g 1000 -m -s /bin/bash toad
+RUN groupadd -f -g 1000 toad && useradd -u 1000 -g 1000 -m -s /bin/bash toad
 
 USER toad
 WORKDIR /home/toad
