@@ -159,6 +159,7 @@ digest:
   # max_est_size: "medium"      # Maximum estimated fix size
   # investigate_timeout_secs: 600 # Investigation time limit (default: 10 min)
   # investigate_max_turns: 25     # Investigation turn limit
+  # comment_investigation: false  # Post investigation findings as Slack reply (dry_run only)
 
 # ──────────────────────────────────────────────
 # Issue Tracker

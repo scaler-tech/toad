@@ -76,20 +76,21 @@ func runStatus(cmd *cobra.Command, args []string) error {
 }
 
 type apiResponse struct {
-	Daemon        *apiDaemon          `json:"daemon"`
-	Integrations  []apiIntegration    `json:"integrations"`
-	Stats         *state.Stats        `json:"stats"`
-	MergeStats    *apiMergeStats      `json:"merge_stats,omitempty"`
-	Active        []apiRun            `json:"active"`
-	History       []apiRun            `json:"history"`
-	Watches       []apiWatch          `json:"watches"`
-	Opportunities []apiOpportunity    `json:"opportunities"`
-	DigestCounts  *state.DigestCounts `json:"digest_counts,omitempty"`
-	Config        *apiConfig          `json:"config,omitempty"`
-	CCUsage       *apiCCUsage         `json:"cc_usage,omitempty"`
-	PRNoun        string              `json:"pr_noun"`
-	AutoUpdate    bool                `json:"auto_update"`
-	Now           int64               `json:"now"`
+	Daemon         *apiDaemon          `json:"daemon"`
+	Integrations   []apiIntegration    `json:"integrations"`
+	Stats          *state.Stats        `json:"stats"`
+	MergeStats     *apiMergeStats      `json:"merge_stats,omitempty"`
+	Active         []apiRun            `json:"active"`
+	History        []apiRun            `json:"history"`
+	Watches        []apiWatch          `json:"watches"`
+	Opportunities  []apiOpportunity    `json:"opportunities"`
+	DigestCounts   *state.DigestCounts `json:"digest_counts,omitempty"`
+	Config         *apiConfig          `json:"config,omitempty"`
+	CCUsage        *apiCCUsage         `json:"cc_usage,omitempty"`
+	PRNoun         string              `json:"pr_noun"`
+	AutoUpdate     bool                `json:"auto_update"`
+	AutoRestarting bool                `json:"auto_restarting,omitempty"`
+	Now            int64               `json:"now"`
 }
 
 type apiMergeStats struct {
@@ -427,6 +428,9 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 		if v, _ := db.GetSetting("auto_update"); v == "1" {
 			resp.AutoUpdate = true
 		}
+		versionMu.Lock()
+		resp.AutoRestarting = autoRestarting
+		versionMu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
@@ -581,10 +585,10 @@ func apiAutoUpdateHandler(db *state.DB) http.HandlerFunc {
 }
 
 // autoUpdateLoop runs in the background while the dashboard is open.
-// When auto-update is enabled, it checks for new versions every 5 minutes
-// and automatically updates + restarts the daemon when one is found.
+// When auto-update is enabled, it checks for new versions every minute.
+// ETag caching means repeat checks return 304 (free, no rate limit hit).
 func autoUpdateLoop(db *state.DB) {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -646,8 +650,14 @@ func autoUpdateLoop(db *state.DB) {
 			continue
 		}
 		if stats.PID > 0 {
+			versionMu.Lock()
+			autoRestarting = true
+			versionMu.Unlock()
 			if err := signalRestart(stats.PID); err != nil {
 				slog.Warn("auto-update: failed to signal daemon", "pid", stats.PID, "error", err)
+				versionMu.Lock()
+				autoRestarting = false
+				versionMu.Unlock()
 			} else {
 				slog.Info("auto-update: restart signal sent", "pid", stats.PID)
 			}
@@ -682,6 +692,7 @@ var (
 	versionCache   *update.Info
 	versionCacheAt time.Time
 	versionMu      sync.Mutex
+	autoRestarting bool // set by autoUpdateLoop when restart is triggered
 )
 
 func checkVersion() *update.Info {
@@ -857,6 +868,28 @@ const dashboardHTML = `<!DOCTYPE html>
   .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .action-btn.danger { border-color: var(--amber); color: var(--amber); }
   .action-btn.danger:hover { background: rgba(255,193,7,0.1); }
+  .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; padding: 0; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--muted); cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    position: relative;
+  }
+  .icon-btn:hover { border-color: var(--accent); background: rgba(88,166,255,0.1); color: var(--text); }
+  .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .icon-btn.danger { border-color: var(--amber); color: var(--amber); }
+  .icon-btn.danger:hover { background: rgba(255,193,7,0.1); }
+  .icon-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .icon-btn .tooltip {
+    position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+    padding: 4px 8px; font-size: 11px; color: var(--text); white-space: nowrap;
+    opacity: 0; pointer-events: none; transition: opacity 0.15s;
+  }
+  .icon-btn:hover .tooltip { opacity: 1; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .icon-btn.spinning svg { animation: spin 1s linear infinite; }
   .toggle-wrap {
     display: inline-flex; align-items: center; gap: 8px;
     cursor: pointer; user-select: none;
@@ -1121,9 +1154,15 @@ const dashboardHTML = `<!DOCTYPE html>
       <span class="toggle-track"><span class="toggle-thumb"></span></span>
       <span class="toggle-text">Auto update</span>
     </div>
-    <button class="action-btn" id="btn-check-update" onclick="checkForUpdate()" title="Check for updates">Check updates</button>
+    <button class="icon-btn" id="btn-check-update" onclick="checkForUpdate()">
+      <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><polyline points="21 3 21 8 16 8"/></svg>
+      <span class="tooltip">Check for updates</span>
+    </button>
     <button class="action-btn" id="btn-update" onclick="doUpdate()" style="display:none" title="Download and install latest version">Update</button>
-    <button class="action-btn danger" id="btn-restart" onclick="doRestart()" title="Gracefully restart daemon (waits for in-flight work)">Restart</button>
+    <button class="icon-btn danger" id="btn-restart" onclick="doRestart()">
+      <svg viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+      <span class="tooltip">Restart daemon</span>
+    </button>
     <span class="daemon-badge offline" id="daemon-badge">
       <span class="indicator"></span> <span id="daemon-text">Offline</span>
     </span>
@@ -1352,7 +1391,17 @@ async function refresh() {
     // Disable restart button if daemon offline or already draining
     document.getElementById('btn-restart').disabled = !dm.running || dm.draining;
 
-    // Update restart modal if draining
+    // Auto-update triggered restart: open modal automatically
+    if (d.auto_restarting && !restartModalOpen) {
+      restartOrigPID = dm.pid || 0;
+      restartOrigStartedAt = dm.started_at || 0;
+      showRestartModal('Auto-updating toad...');
+      setStepState('signal', 'done');
+      setStepState('drain', 'active');
+      restartPhase = 'drain';
+    }
+
+    // Update restart modal if open
     if (restartModalOpen) {
       updateRestartModal(dm, d.active || [], now);
     }
@@ -1697,7 +1746,7 @@ function hideRestartModal() {
   document.getElementById('restart-modal').classList.remove('visible');
   const btn = document.getElementById('btn-restart');
   btn.disabled = false;
-  btn.textContent = 'Restart';
+  btn.classList.remove('spinning');
 }
 
 function updateRestartModal(dm, active, now) {
@@ -1771,21 +1820,25 @@ function updateRestartModal(dm, active, now) {
 
 async function checkForUpdate() {
   const btn = document.getElementById('btn-check-update');
+  const tip = btn.querySelector('.tooltip');
   btn.disabled = true;
-  btn.textContent = 'Checking...';
+  btn.classList.add('spinning');
+  tip.textContent = 'Checking...';
   try {
     const resp = await fetch('/api/check-update');
     const d = await resp.json();
+    btn.classList.remove('spinning');
     if (d.available) {
-      btn.textContent = 'v' + d.latest + ' available!';
+      tip.textContent = 'v' + d.latest + ' available!';
     } else {
-      btn.textContent = 'Up to date';
+      tip.textContent = 'Up to date';
     }
     refresh();
   } catch (e) {
-    btn.textContent = 'Error';
+    btn.classList.remove('spinning');
+    tip.textContent = 'Error checking';
   }
-  setTimeout(() => { btn.disabled = false; btn.textContent = 'Check updates'; }, 3000);
+  setTimeout(() => { btn.disabled = false; tip.textContent = 'Check for updates'; }, 3000);
 }
 
 async function doUpdate() {
@@ -1844,8 +1897,9 @@ async function triggerRestart(title) {
 }
 
 async function doRestart() {
-  document.getElementById('btn-restart').disabled = true;
-  document.getElementById('btn-restart').textContent = 'Restarting...';
+  const btn = document.getElementById('btn-restart');
+  btn.disabled = true;
+  btn.classList.add('spinning');
   await triggerRestart('Restarting toad...');
 }
 
