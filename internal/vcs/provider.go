@@ -58,6 +58,10 @@ type Provider interface {
 	// PRNoun returns the platform-specific noun for a pull/merge request
 	// (e.g. "PR" for GitHub, "MR" for GitLab).
 	PRNoun() string
+
+	// GetSuggestedReviewers returns up to max login handles of recent committers
+	// to the given files, excluding bot accounts.
+	GetSuggestedReviewers(ctx context.Context, repoPath string, files []string, botNames map[string]bool, max int) []string
 }
 
 // CreatePROpts holds parameters for creating a pull request.

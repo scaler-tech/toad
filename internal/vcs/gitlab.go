@@ -480,3 +480,8 @@ func (g *GitLabProvider) ExtractRunID(detailsURL string) string {
 	}
 	return rest
 }
+
+// GetSuggestedReviewers is not implemented for GitLab and always returns nil.
+func (g *GitLabProvider) GetSuggestedReviewers(_ context.Context, _ string, _ []string, _ map[string]bool, _ int) []string {
+	return nil
+}
