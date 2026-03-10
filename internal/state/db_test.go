@@ -821,6 +821,83 @@ func TestDB_DigestOpportunity_InvestigatingLifecycle(t *testing.T) {
 	}
 }
 
+func TestDB_StaleInvestigations(t *testing.T) {
+	db := openTestDB(t)
+
+	// Create two stuck investigating opportunities
+	for _, summary := range []string{"stuck-1", "stuck-2"} {
+		opp := &DigestOpportunity{
+			Summary:       summary,
+			Category:      "bug",
+			Confidence:    0.9,
+			EstSize:       "small",
+			Channel:       "errors",
+			ChannelID:     "C123",
+			ThreadTS:      "111.222",
+			Message:       "something broke: " + summary,
+			Investigating: true,
+			CreatedAt:     time.Now(),
+		}
+		if err := db.SaveDigestOpportunity(opp); err != nil {
+			t.Fatalf("SaveDigestOpportunity: %v", err)
+		}
+	}
+
+	// Create one completed opportunity (should not be returned)
+	done := &DigestOpportunity{
+		Summary:       "done",
+		Category:      "bug",
+		Confidence:    0.9,
+		EstSize:       "small",
+		Channel:       "errors",
+		Investigating: false,
+		CreatedAt:     time.Now(),
+	}
+	if err := db.SaveDigestOpportunity(done); err != nil {
+		t.Fatalf("SaveDigestOpportunity: %v", err)
+	}
+
+	opps, err := db.StaleInvestigations()
+	if err != nil {
+		t.Fatalf("StaleInvestigations: %v", err)
+	}
+	if len(opps) != 2 {
+		t.Fatalf("expected 2 stale, got %d", len(opps))
+	}
+
+	// Verify returned rows have enough data for resume
+	for _, opp := range opps {
+		if opp.ID == 0 {
+			t.Error("expected ID to be set")
+		}
+		if opp.ChannelID != "C123" {
+			t.Errorf("expected channel_id C123, got %q", opp.ChannelID)
+		}
+		if opp.Message == "" {
+			t.Error("expected message to be populated")
+		}
+	}
+
+	// Rows should still be in DB (not deleted)
+	counts, _ := db.DigestOpportunityCounts()
+	if counts.Investigating != 2 {
+		t.Errorf("expected 2 still investigating, got %d", counts.Investigating)
+	}
+
+	// Simulate resume completing: update one row
+	opps[0].Investigating = false
+	opps[0].Reasoning = "approved after resume"
+	if err := db.UpdateDigestOpportunity(opps[0]); err != nil {
+		t.Fatalf("UpdateDigestOpportunity: %v", err)
+	}
+
+	// Now only 1 should be stale
+	remaining, _ := db.StaleInvestigations()
+	if len(remaining) != 1 {
+		t.Errorf("expected 1 stale after partial resume, got %d", len(remaining))
+	}
+}
+
 func TestDB_Stats_EmptyDB(t *testing.T) {
 	db := openTestDB(t)
 

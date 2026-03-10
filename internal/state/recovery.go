@@ -10,8 +10,10 @@ import (
 
 // RecoverResult summarizes what was cleaned up on startup.
 type RecoverResult struct {
-	StaleRuns       int
-	OrphanWorktrees int
+	StaleRuns           int
+	OrphanWorktrees     int
+	StaleInvestigations int
+	StaleOpportunities  []*DigestOpportunity
 }
 
 // RecoverOnStartup finds runs left in active states from a previous crash,
@@ -79,10 +81,20 @@ func RecoverOnStartup(db *DB) (*RecoverResult, error) {
 		result.OrphanWorktrees++
 	}
 
-	if result.StaleRuns > 0 || result.OrphanWorktrees > 0 {
+	// 3. Find stuck investigations (rows stay in DB until resume completes)
+	staleOpps, err := db.StaleInvestigations()
+	if err != nil {
+		slog.Warn("failed to query stale investigations", "error", err)
+	} else {
+		result.StaleInvestigations = len(staleOpps)
+		result.StaleOpportunities = staleOpps
+	}
+
+	if result.StaleRuns > 0 || result.OrphanWorktrees > 0 || result.StaleInvestigations > 0 {
 		slog.Info("recovery complete",
 			"stale_runs", result.StaleRuns,
 			"orphan_worktrees", result.OrphanWorktrees,
+			"stale_investigations", result.StaleInvestigations,
 		)
 	}
 

@@ -124,7 +124,8 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	defer stateDB.Close()
 
 	// Recover any stale runs and orphaned worktrees from a previous crash
-	if _, err := state.RecoverOnStartup(stateDB); err != nil {
+	recovery, err := state.RecoverOnStartup(stateDB)
+	if err != nil {
 		slog.Warn("startup recovery failed", "error", err)
 	}
 
@@ -307,6 +308,11 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Start digest engine (Toad King) if enabled
 	if digestEngine != nil {
 		go digestEngine.Run(ctx)
+		// Resume any investigations that were interrupted by a previous crash.
+		if recovery != nil && len(recovery.StaleOpportunities) > 0 {
+			staleOpps := recovery.StaleOpportunities
+			go digestEngine.ResumeInvestigations(ctx, staleOpps)
+		}
 	}
 
 	// Prune expired thread memories every hour

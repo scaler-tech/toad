@@ -666,6 +666,31 @@ func (d *DB) UpdateDigestOpportunity(opp *DigestOpportunity) error {
 	return err
 }
 
+// StaleInvestigations returns opportunities stuck in investigating state.
+// The rows are left in the DB so they survive another crash during resume.
+func (d *DB) StaleInvestigations() ([]*DigestOpportunity, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT id, summary, category, confidence, est_size, channel, COALESCE(channel_id,''), COALESCE(thread_ts,''), message, keywords, dry_run
+		FROM digest_opportunities WHERE investigating = TRUE`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var opps []*DigestOpportunity
+	for rows.Next() {
+		o := &DigestOpportunity{}
+		if err := rows.Scan(&o.ID, &o.Summary, &o.Category, &o.Confidence, &o.EstSize,
+			&o.Channel, &o.ChannelID, &o.ThreadTS, &o.Message, &o.Keywords, &o.DryRun); err != nil {
+			return nil, err
+		}
+		opps = append(opps, o)
+	}
+	return opps, nil
+}
+
 // HasRecentOpportunity checks if a similar opportunity was already processed
 // within the given duration. Uses keyword overlap to catch semantically
 // equivalent issues that Haiku summarized with slightly different wording.

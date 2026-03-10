@@ -169,6 +169,133 @@ func (e *Engine) Collect(msg Message) {
 	e.buffer = append(e.buffer, msg)
 }
 
+// ResumeInvestigations re-runs opportunities that were interrupted mid-investigation
+// by a crash. Each opportunity is investigated individually and the existing DB row
+// is updated on completion. Rows stay as investigating=true until done, so another
+// crash during resume will pick them up again on the next restart.
+func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestOpportunity) {
+	if len(opps) == 0 {
+		return
+	}
+
+	slog.Info("resuming interrupted investigations", "count", len(opps))
+
+	for _, dbOpp := range opps {
+		if ctx.Err() != nil {
+			return
+		}
+
+		msg := Message{
+			Channel:     dbOpp.ChannelID,
+			ChannelName: dbOpp.Channel,
+			Text:        dbOpp.Message,
+			ThreadTS:    dbOpp.ThreadTS,
+			Timestamp:   dbOpp.ThreadTS,
+		}
+		opp := Opportunity{
+			Summary:    dbOpp.Summary,
+			Category:   dbOpp.Category,
+			Confidence: dbOpp.Confidence,
+			EstSize:    dbOpp.EstSize,
+			Keywords:   strings.Split(dbOpp.Keywords, ","),
+		}
+
+		// Run investigation
+		dismissed := false
+		reasoning := ""
+		taskDescription := msg.Text
+		if e.investigate != nil {
+			result, err := e.investigate(ctx, opp, msg, nil)
+			if err != nil {
+				slog.Warn("resumed investigation failed", "error", err, "summary", opp.Summary)
+				dismissed = true
+				reasoning = fmt.Sprintf("investigation error: %v", err)
+			} else if !result.Feasible {
+				slog.Info("resumed investigation dismissed", "summary", opp.Summary)
+				dismissed = true
+				reasoning = result.Reasoning
+			} else {
+				slog.Info("resumed investigation approved", "summary", opp.Summary)
+				taskDescription = result.TaskSpec
+				reasoning = result.Reasoning
+			}
+		}
+
+		// Update existing DB row — clears investigating flag
+		dbOpp.Investigating = false
+		dbOpp.Dismissed = dismissed
+		dbOpp.Reasoning = reasoning
+		if e.db != nil {
+			if err := e.db.UpdateDigestOpportunity(dbOpp); err != nil {
+				slog.Warn("failed to update resumed opportunity", "error", err)
+			}
+		}
+
+		if dismissed {
+			continue
+		}
+
+		// Dry-run: post findings with CTA button
+		if e.cfg.DryRun {
+			slog.Info("[dry-run] resumed investigation would spawn tadpole", "summary", opp.Summary)
+			if e.cfg.CommentInvestigation && e.notifyInvestigation != nil && reasoning != "" {
+				comment := fmt.Sprintf(":mag: *Investigation findings:*\n\n%s", reasoning)
+				e.notifyInvestigation(msg.Channel, msg.ThreadTS, comment)
+			}
+			e.totalSpawns.Add(1)
+			continue
+		}
+
+		// Spawn tadpole
+		if !e.trySpawn() {
+			slog.Info("resumed investigation hit hourly spawn limit", "summary", opp.Summary)
+			continue
+		}
+
+		threadTS := msg.ThreadTS
+		if e.notify != nil {
+			e.notify(msg.Channel, threadTS,
+				":crown: Spotted this while monitoring the channel — sending a tadpole to investigate and fix.")
+		}
+
+		repo := e.resolveRepo(opp.Repo, opp.FilesHint)
+
+		if e.claim != nil {
+			if !e.claim(threadTS) {
+				slog.Info("resumed investigation: thread already claimed", "summary", opp.Summary)
+				continue
+			}
+		}
+
+		task := tadpole.Task{
+			Description:   taskDescription,
+			Summary:       opp.Summary,
+			Category:      opp.Category,
+			EstSize:       opp.EstSize,
+			SlackChannel:  msg.Channel,
+			SlackThreadTS: threadTS,
+			Repo:          repo,
+			RepoPaths:     e.repoPaths,
+		}
+		if err := e.spawn(ctx, task); err != nil {
+			slog.Error("resumed investigation: spawn failed", "error", err, "summary", opp.Summary)
+			if e.unclaim != nil {
+				e.unclaim(threadTS)
+			}
+			if e.notify != nil {
+				e.notify(msg.Channel, threadTS,
+					":x: Toad King failed to spawn tadpole: "+err.Error())
+			}
+			continue
+		}
+
+		e.totalSpawns.Add(1)
+		if e.react != nil {
+			e.react(msg.Channel, msg.Timestamp, "hatching_chick")
+		}
+	}
+}
+
 // Stats returns a snapshot of the digest engine's observable metrics.
 func (e *Engine) Stats() DigestStats {
 	e.mu.Lock()
