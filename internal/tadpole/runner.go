@@ -353,7 +353,7 @@ func (r *Runner) ship(ctx context.Context, vcsProvider vcs.Provider, worktreePat
 
 	// Look up suggested reviewers based on changed files (GitHub only, non-fatal)
 	reviewersSection := ""
-	if _, ok := vcsProvider.(*vcs.GitHubProvider); ok {
+	if ghProvider, ok := vcsProvider.(*vcs.GitHubProvider); ok {
 		changedFilesCmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "origin/"+defaultBranch+"...HEAD")
 		changedFilesCmd.Dir = worktreePath
 		if changedOut, changedErr := changedFilesCmd.Output(); changedErr == nil {
@@ -368,8 +368,12 @@ func (r *Runner) ship(ctx context.Context, vcsProvider vcs.Provider, worktreePat
 			for _, u := range r.cfg.VCS.BotUsernames {
 				botSet[u] = true
 			}
-			if contributors := vcs.GetFileContributors(ctx, worktreePath, changedFiles, botSet, 5); len(contributors) > 0 {
-				reviewersSection = fmt.Sprintf("**Suggested reviewers** (based on recent file history): %s\n\n", strings.Join(contributors, ", "))
+			if logins := ghProvider.GetSuggestedReviewers(ctx, worktreePath, changedFiles, botSet, 2); len(logins) > 0 {
+				tagged := make([]string, len(logins))
+				for i, login := range logins {
+					tagged[i] = "@" + login
+				}
+				reviewersSection = fmt.Sprintf("**Suggested reviewers:** %s\n\n", strings.Join(tagged, ", "))
 			}
 		} else {
 			slog.Debug("failed to get changed files for reviewer lookup", "error", changedErr)

@@ -457,6 +457,88 @@ func (g *GitHubProvider) ExtractRunID(detailsURL string) string {
 	return rest
 }
 
+// GetSuggestedReviewers returns up to max GitHub login handles who have recently
+// committed to the given files, resolved via the GitHub API. Bot accounts are excluded.
+func (g *GitHubProvider) GetSuggestedReviewers(ctx context.Context, repoPath string, files []string, botNames map[string]bool, max int) []string {
+	if len(files) == 0 {
+		return nil
+	}
+
+	// Collect commit SHAs for the changed files.
+	args := []string{"log", "--format=%H", "--"}
+	args = append(args, files...)
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		slog.Debug("GetSuggestedReviewers: git log failed", "error", err)
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	var shas []string
+	for _, sha := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		sha = strings.TrimSpace(sha)
+		if sha == "" || seen[sha] {
+			continue
+		}
+		seen[sha] = true
+		shas = append(shas, sha)
+		if len(shas) >= 20 {
+			break
+		}
+	}
+
+	// Resolve each SHA to a GitHub login via the API.
+	counts := make(map[string]int)
+	for _, sha := range shas {
+		endpoint := fmt.Sprintf("repos/{owner}/{repo}/commits/%s", sha)
+		apiCmd := exec.CommandContext(ctx, "gh", "api", endpoint, "--jq", ".author.login // empty")
+		apiCmd.Dir = repoPath
+		apiOut, apiErr := apiCmd.Output()
+		if apiErr != nil {
+			slog.Debug("GetSuggestedReviewers: gh api failed", "sha", sha, "error", apiErr)
+			continue
+		}
+		login := strings.TrimSpace(string(apiOut))
+		if login == "" {
+			continue
+		}
+		lower := strings.ToLower(login)
+		if strings.Contains(lower, "bot") {
+			continue
+		}
+		if botNames[login] {
+			continue
+		}
+		counts[login]++
+	}
+
+	type loginCount struct {
+		login string
+		count int
+	}
+	sorted := make([]loginCount, 0, len(counts))
+	for login, count := range counts {
+		sorted = append(sorted, loginCount{login, count})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].count != sorted[j].count {
+			return sorted[i].count > sorted[j].count
+		}
+		return sorted[i].login < sorted[j].login
+	})
+
+	result := make([]string, 0, max)
+	for _, lc := range sorted {
+		if len(result) >= max {
+			break
+		}
+		result = append(result, lc.login)
+	}
+	return result
+}
+
 // GetFileContributors returns up to maxTotal unique author names who recently
 // committed to any of the given file paths, excluding bot names.
 // Uses a single git log invocation across all files to avoid per-file network round-trips.
