@@ -217,10 +217,80 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			func(channel, threadTS, text string) {
 				slackClient.ReplyInThread(channel, threadTS, text)
 			},
-			func(channel, threadTS, text string) {
-				blocks := islack.FixThisBlocks(text, threadTS)
-				if _, err := slackClient.ReplyInThreadWithBlocks(channel, threadTS, text, blocks); err != nil {
+			func(notice digest.InvestigationNotice) {
+				text := notice.Text
+
+				// Determine if this is a bot message needing active outreach
+				isBot := notice.BotID != ""
+				if isBot && len(cfg.Digest.BotList) > 0 {
+					isBot = false
+					for _, b := range cfg.Digest.BotList {
+						if b == notice.BotID {
+							isBot = true
+							break
+						}
+					}
+				}
+
+				if isBot {
+					// Resolve file contributors to Slack mentions
+					if len(notice.FilesHint) > 0 {
+						repo := resolver.Resolve(notice.Repo, notice.FilesHint)
+						if repo != nil {
+							botSet := make(map[string]bool)
+							for _, u := range cfg.VCS.BotUsernames {
+								botSet[strings.ToLower(u)] = true
+							}
+							if logins := vcsResolver(repo.Path).GetSuggestedReviewers(
+								context.Background(), repo.Path, notice.FilesHint, botSet, 2,
+							); len(logins) > 0 {
+								resolved := islack.ResolveGitHubToSlack(stateDB, slackClient.API(), logins)
+								var mentions []string
+								for _, login := range logins {
+									if slackID, ok := resolved[login]; ok {
+										mentions = append(mentions, fmt.Sprintf("<@%s>", slackID))
+									}
+								}
+								if len(mentions) > 0 {
+									text += "\n\ncc " + strings.Join(mentions, " ")
+								}
+							}
+						}
+					}
+				} else {
+					text += "\n\n_Tag a relevant dev if you'd like someone to take a look._"
+				}
+
+				// Post investigation reply with CTA button
+				blocks := islack.FixThisBlocks(text, notice.ThreadTS)
+				replyTS := ""
+				if ts, err := slackClient.ReplyInThreadWithBlocks(
+					notice.Channel, notice.ThreadTS, text, blocks,
+				); err != nil {
 					slog.Warn("digest investigation reply failed", "error", err)
+				} else {
+					replyTS = ts
+				}
+
+				// Crosspost to Linear if bot message with issue refs
+				if isBot && tracker != nil && len(notice.IssueRefs) > 0 && replyTS != "" {
+					permalink, _ := slackClient.GetPermalink(notice.Channel, replyTS)
+					for _, ref := range notice.IssueRefs {
+						// Strip Slack mrkdwn header for Markdown-native tracker
+						reasoning := strings.TrimPrefix(notice.Text, ":mag: *Investigation findings:*\n\n")
+						body := "**Toad investigation findings**\n\n" + reasoning + "\n\n"
+						if permalink != "" {
+							body += fmt.Sprintf("Toad can fix this automatically — [go to the Slack thread](%s) and click the button to start.", permalink)
+						} else {
+							body += "Toad can fix this automatically — go to the Slack thread and click the button to start."
+						}
+						if err := tracker.PostComment(context.Background(), ref, body); err != nil {
+							slog.Warn("failed to crosspost investigation to issue tracker",
+								"ref", ref.ID, "error", err)
+						} else {
+							slog.Info("crossposted investigation to issue tracker", "ref", ref.ID)
+						}
+					}
 				}
 			},
 			func(ctx context.Context, opp digest.Opportunity, msg digest.Message, tickets []digest.TicketContext) (*digest.InvestigateResult, error) {
@@ -491,6 +561,7 @@ func handleMessage(
 			Text:        msg.Text,
 			ThreadTS:    msg.ThreadTimestamp,
 			Timestamp:   msg.Timestamp,
+			BotID:       msg.BotID,
 		})
 	}
 

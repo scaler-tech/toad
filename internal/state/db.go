@@ -158,6 +158,16 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("creating mcp_tokens table: %w", err)
 	}
 
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS github_slack_mappings (
+		slack_user_id TEXT NOT NULL,
+		github_login  TEXT NOT NULL COLLATE NOCASE,
+		created_at    DATETIME NOT NULL,
+		UNIQUE(github_login)
+	)`)
+	if err != nil {
+		return fmt.Errorf("creating github_slack_mappings table: %w", err)
+	}
+
 	// Add columns for existing databases that predate the investigation gate.
 	// SQLite has no IF NOT EXISTS for ALTER TABLE, so check first.
 	var count int
@@ -984,6 +994,72 @@ func (d *DB) RevokeMCPToken(slackUserID string) error {
 	defer cancel()
 	_, err := d.db.ExecContext(ctx, "DELETE FROM mcp_tokens WHERE slack_user_id = ?", slackUserID)
 	return err
+}
+
+// AddGitHubMapping links a GitHub login to a Slack user ID.
+func (d *DB) AddGitHubMapping(slackUserID, githubLogin string) error {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx, `
+		INSERT INTO github_slack_mappings (slack_user_id, github_login, created_at)
+		VALUES (?, ?, ?)`,
+		slackUserID, strings.ToLower(githubLogin), time.Now(),
+	)
+	return err
+}
+
+// RemoveGitHubMapping removes a GitHub login mapping for a Slack user.
+func (d *DB) RemoveGitHubMapping(slackUserID, githubLogin string) error {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx, `
+		DELETE FROM github_slack_mappings
+		WHERE slack_user_id = ? AND github_login = ?`,
+		slackUserID, strings.ToLower(githubLogin),
+	)
+	return err
+}
+
+// LookupSlackByGitHub returns the Slack user ID for a GitHub login.
+// Returns "", nil if not found.
+func (d *DB) LookupSlackByGitHub(githubLogin string) (string, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	var slackID string
+	err := d.db.QueryRowContext(ctx, `
+		SELECT slack_user_id FROM github_slack_mappings
+		WHERE github_login = ?`,
+		strings.ToLower(githubLogin),
+	).Scan(&slackID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return slackID, err
+}
+
+// ListGitHubMappings returns all GitHub logins mapped to a Slack user ID.
+func (d *DB) ListGitHubMappings(slackUserID string) ([]string, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT github_login FROM github_slack_mappings
+		WHERE slack_user_id = ? ORDER BY created_at`,
+		slackUserID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logins []string
+	for rows.Next() {
+		var login string
+		if err := rows.Scan(&login); err != nil {
+			return nil, err
+		}
+		logins = append(logins, login)
+	}
+	return logins, nil
 }
 
 // Close closes the database connection.

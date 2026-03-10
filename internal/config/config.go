@@ -101,6 +101,7 @@ type DigestConfig struct {
 	InvestigateTimeoutSecs int      `yaml:"investigate_timeout_secs"` // default: 600 (10 min)
 	InvestigateMaxTurns    int      `yaml:"investigate_max_turns"`    // default: 25
 	CommentInvestigation   bool     `yaml:"comment_investigation"`    // dry_run only: post findings as Slack reply
+	BotList                []string `yaml:"bot_list"`                 // only these bot IDs trigger outreach (empty = all bots)
 }
 
 type IssueTrackerConfig struct {

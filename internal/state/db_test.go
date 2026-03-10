@@ -1068,6 +1068,73 @@ func TestKeywordOverlap(t *testing.T) {
 	}
 }
 
+func TestDB_GitHubSlackMapping_AddAndLookup(t *testing.T) {
+	db := openTestDB(t)
+
+	if err := db.AddGitHubMapping("U123", "johndoe"); err != nil {
+		t.Fatalf("AddGitHubMapping: %v", err)
+	}
+
+	slackID, err := db.LookupSlackByGitHub("johndoe")
+	if err != nil {
+		t.Fatalf("LookupSlackByGitHub: %v", err)
+	}
+	if slackID != "U123" {
+		t.Errorf("expected U123, got %q", slackID)
+	}
+
+	// Case-insensitive lookup
+	slackID, _ = db.LookupSlackByGitHub("JohnDoe")
+	if slackID != "U123" {
+		t.Errorf("case-insensitive: expected U123, got %q", slackID)
+	}
+
+	// Unknown login returns empty
+	slackID, _ = db.LookupSlackByGitHub("unknown")
+	if slackID != "" {
+		t.Errorf("expected empty, got %q", slackID)
+	}
+}
+
+func TestDB_GitHubSlackMapping_MultiplePerUser(t *testing.T) {
+	db := openTestDB(t)
+
+	db.AddGitHubMapping("U123", "johndoe")
+	db.AddGitHubMapping("U123", "john-work")
+
+	logins, err := db.ListGitHubMappings("U123")
+	if err != nil {
+		t.Fatalf("ListGitHubMappings: %v", err)
+	}
+	if len(logins) != 2 {
+		t.Fatalf("expected 2 mappings, got %d", len(logins))
+	}
+}
+
+func TestDB_GitHubSlackMapping_UniqueGitHub(t *testing.T) {
+	db := openTestDB(t)
+
+	db.AddGitHubMapping("U123", "johndoe")
+	err := db.AddGitHubMapping("U456", "johndoe")
+	if err == nil {
+		t.Fatal("expected error for duplicate github login")
+	}
+}
+
+func TestDB_GitHubSlackMapping_Remove(t *testing.T) {
+	db := openTestDB(t)
+
+	db.AddGitHubMapping("U123", "johndoe")
+	if err := db.RemoveGitHubMapping("U123", "johndoe"); err != nil {
+		t.Fatalf("RemoveGitHubMapping: %v", err)
+	}
+
+	slackID, _ := db.LookupSlackByGitHub("johndoe")
+	if slackID != "" {
+		t.Errorf("expected empty after remove, got %q", slackID)
+	}
+}
+
 func TestDB_MergeStats(t *testing.T) {
 	db := openTestDB(t)
 

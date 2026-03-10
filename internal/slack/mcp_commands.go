@@ -66,6 +66,29 @@ func handleSlashCommand(c *Client, cmd slack.SlashCommand) {
 		default:
 			c.mcpHandler.handleMCPHelp(cmd)
 		}
+	case "github":
+		if len(args) < 2 {
+			c.mcpHandler.handleGitHubHelp(cmd)
+			return
+		}
+		switch args[1] {
+		case "add":
+			if len(args) < 3 {
+				c.mcpHandler.ephemeral(cmd, "Usage: `/toad github add <github-username>`")
+				return
+			}
+			c.mcpHandler.handleGitHubAdd(cmd, args[2])
+		case "list":
+			c.mcpHandler.handleGitHubList(cmd)
+		case "remove":
+			if len(args) < 3 {
+				c.mcpHandler.ephemeral(cmd, "Usage: `/toad github remove <github-username>`")
+				return
+			}
+			c.mcpHandler.handleGitHubRemove(cmd, args[2])
+		default:
+			c.mcpHandler.handleGitHubHelp(cmd)
+		}
 	case "status":
 		c.mcpHandler.handleStatus(cmd)
 	case "joke":
@@ -351,9 +374,57 @@ func (h *SlashCommandHandler) handleHelp(cmd slack.SlashCommand) {
 			"• `/toad mcp status` — Check your MCP token\n" +
 			"• `/toad mcp ping` — Check MCP server liveness\n"
 	}
-	text += "• `/toad joke` — Tell a frog joke\n" +
+	text += "• `/toad github add|list|remove` — Link GitHub accounts for @mentions\n" +
+		"• `/toad joke` — Tell a frog joke\n" +
 		"• `/toad help` — Show this message"
 	h.ephemeral(cmd, text)
+}
+
+// --- /toad github ---
+
+func (h *SlashCommandHandler) handleGitHubAdd(cmd slack.SlashCommand, login string) {
+	if err := h.db.AddGitHubMapping(cmd.UserID, login); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint") {
+			h.ephemeral(cmd, fmt.Sprintf("GitHub account `%s` is already linked to another Slack user.", login))
+			return
+		}
+		h.ephemeral(cmd, "Failed to add mapping: "+err.Error())
+		return
+	}
+	h.ephemeral(cmd, fmt.Sprintf(":white_check_mark: Linked GitHub account `%s` to your Slack profile.", login))
+}
+
+func (h *SlashCommandHandler) handleGitHubList(cmd slack.SlashCommand) {
+	logins, err := h.db.ListGitHubMappings(cmd.UserID)
+	if err != nil {
+		h.ephemeral(cmd, "Failed to list mappings: "+err.Error())
+		return
+	}
+	if len(logins) == 0 {
+		h.ephemeral(cmd, "No GitHub accounts linked. Use `/toad github add <username>` to link one.")
+		return
+	}
+	lines := make([]string, len(logins))
+	for i, l := range logins {
+		lines[i] = fmt.Sprintf("• `%s`", l)
+	}
+	h.ephemeral(cmd, ":link: Your linked GitHub accounts:\n"+strings.Join(lines, "\n"))
+}
+
+func (h *SlashCommandHandler) handleGitHubRemove(cmd slack.SlashCommand, login string) {
+	if err := h.db.RemoveGitHubMapping(cmd.UserID, login); err != nil {
+		h.ephemeral(cmd, "Failed to remove mapping: "+err.Error())
+		return
+	}
+	h.ephemeral(cmd, fmt.Sprintf(":white_check_mark: Unlinked GitHub account `%s`.", login))
+}
+
+func (h *SlashCommandHandler) handleGitHubHelp(cmd slack.SlashCommand) {
+	h.ephemeral(cmd, "*GitHub account linking*\n\n"+
+		"Link your GitHub account so toad can @mention you in investigation findings.\n\n"+
+		"• `/toad github add <username>` — link a GitHub account\n"+
+		"• `/toad github list` — show your linked accounts\n"+
+		"• `/toad github remove <username>` — unlink an account")
 }
 
 // --- helpers ---

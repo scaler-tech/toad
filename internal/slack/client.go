@@ -28,6 +28,7 @@ type IncomingMessage struct {
 	IsMention        bool
 	IsTriggered      bool
 	IsBot            bool
+	BotID            string
 	IsTadpoleRequest bool // :frog: reaction on a toad reply — means "spawn tadpole"
 	ThreadContext    []string
 }

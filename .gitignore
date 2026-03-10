@@ -30,6 +30,9 @@ Thumbs.db
 # Build
 dist/
 
+# Worktrees
+.worktrees/
+
 # Local config (don't commit tokens!)
 .env
 *.local

@@ -72,6 +72,7 @@ func handleAppMention(ctx context.Context, c *Client, ev *slackevents.AppMention
 		IsMention:       true,
 		IsTriggered:     true,
 		IsBot:           ev.BotID != "",
+		BotID:           ev.BotID,
 	}
 
 	slog.Info("app mention received", "channel", ev.Channel, "user", ev.User)
@@ -125,6 +126,7 @@ func handleMessage(ctx context.Context, c *Client, ev *slackevents.MessageEvent)
 		IsMention:       false,
 		IsTriggered:     triggered,
 		IsBot:           isBot,
+		BotID:           ev.BotID,
 	}
 
 	slog.Debug("dispatching message", "channel", ev.Channel, "triggered", triggered, "bot", isBot)

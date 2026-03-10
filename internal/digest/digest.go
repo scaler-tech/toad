@@ -27,6 +27,7 @@ type Message struct {
 	Text        string
 	ThreadTS    string
 	Timestamp   string
+	BotID       string
 }
 
 // Opportunity is a potential one-shot fix identified by the digest analysis.
@@ -67,6 +68,20 @@ type SpawnFunc func(ctx context.Context, task tadpole.Task) error
 // NotifyFunc sends a Slack message in a thread.
 type NotifyFunc func(channel, threadTS, text string)
 
+// InvestigationNotice holds all data needed for outreach after an investigation.
+type InvestigationNotice struct {
+	Channel   string
+	ThreadTS  string
+	Text      string // formatted findings
+	BotID     string // original message's bot ID (empty for human)
+	IssueRefs []*issuetracker.IssueRef
+	FilesHint []string
+	Repo      string
+}
+
+// NotifyInvestigationFunc handles posting investigation findings with outreach.
+type NotifyInvestigationFunc func(notice InvestigationNotice)
+
 // ReactFunc adds an emoji reaction to a message.
 type ReactFunc func(channel, timestamp, emoji string)
 
@@ -105,7 +120,7 @@ type Engine struct {
 	model               string
 	spawn               SpawnFunc
 	notify              NotifyFunc
-	notifyInvestigation NotifyFunc
+	notifyInvestigation NotifyInvestigationFunc
 	investigate         InvestigateFunc
 	react               ReactFunc
 	claim               ClaimFunc
@@ -135,7 +150,7 @@ type Engine struct {
 }
 
 // New creates a digest engine.
-func New(cfg *config.DigestConfig, agentProvider agent.Provider, triageModel string, spawn SpawnFunc, notify NotifyFunc, notifyInvestigation NotifyFunc, investigate InvestigateFunc, react ReactFunc, claim ClaimFunc, unclaim UnclaimFunc, resolveRepo ResolveRepoFunc, repoPaths map[string]string, profiles []config.RepoProfile, db *state.DB, tracker issuetracker.Tracker, getPermalink GetPermalinkFunc, respectAssignees bool, staleDays int) *Engine {
+func New(cfg *config.DigestConfig, agentProvider agent.Provider, triageModel string, spawn SpawnFunc, notify NotifyFunc, notifyInvestigation NotifyInvestigationFunc, investigate InvestigateFunc, react ReactFunc, claim ClaimFunc, unclaim UnclaimFunc, resolveRepo ResolveRepoFunc, repoPaths map[string]string, profiles []config.RepoProfile, db *state.DB, tracker issuetracker.Tracker, getPermalink GetPermalinkFunc, respectAssignees bool, staleDays int) *Engine {
 	e := &Engine{
 		cfg:                 cfg,
 		agent:               agentProvider,
@@ -239,8 +254,14 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 		if e.cfg.DryRun {
 			slog.Info("[dry-run] resumed investigation would spawn tadpole", "summary", opp.Summary)
 			if e.cfg.CommentInvestigation && e.notifyInvestigation != nil && reasoning != "" {
-				comment := fmt.Sprintf(":mag: *Investigation findings:*\n\n%s", reasoning)
-				e.notifyInvestigation(msg.Channel, msg.ThreadTS, comment)
+				e.notifyInvestigation(InvestigationNotice{
+					Channel:   msg.Channel,
+					ThreadTS:  msg.ThreadTS,
+					Text:      fmt.Sprintf(":mag: *Investigation findings:*\n\n%s", reasoning),
+					BotID:     "", // not available in resume path
+					FilesHint: opp.FilesHint,
+					Repo:      opp.Repo,
+				})
 			}
 			e.totalSpawns.Add(1)
 			continue
@@ -532,8 +553,15 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 				"channel", msg.ChannelName,
 			)
 			if e.cfg.CommentInvestigation && e.notifyInvestigation != nil && reasoning != "" {
-				comment := fmt.Sprintf(":mag: *Investigation findings:*\n\n%s", reasoning)
-				e.notifyInvestigation(msg.Channel, threadTS, comment)
+				e.notifyInvestigation(InvestigationNotice{
+					Channel:   msg.Channel,
+					ThreadTS:  threadTS,
+					Text:      fmt.Sprintf(":mag: *Investigation findings:*\n\n%s", reasoning),
+					BotID:     msg.BotID,
+					IssueRefs: allRefs,
+					FilesHint: opp.FilesHint,
+					Repo:      opp.Repo,
+				})
 			}
 			e.totalSpawns.Add(1)
 			if e.unclaim != nil {
