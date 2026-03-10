@@ -151,6 +151,16 @@ If you plan to use the MCP server (Claude Desktop/Code integration):
 
 Users can then run `/toad mcp connect` to get an MCP token, `/toad mcp status` to check it, `/toad mcp revoke` to invalidate it, and `/toad status` for daemon info.
 
+### Step 4c: Enable Interactivity (optional, for button CTAs)
+
+If you want toad's passive investigation messages to include a clickable "Fix this" button:
+
+1. Go to **Interactivity & Shortcuts** in the left sidebar
+2. Toggle **Interactivity** on
+3. For the **Request URL**, leave it empty — Socket Mode handles routing automatically
+
+No additional scopes are needed. When interactivity is enabled, passive ribbit replies show a green "Fix this" button instead of a text prompt. Clicking the button spawns a tadpole immediately.
+
 ### Step 5: Install to workspace
 
 1. Go to **Install App** in the left sidebar

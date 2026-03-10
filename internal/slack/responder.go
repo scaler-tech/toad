@@ -8,6 +8,70 @@ import (
 	"github.com/slack-go/slack"
 )
 
+// FixThisBlocks builds Block Kit blocks for a passive ribbit with a "Fix this" button.
+func FixThisBlocks(text, threadTS string) []slack.Block {
+	section := slack.NewSectionBlock(
+		slack.NewTextBlockObject(slack.MarkdownType, text, false, false),
+		nil, nil,
+	)
+	btn := slack.NewButtonBlockElement("toad_fix", threadTS,
+		slack.NewTextBlockObject(slack.PlainTextType, "Fix this", false, false),
+	)
+	btn.WithStyle(slack.StylePrimary)
+	actions := slack.NewActionBlock("toad_fix_actions", btn)
+	return []slack.Block{section, actions}
+}
+
+// SpawnedByBlocks builds Block Kit blocks that replace the button after a tadpole is spawned.
+func SpawnedByBlocks(text, userName string) []slack.Block {
+	section := slack.NewSectionBlock(
+		slack.NewTextBlockObject(slack.MarkdownType, text, false, false),
+		nil, nil,
+	)
+	ctx := slack.NewContextBlock("toad_fix_status",
+		slack.NewTextBlockObject(slack.MarkdownType,
+			":hatching_chick: Tadpole spawned by "+userName, false, false),
+	)
+	return []slack.Block{section, ctx}
+}
+
+// ReplyInThreadWithBlocks posts a Block Kit message as a thread reply and tracks it.
+func (c *Client) ReplyInThreadWithBlocks(channel, threadTS, fallbackText string, blocks []slack.Block) (string, error) {
+	if c.pathScrubber != nil {
+		fallbackText = c.pathScrubber(fallbackText)
+	}
+	_, ts, err := c.api.PostMessage(
+		channel,
+		slack.MsgOptionText(fallbackText, false),
+		slack.MsgOptionBlocks(blocks...),
+		slack.MsgOptionTS(threadTS),
+	)
+	if err != nil {
+		slog.Error("failed to reply in thread with blocks", "error", err, "channel", channel)
+		return "", fmt.Errorf("posting thread reply with blocks: %w", err)
+	}
+	c.trackReply(channel, ts)
+	return ts, nil
+}
+
+// UpdateMessageWithBlocks updates an existing message with new blocks.
+func (c *Client) UpdateMessageWithBlocks(channel, timestamp, fallbackText string, blocks []slack.Block) error {
+	if c.pathScrubber != nil {
+		fallbackText = c.pathScrubber(fallbackText)
+	}
+	_, _, _, err := c.api.UpdateMessage(
+		channel,
+		timestamp,
+		slack.MsgOptionText(fallbackText, false),
+		slack.MsgOptionBlocks(blocks...),
+	)
+	if err != nil {
+		slog.Error("failed to update message with blocks", "error", err)
+		return fmt.Errorf("updating message with blocks: %w", err)
+	}
+	return nil
+}
+
 // ReplyInThread posts a message as a thread reply and tracks it as a toad reply.
 func (c *Client) ReplyInThread(channel, threadTS, text string) (string, error) {
 	if c.pathScrubber != nil {

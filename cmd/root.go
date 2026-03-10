@@ -837,8 +837,10 @@ func handlePassive(
 	}
 
 	daemonCounters.ribbits.Add(1)
-	slackClient.ReplyInThread(msg.Channel, msg.Timestamp,
-		resp.Text+"\n\n_React :frog: if you'd like me to fix this._")
+	blocks := islack.FixThisBlocks(resp.Text, msg.ThreadTS())
+	if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, msg.Timestamp, resp.Text, blocks); err != nil {
+		slog.Warn("passive ribbit reply failed", "error", err)
+	}
 }
 
 func handleTadpoleRequest(

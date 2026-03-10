@@ -500,6 +500,9 @@ func (c *Client) routeEvent(ctx context.Context, evt socketmode.Event) {
 		}
 		c.socket.Ack(*evt.Request)
 		handleSlashCommand(c, cmd)
+	case socketmode.EventTypeInteractive:
+		c.socket.Ack(*evt.Request)
+		handleInteractive(ctx, c, evt)
 	case socketmode.EventTypeConnecting:
 		slog.Info("connecting to Slack...")
 	case socketmode.EventTypeConnected:

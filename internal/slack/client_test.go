@@ -249,6 +249,130 @@ func TestBuildPathScrubber_MultiplePaths(t *testing.T) {
 	}
 }
 
+func TestFixThisBlocks(t *testing.T) {
+	text := "Found a bug in utils/time.go"
+	threadTS := "1234567890.123456"
+	blocks := FixThisBlocks(text, threadTS)
+
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks, got %d", len(blocks))
+	}
+
+	section, ok := blocks[0].(*goslack.SectionBlock)
+	if !ok {
+		t.Fatalf("expected SectionBlock, got %T", blocks[0])
+	}
+	if section.Text == nil || section.Text.Text != text {
+		t.Errorf("expected text %q, got %q", text, section.Text.Text)
+	}
+
+	actions, ok := blocks[1].(*goslack.ActionBlock)
+	if !ok {
+		t.Fatalf("expected ActionBlock, got %T", blocks[1])
+	}
+	if len(actions.Elements.ElementSet) != 1 {
+		t.Fatalf("expected 1 element, got %d", len(actions.Elements.ElementSet))
+	}
+	btn, ok := actions.Elements.ElementSet[0].(*goslack.ButtonBlockElement)
+	if !ok {
+		t.Fatalf("expected ButtonBlockElement, got %T", actions.Elements.ElementSet[0])
+	}
+	if btn.ActionID != "toad_fix" {
+		t.Errorf("expected action_id 'toad_fix', got %q", btn.ActionID)
+	}
+	if btn.Value != threadTS {
+		t.Errorf("expected value %q, got %q", threadTS, btn.Value)
+	}
+	if btn.Style != goslack.StylePrimary {
+		t.Errorf("expected primary style, got %q", btn.Style)
+	}
+}
+
+func TestSpawnedByBlocks(t *testing.T) {
+	text := "Found a bug in utils/time.go"
+	userName := "jamie"
+	blocks := SpawnedByBlocks(text, userName)
+
+	if len(blocks) != 2 {
+		t.Fatalf("expected 2 blocks, got %d", len(blocks))
+	}
+
+	section, ok := blocks[0].(*goslack.SectionBlock)
+	if !ok {
+		t.Fatalf("expected SectionBlock, got %T", blocks[0])
+	}
+	if section.Text.Text != text {
+		t.Errorf("expected text %q, got %q", text, section.Text.Text)
+	}
+
+	ctx, ok := blocks[1].(*goslack.ContextBlock)
+	if !ok {
+		t.Fatalf("expected ContextBlock, got %T", blocks[1])
+	}
+	if len(ctx.ContextElements.Elements) != 1 {
+		t.Fatalf("expected 1 context element, got %d", len(ctx.ContextElements.Elements))
+	}
+	ctxText, ok := ctx.ContextElements.Elements[0].(*goslack.TextBlockObject)
+	if !ok {
+		t.Fatalf("expected TextBlockObject, got %T", ctx.ContextElements.Elements[0])
+	}
+	if ctxText.Text != ":hatching_chick: Tadpole spawned by jamie" {
+		t.Errorf("unexpected context text: %q", ctxText.Text)
+	}
+}
+
+func TestParseInteraction_FixButton(t *testing.T) {
+	cb := &goslack.InteractionCallback{
+		Type: goslack.InteractionTypeBlockActions,
+		Channel: goslack.Channel{
+			GroupConversation: goslack.GroupConversation{
+				Conversation: goslack.Conversation{ID: "C123"},
+			},
+		},
+		User:      goslack.User{ID: "U456", Name: "jamie"},
+		MessageTs: "111.222",
+		ActionCallback: goslack.ActionCallbacks{
+			BlockActions: []*goslack.BlockAction{
+				{
+					ActionID: "toad_fix",
+					Value:    "999.888",
+					BlockID:  "toad_fix_actions",
+				},
+			},
+		},
+	}
+
+	action, threadTS, channel, userID := parseFixAction(cb)
+	if !action {
+		t.Fatal("expected action=true")
+	}
+	if threadTS != "999.888" {
+		t.Errorf("expected threadTS '999.888', got %q", threadTS)
+	}
+	if channel != "C123" {
+		t.Errorf("expected channel 'C123', got %q", channel)
+	}
+	if userID != "U456" {
+		t.Errorf("expected userID 'U456', got %q", userID)
+	}
+}
+
+func TestParseInteraction_WrongAction(t *testing.T) {
+	cb := &goslack.InteractionCallback{
+		Type: goslack.InteractionTypeBlockActions,
+		ActionCallback: goslack.ActionCallbacks{
+			BlockActions: []*goslack.BlockAction{
+				{ActionID: "something_else", Value: "999.888"},
+			},
+		},
+	}
+
+	action, _, _, _ := parseFixAction(cb)
+	if action {
+		t.Fatal("expected action=false for non-toad action")
+	}
+}
+
 func TestSetPathScrubber_EmptyMap(t *testing.T) {
 	c := &Client{seen: make(map[string]time.Time), replies: make(map[string]time.Time)}
 	c.SetPathScrubber(map[string]string{})
