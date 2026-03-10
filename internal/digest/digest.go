@@ -100,23 +100,24 @@ type DigestStats struct {
 
 // Engine collects messages and periodically analyzes them for one-shot opportunities.
 type Engine struct {
-	cfg              *config.DigestConfig
-	agent            agent.Provider
-	model            string
-	spawn            SpawnFunc
-	notify           NotifyFunc
-	investigate      InvestigateFunc
-	react            ReactFunc
-	claim            ClaimFunc
-	unclaim          UnclaimFunc
-	resolveRepo      ResolveRepoFunc
-	repoPaths        map[string]string // path → name, for cross-repo prompts and path scrubbing
-	repoProfiles     string            // formatted repo profiles for multi-repo prompt, empty for single-repo
-	db               *state.DB
-	tracker          issuetracker.Tracker
-	getPermalink     GetPermalinkFunc
-	respectAssignees bool
-	staleDays        int
+	cfg                 *config.DigestConfig
+	agent               agent.Provider
+	model               string
+	spawn               SpawnFunc
+	notify              NotifyFunc
+	notifyInvestigation NotifyFunc
+	investigate         InvestigateFunc
+	react               ReactFunc
+	claim               ClaimFunc
+	unclaim             UnclaimFunc
+	resolveRepo         ResolveRepoFunc
+	repoPaths           map[string]string // path → name, for cross-repo prompts and path scrubbing
+	repoProfiles        string            // formatted repo profiles for multi-repo prompt, empty for single-repo
+	db                  *state.DB
+	tracker             issuetracker.Tracker
+	getPermalink        GetPermalinkFunc
+	respectAssignees    bool
+	staleDays           int
 
 	mu     sync.Mutex
 	buffer []Message
@@ -134,25 +135,26 @@ type Engine struct {
 }
 
 // New creates a digest engine.
-func New(cfg *config.DigestConfig, agentProvider agent.Provider, triageModel string, spawn SpawnFunc, notify NotifyFunc, investigate InvestigateFunc, react ReactFunc, claim ClaimFunc, unclaim UnclaimFunc, resolveRepo ResolveRepoFunc, repoPaths map[string]string, profiles []config.RepoProfile, db *state.DB, tracker issuetracker.Tracker, getPermalink GetPermalinkFunc, respectAssignees bool, staleDays int) *Engine {
+func New(cfg *config.DigestConfig, agentProvider agent.Provider, triageModel string, spawn SpawnFunc, notify NotifyFunc, notifyInvestigation NotifyFunc, investigate InvestigateFunc, react ReactFunc, claim ClaimFunc, unclaim UnclaimFunc, resolveRepo ResolveRepoFunc, repoPaths map[string]string, profiles []config.RepoProfile, db *state.DB, tracker issuetracker.Tracker, getPermalink GetPermalinkFunc, respectAssignees bool, staleDays int) *Engine {
 	e := &Engine{
-		cfg:              cfg,
-		agent:            agentProvider,
-		model:            triageModel,
-		spawn:            spawn,
-		notify:           notify,
-		investigate:      investigate,
-		claim:            claim,
-		unclaim:          unclaim,
-		react:            react,
-		resolveRepo:      resolveRepo,
-		repoPaths:        repoPaths,
-		db:               db,
-		tracker:          tracker,
-		getPermalink:     getPermalink,
-		respectAssignees: respectAssignees,
-		staleDays:        staleDays,
-		spawnHour:        time.Now().Hour(),
+		cfg:                 cfg,
+		agent:               agentProvider,
+		model:               triageModel,
+		spawn:               spawn,
+		notify:              notify,
+		notifyInvestigation: notifyInvestigation,
+		investigate:         investigate,
+		claim:               claim,
+		unclaim:             unclaim,
+		react:               react,
+		resolveRepo:         resolveRepo,
+		repoPaths:           repoPaths,
+		db:                  db,
+		tracker:             tracker,
+		getPermalink:        getPermalink,
+		respectAssignees:    respectAssignees,
+		staleDays:           staleDays,
+		spawnHour:           time.Now().Hour(),
 	}
 	if len(profiles) > 1 {
 		e.repoProfiles = config.FormatForPrompt(profiles)
@@ -402,9 +404,9 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 				"confidence", opp.Confidence,
 				"channel", msg.ChannelName,
 			)
-			if e.cfg.CommentInvestigation && e.notify != nil && reasoning != "" {
-				comment := fmt.Sprintf(":mag: *Investigation findings:*\n\n%s\n\n:frog: _If you'd like me to fix this, reply with_ `@toad fix this`", reasoning)
-				e.notify(msg.Channel, threadTS, comment)
+			if e.cfg.CommentInvestigation && e.notifyInvestigation != nil && reasoning != "" {
+				comment := fmt.Sprintf(":mag: *Investigation findings:*\n\n%s", reasoning)
+				e.notifyInvestigation(msg.Channel, threadTS, comment)
 			}
 			e.totalSpawns.Add(1)
 			if e.unclaim != nil {

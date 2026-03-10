@@ -216,6 +216,12 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			func(channel, threadTS, text string) {
 				slackClient.ReplyInThread(channel, threadTS, text)
 			},
+			func(channel, threadTS, text string) {
+				blocks := islack.FixThisBlocks(text, threadTS)
+				if _, err := slackClient.ReplyInThreadWithBlocks(channel, threadTS, text, blocks); err != nil {
+					slog.Warn("digest investigation reply failed", "error", err)
+				}
+			},
 			func(ctx context.Context, opp digest.Opportunity, msg digest.Message, tickets []digest.TicketContext) (*digest.InvestigateResult, error) {
 				return investigateOpportunity(ctx, cfg, agentProvider, opp, msg, resolver, tickets)
 			},
