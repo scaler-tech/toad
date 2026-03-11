@@ -702,9 +702,18 @@ func apiReloadDashboardHandler(port int) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"ok": true})
 
-		// Give the response time to flush, then restart the dashboard process
+		// Give the response time to flush, then restart the dashboard process.
 		go func() {
 			time.Sleep(200 * time.Millisecond)
+
+			// Under a process supervisor, exit cleanly and let the supervisor
+			// restart us with the new binary. syscall.Exec confuses supervisors
+			// that track the child PID.
+			if os.Getenv("SUPERVISED") != "" {
+				slog.Info("dashboard reload: exiting for supervisor restart")
+				os.Exit(0)
+			}
+
 			binary, err := os.Executable()
 			if err != nil {
 				slog.Error("dashboard reload: could not find executable", "error", err)

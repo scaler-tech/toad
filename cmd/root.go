@@ -548,6 +548,13 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	<-statsDone // wait for stats writer to finish before closing DB
 
 	if restartRequested.Load() {
+		// Under a process supervisor, return cleanly and let the supervisor
+		// restart us. syscall.Exec confuses supervisors that track the child PID.
+		if os.Getenv("SUPERVISED") != "" {
+			slog.Info("restart: exiting for supervisor restart")
+			return nil
+		}
+
 		binary, err := os.Executable()
 		if err != nil {
 			return fmt.Errorf("restart: could not find executable: %w", err)

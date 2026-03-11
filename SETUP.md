@@ -33,6 +33,7 @@ The complete guide to installing, configuring, and running toad — from zero to
   - [Toad King (Digest) Tuning](#toad-king-digest-tuning)
   - [Mixed GitHub/GitLab Setups](#mixed-githubgitlab-setups)
   - [MCP Server](#mcp-server)
+  - [Running Under a Process Supervisor](#running-under-a-process-supervisor)
 - [Troubleshooting](#troubleshooting)
 - [Complete Example Config](#complete-example-config)
 
@@ -647,6 +648,7 @@ Environment variables override config file values.
 | `TOAD_SLACK_BOT_TOKEN` | `slack.bot_token` | Slack bot OAuth token (`xoxb-...`) |
 | `TOAD_LINEAR_API_TOKEN` | `issue_tracker.api_token` | Linear API token for issue tracking |
 | `TOAD_GITLAB_HOST` | `vcs.host` | Self-hosted GitLab hostname |
+| `SUPERVISED` | — | Set to `1` when running under a process supervisor (see [Running Under a Process Supervisor](#running-under-a-process-supervisor)) |
 
 You can also use `${ENV_VAR}` syntax in YAML values to reference environment variables:
 
@@ -933,6 +935,48 @@ The MCP server lets Claude Desktop and Claude Code interact with your toad insta
 
 **Health endpoint:**
 `GET http://localhost:8099/health` returns daemon status (uptime, active tadpoles/ribbits, Slack connection) — no authentication required.
+
+### Running Under a Process Supervisor
+
+When deploying toad on a server (e.g., with systemd, supervisord, or a similar tool), set the `SUPERVISED` environment variable so toad exits cleanly on restart instead of using `syscall.Exec` to self-replace.
+
+Without this, `syscall.Exec` replaces the process in-place — which works locally but confuses supervisors that track child PIDs.
+
+**What it affects:**
+
+- `toad restart` — daemon exits with code 0 instead of exec-replacing
+- Dashboard reload after update — `toad status` exits with code 0 instead of exec-replacing
+
+In both cases, the supervisor detects the exit and restarts the process with the new binary.
+
+**systemd example:**
+
+```ini
+[Service]
+Environment=SUPERVISED=1
+Environment=TOAD_SLACK_APP_TOKEN=xapp-...
+Environment=TOAD_SLACK_BOT_TOKEN=xoxb-...
+ExecStart=/usr/local/bin/toad
+Restart=always
+```
+
+**supervisord example:**
+
+```ini
+[program:toad]
+command=/usr/local/bin/toad
+environment=SUPERVISED=1,TOAD_SLACK_APP_TOKEN="xapp-...",TOAD_SLACK_BOT_TOKEN="xoxb-..."
+autorestart=true
+```
+
+For the dashboard on a separate process:
+
+```ini
+[program:toad-dashboard]
+command=/usr/local/bin/toad status --port 3000 --no-browser
+environment=SUPERVISED=1
+autorestart=true
+```
 
 ---
 

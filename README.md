@@ -102,6 +102,8 @@ Toad connects to Slack via Socket Mode, auto-joins public channels, and starts l
 
 > For detailed Slack app setup, configuration, and advanced features, see the **[Setup Guide](SETUP.md)**.
 
+**Server deployment:** When running under a process supervisor (systemd, supervisord), set `SUPERVISED=1` so toad exits cleanly on restart instead of self-replacing. See the [Setup Guide](SETUP.md#running-under-a-process-supervisor) for examples.
+
 ## 🐸 CLI commands
 
 | Command | Description |
