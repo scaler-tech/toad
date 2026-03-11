@@ -81,6 +81,31 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(kioskHTML))
 	})
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/x-icon")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(faviconICO)
+	})
+	mux.HandleFunc("/favicon-16x16.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(favicon16)
+	})
+	mux.HandleFunc("/favicon-32x32.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(favicon32)
+	})
+	mux.HandleFunc("/apple-touch-icon.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(appleTouchIcon)
+	})
+	mux.HandleFunc("/logo.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(logoPNG)
+	})
 	mux.HandleFunc("/api/data", apiDataHandler(db, cfg))
 	mux.HandleFunc("/api/check-update", apiCheckUpdateHandler())
 	mux.HandleFunc("/api/update", apiUpdateHandler())
