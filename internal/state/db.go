@@ -133,6 +133,8 @@ func migrate(db *sql.DB) error {
 			confidence    REAL NOT NULL,
 			est_size      TEXT NOT NULL,
 			channel       TEXT,
+			channel_id    TEXT DEFAULT '',
+			thread_ts     TEXT DEFAULT '',
 			message       TEXT,
 			keywords      TEXT,
 			dry_run       BOOLEAN NOT NULL DEFAULT TRUE,
@@ -183,87 +185,64 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("creating personality_adjustments table: %w", err)
 	}
 
-	// Add columns for existing databases that predate the investigation gate.
-	// SQLite has no IF NOT EXISTS for ALTER TABLE, so check first.
-	var count int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('digest_opportunities') WHERE name = 'dismissed'`).Scan(&count)
-	if count == 0 {
-		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN dismissed BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
-			slog.Warn("migration: failed to add dismissed column", "error", err)
-		}
-		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`); err != nil {
-			slog.Warn("migration: failed to add reasoning column", "error", err)
+	// Numbered schema migrations. Each step runs only if the current
+	// schema_version is less than the migration's version number.
+	type migration struct {
+		version int
+		sql     string
+	}
+	migrations := []migration{
+		{1, `ALTER TABLE digest_opportunities ADD COLUMN dismissed BOOLEAN NOT NULL DEFAULT FALSE;
+		     ALTER TABLE digest_opportunities ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`},
+		{2, `ALTER TABLE pr_watches ADD COLUMN ci_fix_count INTEGER DEFAULT 0`},
+		{3, `ALTER TABLE pr_watches ADD COLUMN ci_exhausted_notified BOOLEAN DEFAULT FALSE`},
+		{4, `ALTER TABLE pr_watches ADD COLUMN conflict_fix_count INTEGER DEFAULT 0`},
+		{5, `ALTER TABLE digest_opportunities ADD COLUMN investigating BOOLEAN NOT NULL DEFAULT FALSE`},
+		{6, `ALTER TABLE digest_opportunities ADD COLUMN channel_id TEXT DEFAULT '';
+		     ALTER TABLE digest_opportunities ADD COLUMN thread_ts TEXT DEFAULT ''`},
+		{7, `ALTER TABLE pr_watches ADD COLUMN final_state TEXT DEFAULT ''`},
+		{8, `ALTER TABLE pr_watches ADD COLUMN original_summary TEXT DEFAULT '';
+		     ALTER TABLE pr_watches ADD COLUMN original_description TEXT DEFAULT ''`},
+	}
+
+	// Read current schema version. If no version is stored, detect whether
+	// this is a pre-versioned database (columns already added by the old
+	// ad-hoc ALTER TABLE code) or a truly fresh database.
+	var currentVersion int
+	var versionStr string
+	err = db.QueryRow(`SELECT value FROM settings WHERE key = 'schema_version'`).Scan(&versionStr)
+	if err == nil {
+		_, _ = fmt.Sscanf(versionStr, "%d", &currentVersion)
+	} else {
+		// No schema_version row. Check if a column from the last migration
+		// exists — if so, the old ad-hoc migrations already ran everything.
+		var colExists int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'original_summary'`).Scan(&colExists)
+		if colExists > 0 {
+			currentVersion = len(migrations)
 		}
 	}
 
-	// Add ci_fix_count column for existing databases that predate CI fix watching.
-	var ciFixCountExists int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'ci_fix_count'`).Scan(&ciFixCountExists)
-	if ciFixCountExists == 0 {
-		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN ci_fix_count INTEGER DEFAULT 0`); err != nil {
-			slog.Warn("migration: failed to add ci_fix_count column", "error", err)
+	for _, m := range migrations {
+		if currentVersion >= m.version {
+			continue
 		}
+		for _, stmt := range strings.Split(m.sql, ";") {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
+				continue
+			}
+			if _, err := db.Exec(stmt); err != nil {
+				slog.Warn("migration: failed to run statement", "version", m.version, "error", err)
+			}
+		}
+		currentVersion = m.version
 	}
 
-	// Add ci_exhausted_notified column for existing databases that predate zombie watch fix.
-	var ciExhaustedExists int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'ci_exhausted_notified'`).Scan(&ciExhaustedExists)
-	if ciExhaustedExists == 0 {
-		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN ci_exhausted_notified BOOLEAN DEFAULT FALSE`); err != nil {
-			slog.Warn("migration: failed to add ci_exhausted_notified column", "error", err)
-		}
-	}
-
-	// Add conflict_fix_count column for existing databases that predate merge conflict watching.
-	var conflictFixCountExists int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'conflict_fix_count'`).Scan(&conflictFixCountExists)
-	if conflictFixCountExists == 0 {
-		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN conflict_fix_count INTEGER DEFAULT 0`); err != nil {
-			slog.Warn("migration: failed to add conflict_fix_count column", "error", err)
-		}
-	}
-
-	// Add investigating column for existing databases that predate investigation visibility.
-	var investigatingExists int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('digest_opportunities') WHERE name = 'investigating'`).Scan(&investigatingExists)
-	if investigatingExists == 0 {
-		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN investigating BOOLEAN NOT NULL DEFAULT FALSE`); err != nil {
-			slog.Warn("migration: failed to add investigating column", "error", err)
-		}
-	}
-
-	// Add channel_id and thread_ts columns for Slack deep links from the dashboard.
-	var channelIDExists int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('digest_opportunities') WHERE name = 'channel_id'`).Scan(&channelIDExists)
-	if channelIDExists == 0 {
-		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN channel_id TEXT DEFAULT ''`); err != nil {
-			slog.Warn("migration: failed to add channel_id column", "error", err)
-		}
-		if _, err := db.Exec(`ALTER TABLE digest_opportunities ADD COLUMN thread_ts TEXT DEFAULT ''`); err != nil {
-			slog.Warn("migration: failed to add thread_ts column", "error", err)
-		}
-	}
-
-	// Add final_state column for existing databases that predate merge rate tracking.
-	var finalStateExists int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'final_state'`).Scan(&finalStateExists)
-	if finalStateExists == 0 {
-		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN final_state TEXT DEFAULT ''`); err != nil {
-			slog.Warn("migration: failed to add final_state column", "error", err)
-		}
-	}
-
-	// Add original_summary/original_description columns so CI/review fix tadpoles
-	// know the original PR intent and don't blindly revert changes.
-	var origSummaryExists int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'original_summary'`).Scan(&origSummaryExists)
-	if origSummaryExists == 0 {
-		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN original_summary TEXT DEFAULT ''`); err != nil {
-			slog.Warn("migration: failed to add original_summary column", "error", err)
-		}
-		if _, err := db.Exec(`ALTER TABLE pr_watches ADD COLUMN original_description TEXT DEFAULT ''`); err != nil {
-			slog.Warn("migration: failed to add original_description column", "error", err)
-		}
+	// Persist the schema version so future runs skip completed migrations.
+	if _, err := db.Exec(`INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)`,
+		fmt.Sprintf("%d", currentVersion)); err != nil {
+		return fmt.Errorf("updating schema_version: %w", err)
 	}
 
 	return nil

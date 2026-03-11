@@ -23,6 +23,7 @@ On top of that, toad handles the full reactive path too — @mention it with a b
 | Cost | Your existing Claude sub | Per-seat | Per-seat | Per-seat |
 | Slack-native | Yes | No | Coming | Coming |
 | MCP integration (Claude Desktop) | Yes | No | No | No |
+| Adaptive personality | Yes | No | No | No |
 
 ## 🐣 How it works
 
@@ -37,6 +38,8 @@ Slack message → Triage (Haiku, ~1s) → Route by category:
 
 **Ribbits** are for when you just need an answer. Mention toad with a question and it reads your codebase with read-only tools, then replies in-thread. Thread memory means follow-ups stay coherent.
 
+**Passive detection** — Even without @mentions, the Toad King can identify bugs from alerts and conversations. When it finds something fixable, it posts investigation findings with a "Fix this" button that spawns a tadpole on click.
+
 ## 🐸 The glossary
 
 Everything in toad is named after the lifecycle of a frog:
@@ -49,6 +52,7 @@ Everything in toad is named after the lifecycle of a frog:
 | 🐣 **Tadpole** | Autonomous coding agent — worktree, Claude Code, validate, PR |
 | 👑 **Toad King** | Passive monitoring → investigation → auto-fix |
 | 🔁 **PR Watch** | Review comment and CI failure auto-fixing |
+| 🧠 **Personality** | 22-trait adaptive personality with dampened learning |
 
 ## 📋 Requirements
 
@@ -128,6 +132,7 @@ internal/
   reviewer/        PR review + CI watcher, fix tadpole spawning
   digest/          Toad King: batch analysis, investigation, auto-spawn
   config/          YAML config with cascading defaults, multi-repo profiles
+  personality/     Adaptive 22-trait personality with dampened learning
   agent/           Coding agent provider abstraction (see PROVIDERS.md)
   vcs/             VCS provider abstraction (see PROVIDERS.md)
   issuetracker/    Issue tracker abstraction (see PROVIDERS.md)
@@ -157,8 +162,21 @@ Toad includes an optional MCP (Model Context Protocol) server that lets Claude D
 **Available tools:**
 - `ask` — Ask toad a codebase question (uses ribbit engine with read-only tools)
 - `logs` — Read and filter daemon logs (dev role required)
+- `watches` — List open PR watches being monitored (dev role required)
 
 > For full setup instructions, see the **[Setup Guide](SETUP.md#mcp-server)**.
+
+## 🧠 Personality System
+
+Toad develops a personality over time based on team feedback. 22 traits (verbosity, formality, humor, caution, etc.) adjust through dampened learning from emoji reactions, text feedback in threads, and PR outcomes.
+
+**Setup:**
+1. Enable in config: `personality.enabled: true`
+2. Optionally disable learning: `personality.learning_enabled: false` (uses base traits only)
+
+Personality data is stored at `~/.toad/personality.yaml` and visualized as a radar chart in the dashboard and kiosk view.
+
+> For configuration details, see the **[Setup Guide](SETUP.md#personality)**.
 
 ## 🛠️ Development
 

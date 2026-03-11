@@ -17,11 +17,13 @@ The complete guide to installing, configuring, and running toad — from zero to
   - [limits](#limits)
   - [triage](#triage)
   - [claude](#claude)
+  - [agent](#agent)
   - [digest](#digest)
   - [issue_tracker](#issue_tracker)
   - [vcs](#vcs)
   - [log](#log)
   - [mcp](#mcp)
+  - [personality](#personality)
 - [Environment Variables](#environment-variables)
 - [CLI Commands](#cli-commands)
 - [Interacting with Toad](#interacting-with-toad)
@@ -262,16 +264,24 @@ slack:
 
 ### `repos`
 
-Repository configuration. At least one repo is required.
+Repository configuration. At least one repo is required. Repo entries go under the `list:` key.
 
 ```yaml
 repos:
-  - name: my-app
-    path: /path/to/your/repo
-    default_branch: main
-    test_command: go test ./...
-    lint_command: go vet ./...
+  sync_minutes: 0              # Periodic git fetch interval (0 = disabled)
+  list:
+    - name: my-app
+      path: /path/to/your/repo
+      default_branch: main
+      test_command: go test ./...
+      lint_command: go vet ./...
 ```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sync_minutes` | int | `0` | Periodic `git fetch` interval in minutes. Keeps worktrees up-to-date with remote. `0` = disabled. |
+
+**`repos.list[]` fields:**
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -298,17 +308,18 @@ For monorepos with multiple services that have different test/lint commands:
 
 ```yaml
 repos:
-  - name: my-monorepo
-    path: /path/to/repo
-    test_command: go test ./...        # fallback for unmatched files
-    lint_command: go vet ./...
-    services:
-      - path: web-app
-        test_command: make test
-        lint_command: make stan && make cs
-      - path: api
-        test_command: pytest
-        lint_command: ruff check .
+  list:
+    - name: my-monorepo
+      path: /path/to/repo
+      test_command: go test ./...        # fallback for unmatched files
+      lint_command: go vet ./...
+      services:
+        - path: web-app
+          test_command: make test
+          lint_command: make stan && make cs
+        - path: api
+          test_command: pytest
+          lint_command: ruff check .
 ```
 
 | Field | Type | Default | Description |
@@ -327,11 +338,12 @@ Override the global VCS settings for a specific repo. Useful for mixed-platform 
 
 ```yaml
 repos:
-  - name: internal-api
-    path: /path/to/repo
-    vcs:
-      platform: gitlab
-      host: gitlab.mycompany.com
+  list:
+    - name: internal-api
+      path: /path/to/repo
+      vcs:
+        platform: gitlab
+        host: gitlab.mycompany.com
 ```
 
 Fields are the same as the global [`vcs`](#vcs) section. When set, this overrides global VCS settings for this repo only.
@@ -364,6 +376,8 @@ limits:
 | `max_review_rounds` | int | `3` | Max PR review → fix cycles before giving up |
 | `max_ci_fix_rounds` | int | `2` | Max CI failure → fix cycles before giving up |
 | `history_size` | int | `50` | Lines of Slack thread history to include as context |
+| `review_bots` | list | `[]` | Bot usernames whose PR comments can trigger fix tadpoles (e.g., `["greptile[bot]"]`) |
+| `worktree_ttl_hours` | int | `0` | Auto-remove worktrees older than this many hours. `0` = disabled. |
 
 **Tuning guidance:**
 - **`max_concurrent`**: Start with 2. Increase if you have CPU/memory headroom — each tadpole runs a Claude Code subprocess.
@@ -397,6 +411,8 @@ triage:
 
 ### `claude`
 
+> **Deprecated:** Use [`agent`](#agent) instead. The `claude` section is still supported for backwards compatibility.
+
 Settings for Claude Code invocation.
 
 ```yaml
@@ -419,6 +435,25 @@ claude:
     - All API responses must include request_id
     - Write table-driven tests
 ```
+
+---
+
+### `agent`
+
+Agent platform settings. Replaces the deprecated [`claude`](#claude) section.
+
+```yaml
+agent:
+  platform: claude
+  model: sonnet
+  append_system_prompt: "Always write tests for new functions."
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `platform` | string | `"claude"` | Agent platform (currently only `claude`) |
+| `model` | string | `"sonnet"` | Claude model for tadpoles and ribbits |
+| `append_system_prompt` | string | `""` | Custom instructions appended to the agent's system prompt |
 
 ---
 
@@ -451,6 +486,10 @@ digest:
 | `max_est_size` | string | `"small"` | Max estimated task size for auto-spawn (`tiny`, `small`, `medium`, `large`) |
 | `max_chunk_size` | int | `50` | Max messages per analysis batch |
 | `chunk_timeout_secs` | int | `120` | Timeout for each batch analysis |
+| `investigate_timeout_secs` | int | `600` | Timeout for each Sonnet investigation (10 min default) |
+| `investigate_max_turns` | int | `25` | Max Claude turns per investigation |
+| `comment_investigation` | bool | `false` | Post investigation findings as Slack replies (useful in dry-run mode) |
+| `bot_list` | list | `[]` | Only these Slack bot IDs trigger active outreach with @mentions. Empty = all bots. |
 
 See [Toad King (Digest) Tuning](#toad-king-digest-tuning) for advanced usage.
 
@@ -480,6 +519,8 @@ issue_tracker:
 | `create_issues` | bool | `false` | Create issues in the tracker when toad finds opportunities |
 | `bug_label_id` | string | *(optional)* | Label ID applied to bug issues |
 | `feature_label_id` | string | *(optional)* | Label ID applied to feature issues |
+| `respect_assignees` | bool | `false` | When true, defer to the ticket assignee instead of spawning a tadpole. Posts findings as a comment on the ticket. |
+| `stale_days` | int | `7` | Assignments older than this many days are considered stale and ignored |
 
 **Setting up Linear:**
 1. Create a Linear API token at [linear.app/settings/api](https://linear.app/settings/api)
@@ -567,6 +608,32 @@ mcp:
 | `message` | string | `""` | Optional message included in the DM when a user runs `/toad mcp connect` |
 
 **How it works:** When enabled, toad starts a Streamable HTTP server at `http://{host}:{port}/mcp`. Users authenticate via bearer tokens generated through the `/toad mcp connect` Slack slash command. A public health endpoint is available at `/health`.
+
+---
+
+### `personality`
+
+Adaptive personality system. Toad develops personality traits over time based on team feedback.
+
+```yaml
+personality:
+  enabled: false
+  learning_enabled: true
+  file_path: ~/.toad/personality.yaml
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable the personality system |
+| `learning_enabled` | bool | `true` | Allow traits to adapt from feedback. When false, uses base traits only. |
+| `file_path` | string | `~/.toad/personality.yaml` | Where personality state is persisted |
+
+**How it works:** Toad has 22 personality traits (verbosity, formality, humor, caution, etc.) that influence how it communicates. Traits adjust through dampened learning from:
+- **Emoji reactions** on toad's messages (e.g., thumbs up, confused face)
+- **Text feedback** in thread replies (e.g., "too verbose", "be more concise")
+- **PR outcomes** (merged = positive reinforcement, closed = negative)
+
+The radar chart in `toad status` and the kiosk view visualize current trait values.
 
 ---
 
@@ -722,15 +789,16 @@ Toad supports monitoring multiple repositories. When a message comes in, toad de
 
 ```yaml
 repos:
-  - name: backend
-    path: /home/dev/backend
-    primary: true              # fallback when ambiguous
-    test_command: go test ./...
-    lint_command: go vet ./...
-  - name: frontend
-    path: /home/dev/frontend
-    test_command: npm test
-    lint_command: npm run lint
+  list:
+    - name: backend
+      path: /home/dev/backend
+      primary: true              # fallback when ambiguous
+      test_command: go test ./...
+      lint_command: go vet ./...
+    - name: frontend
+      path: /home/dev/frontend
+      test_command: npm test
+      lint_command: npm run lint
 ```
 
 **How routing works:**
@@ -805,21 +873,22 @@ vcs:
   platform: github             # global default
 
 repos:
-  - name: public-api
-    path: /home/dev/public-api
-    # uses global github default
+  list:
+    - name: public-api
+      path: /home/dev/public-api
+      # uses global github default
 
-  - name: internal-api
-    path: /home/dev/internal-api
-    vcs:
-      platform: gitlab
-      host: gitlab.mycompany.com
+    - name: internal-api
+      path: /home/dev/internal-api
+      vcs:
+        platform: gitlab
+        host: gitlab.mycompany.com
 
-  - name: data-pipeline
-    path: /home/dev/data-pipeline
-    vcs:
-      platform: gitlab
-      host: gitlab.mycompany.com
+    - name: data-pipeline
+      path: /home/dev/data-pipeline
+      vcs:
+        platform: gitlab
+        host: gitlab.mycompany.com
 ```
 
 Each repo uses its own VCS provider for PR creation and review monitoring. The global `vcs` settings serve as the default for repos without an explicit override.
@@ -945,33 +1014,35 @@ slack:
 
 # Repositories
 repos:
-  - name: backend
-    path: /home/dev/backend
-    primary: true                         # default for ambiguous messages
-    default_branch: main
-    test_command: go test ./...
-    lint_command: go vet ./...
-    auto_merge: false                     # auto-merge passing PRs
-    merge_bot_fixups: false               # auto-merge bot fix-up PRs
-    pr_labels:                            # labels added to PRs
-      - toad
-      - automated
-    services:                             # monorepo service overrides
-      - path: web-app
-        test_command: make test
-        lint_command: make stan && make cs
-      - path: api
-        test_command: pytest
-        lint_command: ruff check .
+  sync_minutes: 0                        # periodic git fetch (0 = disabled)
+  list:
+    - name: backend
+      path: /home/dev/backend
+      primary: true                         # default for ambiguous messages
+      default_branch: main
+      test_command: go test ./...
+      lint_command: go vet ./...
+      auto_merge: false                     # auto-merge passing PRs
+      merge_bot_fixups: false               # auto-merge bot fix-up PRs
+      pr_labels:                            # labels added to PRs
+        - toad
+        - automated
+      services:                             # monorepo service overrides
+        - path: web-app
+          test_command: make test
+          lint_command: make stan && make cs
+        - path: api
+          test_command: pytest
+          lint_command: ruff check .
 
-  - name: frontend
-    path: /home/dev/frontend
-    default_branch: main
-    test_command: npm test
-    lint_command: npm run lint
-    vcs:                                  # per-repo VCS override
-      platform: gitlab
-      host: gitlab.mycompany.com
+    - name: frontend
+      path: /home/dev/frontend
+      default_branch: main
+      test_command: npm test
+      lint_command: npm run lint
+      vcs:                                  # per-repo VCS override
+        platform: gitlab
+        host: gitlab.mycompany.com
 
 # Resource limits
 limits:
@@ -983,6 +1054,8 @@ limits:
   max_review_rounds: 3                    # PR review fix cycles
   max_ci_fix_rounds: 2                    # CI failure fix cycles
   history_size: 50                        # thread history lines
+  review_bots: []                       # bot usernames triggering fixes
+  worktree_ttl_hours: 0                 # auto-cleanup old worktrees (0 = off)
 
 # Triage classification
 triage:
@@ -991,6 +1064,14 @@ triage:
 
 # Claude Code settings
 claude:
+  model: sonnet                           # model for tadpoles and ribbits
+  append_system_prompt: |                 # custom coding instructions
+    - Write table-driven tests
+    - Use functional components with hooks
+
+# Agent settings (replaces claude)
+agent:
+  platform: claude                        # agent platform
   model: sonnet                           # model for tadpoles and ribbits
   append_system_prompt: |                 # custom coding instructions
     - Write table-driven tests
@@ -1008,6 +1089,10 @@ digest:
   max_est_size: small                     # max task size
   max_chunk_size: 50                      # messages per batch
   chunk_timeout_secs: 120                 # batch analysis timeout
+  investigate_timeout_secs: 600           # investigation timeout
+  investigate_max_turns: 25               # turns per investigation
+  comment_investigation: false            # post findings as replies
+  bot_list: []                            # bot IDs for active outreach
 
 # Issue tracking
 issue_tracker:
@@ -1018,6 +1103,8 @@ issue_tracker:
   create_issues: false                    # create issues from PRs
   bug_label_id: ""                        # Linear label for bugs
   feature_label_id: ""                    # Linear label for features
+  respect_assignees: false                # defer to ticket assignee
+  stale_days: 7                           # ignore old assignments
 
 # Version control
 vcs:
@@ -1037,4 +1124,10 @@ mcp:
   port: 8099                              # HTTP port
   devs: []                                # Slack user IDs with dev access
   message: ""                             # DM message on connect
+
+# Personality system
+personality:
+  enabled: false                          # opt-in adaptive personality
+  learning_enabled: true                  # allow traits to adapt
+  file_path: ~/.toad/personality.yaml     # personality state file
 ```

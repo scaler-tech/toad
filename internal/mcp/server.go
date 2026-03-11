@@ -73,7 +73,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.Handle("/mcp", authMiddleware(s.db, handler))
 
 	s.httpSrv = &http.Server{
-		Addr:              fmt.Sprintf(":%d", s.cfg.Port),
+		Addr:              fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port),
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}

@@ -258,8 +258,14 @@ func formatOutput(service, checkType, output string) string {
 	return fmt.Sprintf("=== %s %s ===\n%s\n", service, checkType, output)
 }
 
+// perCommandTimeout caps any single test/lint command so a hung process
+// doesn't consume the entire 5-minute validation budget.
+const perCommandTimeout = 3 * time.Minute
+
 func shellRun(ctx context.Context, dir, command string) (string, error) {
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmdCtx, cancel := context.WithTimeout(ctx, perCommandTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, "sh", "-c", command)
 	cmd.Dir = dir
 	var combined bytes.Buffer
 	cmd.Stdout = &combined

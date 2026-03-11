@@ -65,9 +65,11 @@ type Client struct {
 	seen                   map[string]time.Time // dedup: key → first-seen time
 	seenMu                 sync.Mutex
 	replies                map[string]time.Time // toad's own reply timestamps (channel:ts → sent time)
-	repliesMu              sync.Mutex
+	repliesMu              sync.RWMutex
 	pathScrubber           func(string) string  // replaces absolute paths with repo-relative
 	mcpHandler             *SlashCommandHandler // handles /toad slash commands
+	channelNames           map[string]string    // channelID → name cache
+	channelNamesMu         sync.RWMutex
 }
 
 // NewClient creates a new Slack client configured for Socket Mode.
@@ -86,13 +88,14 @@ func NewClient(cfg config.SlackConfig) *Client {
 	}
 
 	return &Client{
-		api:         api,
-		socket:      socket,
-		cfgChannels: cfgChannels,
-		channels:    make(map[string]bool),
-		triggers:    cfg.Triggers,
-		seen:        make(map[string]time.Time),
-		replies:     make(map[string]time.Time),
+		api:          api,
+		socket:       socket,
+		cfgChannels:  cfgChannels,
+		channels:     make(map[string]bool),
+		triggers:     cfg.Triggers,
+		seen:         make(map[string]time.Time),
+		replies:      make(map[string]time.Time),
+		channelNames: make(map[string]string),
 	}
 }
 
@@ -477,8 +480,8 @@ func (c *Client) trackReply(channel, ts string) {
 // IsToadReply checks if a message at channel+ts was sent by toad.
 func (c *Client) IsToadReply(channel, ts string) bool {
 	key := channel + ":" + ts
-	c.repliesMu.Lock()
-	defer c.repliesMu.Unlock()
+	c.repliesMu.RLock()
+	defer c.repliesMu.RUnlock()
 	_, exists := c.replies[key]
 	return exists
 }

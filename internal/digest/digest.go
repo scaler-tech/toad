@@ -151,31 +151,53 @@ type Engine struct {
 	lastFlush      atomic.Int64 // unix timestamp
 }
 
+// EngineOpts holds all dependencies and configuration for creating a digest Engine.
+type EngineOpts struct {
+	AgentProvider       agent.Provider
+	TriageModel         string
+	Spawn               SpawnFunc
+	Notify              NotifyFunc
+	NotifyInvestigation NotifyInvestigationFunc
+	Investigate         InvestigateFunc
+	React               ReactFunc
+	Claim               ClaimFunc
+	Unclaim             UnclaimFunc
+	ResolveRepo         ResolveRepoFunc
+	RepoPaths           map[string]string
+	Profiles            []config.RepoProfile
+	DB                  *state.DB
+	Tracker             issuetracker.Tracker
+	GetPermalink        GetPermalinkFunc
+	RespectAssignees    bool
+	StaleDays           int
+	Personality         *personality.Manager
+}
+
 // New creates a digest engine.
-func New(cfg *config.DigestConfig, agentProvider agent.Provider, triageModel string, spawn SpawnFunc, notify NotifyFunc, notifyInvestigation NotifyInvestigationFunc, investigate InvestigateFunc, react ReactFunc, claim ClaimFunc, unclaim UnclaimFunc, resolveRepo ResolveRepoFunc, repoPaths map[string]string, profiles []config.RepoProfile, db *state.DB, tracker issuetracker.Tracker, getPermalink GetPermalinkFunc, respectAssignees bool, staleDays int, mgr *personality.Manager) *Engine {
+func New(cfg *config.DigestConfig, opts EngineOpts) *Engine {
 	e := &Engine{
 		cfg:                 cfg,
-		agent:               agentProvider,
-		model:               triageModel,
-		spawn:               spawn,
-		notify:              notify,
-		notifyInvestigation: notifyInvestigation,
-		investigate:         investigate,
-		claim:               claim,
-		unclaim:             unclaim,
-		react:               react,
-		resolveRepo:         resolveRepo,
-		repoPaths:           repoPaths,
-		db:                  db,
-		tracker:             tracker,
-		getPermalink:        getPermalink,
-		respectAssignees:    respectAssignees,
-		staleDays:           staleDays,
-		personality:         mgr,
+		agent:               opts.AgentProvider,
+		model:               opts.TriageModel,
+		spawn:               opts.Spawn,
+		notify:              opts.Notify,
+		notifyInvestigation: opts.NotifyInvestigation,
+		investigate:         opts.Investigate,
+		claim:               opts.Claim,
+		unclaim:             opts.Unclaim,
+		react:               opts.React,
+		resolveRepo:         opts.ResolveRepo,
+		repoPaths:           opts.RepoPaths,
+		db:                  opts.DB,
+		tracker:             opts.Tracker,
+		getPermalink:        opts.GetPermalink,
+		respectAssignees:    opts.RespectAssignees,
+		staleDays:           opts.StaleDays,
+		personality:         opts.Personality,
 		spawnHour:           time.Now().Hour(),
 	}
-	if len(profiles) > 1 {
-		e.repoProfiles = config.FormatForPrompt(profiles)
+	if len(opts.Profiles) > 1 {
+		e.repoProfiles = config.FormatForPrompt(opts.Profiles)
 	}
 	return e
 }

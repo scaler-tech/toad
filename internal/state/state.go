@@ -223,5 +223,10 @@ func (m *Manager) SetWorktreeInfo(runID, branch, wtPath string) {
 	if run, ok := m.runs[runID]; ok {
 		run.Branch = branch
 		run.WorktreePath = wtPath
+		if m.db != nil {
+			if err := m.db.SaveRun(run); err != nil {
+				slog.Error("failed to persist worktree info", "id", runID, "error", err)
+			}
+		}
 	}
 }

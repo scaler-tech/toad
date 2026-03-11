@@ -52,8 +52,12 @@ func RegisterLogsTool(srv *gomcp.Server, logFile string) {
 	})
 }
 
-// readLogs reads log lines from the file, filters them, and returns up to
-// maxLines matching lines in chronological order (tail behavior).
+// maxScanLines is the maximum number of lines read from the log file.
+// This caps memory usage for long-running daemons with large log files.
+const maxScanLines = 10000
+
+// readLogs reads the log file, keeps the last maxScanLines lines to bound
+// memory, filters them, and returns up to maxLines matches in chronological order.
 func readLogs(logFile string, maxLines int, level, search, since string) (string, error) {
 	f, err := os.Open(logFile)
 	if err != nil {
@@ -61,10 +65,14 @@ func readLogs(logFile string, maxLines int, level, search, since string) (string
 	}
 	defer f.Close()
 
-	var allLines []string
+	// Read all lines, then keep only the tail to bound memory.
+	var lines []string
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		allLines = append(allLines, scanner.Text())
+		lines = append(lines, scanner.Text())
+	}
+	if len(lines) > maxScanLines {
+		lines = lines[len(lines)-maxScanLines:]
 	}
 	if err := scanner.Err(); err != nil {
 		return "", fmt.Errorf("scanning log file: %w", err)
@@ -93,8 +101,8 @@ func readLogs(logFile string, maxLines int, level, search, since string) (string
 
 	// Filter from end for tail behavior, collect matches.
 	var matched []string
-	for i := len(allLines) - 1; i >= 0 && len(matched) < maxLines; i-- {
-		line := allLines[i]
+	for i := len(lines) - 1; i >= 0 && len(matched) < maxLines; i-- {
+		line := lines[i]
 		if line == "" {
 			continue
 		}
@@ -263,6 +271,12 @@ func RegisterAskTool(srv *gomcp.Server, deps *AskDeps) {
 		repo := deps.Resolver.Resolve(repoHint, tr.FilesHint)
 		if repo == nil {
 			repo = config.PrimaryRepo(deps.Repos)
+		}
+		if repo == nil {
+			return &gomcp.CallToolResult{
+				Content: []gomcp.Content{&gomcp.TextContent{Text: "No repo configured. Please specify a repo or set a primary repo in config."}},
+				IsError: true,
+			}, nil, nil
 		}
 
 		repoPath := repo.Path

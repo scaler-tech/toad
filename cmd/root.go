@@ -248,14 +248,16 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Initialize digest engine (Toad King) if enabled
 	var digestEngine *digest.Engine
 	if cfg.Digest.Enabled {
-		digestEngine = digest.New(&cfg.Digest, agentProvider, cfg.Triage.Model,
-			func(ctx context.Context, task tadpole.Task) error {
+		digestEngine = digest.New(&cfg.Digest, digest.EngineOpts{
+			AgentProvider: agentProvider,
+			TriageModel:   cfg.Triage.Model,
+			Spawn: func(ctx context.Context, task tadpole.Task) error {
 				return tadpolePool.Spawn(ctx, task)
 			},
-			func(channel, threadTS, text string) {
+			Notify: func(channel, threadTS, text string) {
 				slackClient.ReplyInThread(channel, threadTS, text)
 			},
-			func(notice digest.InvestigationNotice) {
+			NotifyInvestigation: func(notice digest.InvestigationNotice) {
 				text := notice.Text
 
 				// Determine if this is a bot message needing active outreach
@@ -331,26 +333,26 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 					}
 				}
 			},
-			func(ctx context.Context, opp digest.Opportunity, msg digest.Message, tickets []digest.TicketContext) (*digest.InvestigateResult, error) {
+			Investigate: func(ctx context.Context, opp digest.Opportunity, msg digest.Message, tickets []digest.TicketContext) (*digest.InvestigateResult, error) {
 				return investigateOpportunity(ctx, cfg, agentProvider, opp, msg, resolver, tickets)
 			},
-			func(channel, timestamp, emoji string) {
+			React: func(channel, timestamp, emoji string) {
 				slackClient.React(channel, timestamp, emoji)
 			},
-			stateManager.Claim,
-			stateManager.Unclaim,
-			resolver.Resolve,
-			repoPaths,
-			profiles,
-			stateDB,
-			tracker,
-			func(channel, timestamp string) (string, error) {
+			Claim:       stateManager.Claim,
+			Unclaim:     stateManager.Unclaim,
+			ResolveRepo: resolver.Resolve,
+			RepoPaths:   repoPaths,
+			Profiles:    profiles,
+			DB:          stateDB,
+			Tracker:     tracker,
+			GetPermalink: func(channel, timestamp string) (string, error) {
 				return slackClient.GetPermalink(channel, timestamp)
 			},
-			cfg.IssueTracker.RespectAssignees,
-			cfg.IssueTracker.StaleDays,
-			personalityMgr,
-		)
+			RespectAssignees: cfg.IssueTracker.RespectAssignees,
+			StaleDays:        cfg.IssueTracker.StaleDays,
+			Personality:      personalityMgr,
+		})
 	}
 
 	// 10. Set up message handler — dispatch into goroutines so the event loop stays responsive

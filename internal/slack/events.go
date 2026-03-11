@@ -210,13 +210,25 @@ func (c *Client) ResolveUserName(userID string) string {
 	return user.RealName
 }
 
-// ResolveChannelName fetches the name for a Slack channel ID.
+// ResolveChannelName returns the name for a Slack channel ID, using a cache
+// to avoid redundant API calls on every incoming message.
 func (c *Client) ResolveChannelName(channelID string) string {
+	c.channelNamesMu.RLock()
+	if name, ok := c.channelNames[channelID]; ok {
+		c.channelNamesMu.RUnlock()
+		return name
+	}
+	c.channelNamesMu.RUnlock()
+
 	ch, err := c.api.GetConversationInfo(&slack.GetConversationInfoInput{
 		ChannelID: channelID,
 	})
 	if err != nil {
 		return channelID
 	}
+
+	c.channelNamesMu.Lock()
+	c.channelNames[channelID] = ch.Name
+	c.channelNamesMu.Unlock()
 	return ch.Name
 }
