@@ -117,6 +117,14 @@ func handleMessage(ctx context.Context, c *Client, ev *slackevents.MessageEvent)
 	isBot := ev.BotID != ""
 	triggered := !isBot && hasKeywordTrigger(fullText, c.triggers.Keywords)
 
+	// Personality feedback: thread replies to Toad messages (non-mention, non-bot).
+	if ev.ThreadTimeStamp != "" && !isBot && c.personalityTextHandler != nil {
+		if c.IsToadReply(ev.Channel, ev.ThreadTimeStamp) {
+			c.personalityTextHandler(ctx, fullText, ev.Channel, ev.ThreadTimeStamp)
+			// Don't return — the message should still be dispatched to the regular handler
+		}
+	}
+
 	msg := &IncomingMessage{
 		Text:            fullText,
 		Channel:         ev.Channel,
@@ -137,6 +145,14 @@ func handleMessage(ctx context.Context, c *Client, ev *slackevents.MessageEvent)
 
 func handleReaction(ctx context.Context, c *Client, ev *slackevents.ReactionAddedEvent) {
 	slog.Debug("reaction event", "emoji", ev.Reaction, "user", ev.User, "channel", ev.Item.Channel)
+
+	// Personality feedback: non-trigger reactions on Toad's own messages.
+	if ev.Reaction != c.triggers.Emoji && c.personalityHandler != nil {
+		if c.inChannel(ev.Item.Channel) && c.IsToadReply(ev.Item.Channel, ev.Item.Timestamp) {
+			c.personalityHandler(ctx, ev.Reaction, ev.Item.Channel, ev.Item.Timestamp)
+			return
+		}
+	}
 
 	if ev.Reaction != c.triggers.Emoji {
 		slog.Debug("skipping: non-trigger emoji", "emoji", ev.Reaction, "trigger", c.triggers.Emoji)

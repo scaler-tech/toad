@@ -10,6 +10,7 @@ import (
 
 	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/personality"
 	"github.com/scaler-tech/toad/internal/triage"
 )
 
@@ -29,14 +30,16 @@ type Engine struct {
 	agent          agent.Provider
 	model          string
 	timeoutMinutes int
+	personality    *personality.Manager
 }
 
 // New creates a ribbit engine.
-func New(agentProvider agent.Provider, cfg *config.Config) *Engine {
+func New(agentProvider agent.Provider, cfg *config.Config, mgr *personality.Manager) *Engine {
 	return &Engine{
 		agent:          agentProvider,
 		model:          cfg.Agent.Model,
 		timeoutMinutes: cfg.Limits.TimeoutMinutes,
+		personality:    mgr,
 	}
 }
 
@@ -120,6 +123,18 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 
 	prompt := fmt.Sprintf(ribbitPrompt, messageText, triageCtx)
 
+	maxTurns := 10
+	if e.personality != nil {
+		frags := e.personality.PromptFragments(personality.ModeRibbit)
+		if len(frags) > 0 {
+			prompt += "\n\n## Personality instructions\n\n" + strings.Join(frags, "\n")
+		}
+		ov := e.personality.ConfigOverrides(personality.ModeRibbit)
+		if ov.MaxTurns != nil {
+			maxTurns = *ov.MaxTurns
+		}
+	}
+
 	slog.Debug("running ribbit", "model", e.model, "repo", repoPath)
 
 	additionalDirs := make([]string, 0, len(repoPaths))
@@ -130,7 +145,7 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 	result, err := e.agent.Run(ctx, agent.RunOpts{
 		Prompt:         prompt,
 		Model:          e.model,
-		MaxTurns:       10,
+		MaxTurns:       maxTurns,
 		Timeout:        time.Duration(e.timeoutMinutes) * time.Minute,
 		Permissions:    agent.PermissionReadOnly,
 		WorkDir:        repoPath,

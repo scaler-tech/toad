@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,12 +25,14 @@ import (
 	"github.com/scaler-tech/toad/internal/issuetracker"
 	toadlog "github.com/scaler-tech/toad/internal/log"
 	toadmcp "github.com/scaler-tech/toad/internal/mcp"
+	"github.com/scaler-tech/toad/internal/personality"
 	"github.com/scaler-tech/toad/internal/preflight"
 	"github.com/scaler-tech/toad/internal/reviewer"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/tadpole"
+	"github.com/scaler-tech/toad/internal/toadpath"
 	"github.com/scaler-tech/toad/internal/triage"
 	"github.com/scaler-tech/toad/internal/tui"
 	"github.com/scaler-tech/toad/internal/update"
@@ -134,12 +137,38 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("hydrating state: %w", err)
 	}
 
+	// Initialize personality manager
+	var personalityMgr *personality.Manager
+	if cfg.Personality.Enabled {
+		pfPath := cfg.Personality.FilePath
+		if pfPath == "" {
+			home, err := toadpath.Home()
+			if err != nil {
+				return fmt.Errorf("resolving toad home: %w", err)
+			}
+			pfPath = filepath.Join(home, "personality.yaml")
+		}
+		pf, err := personality.LoadFile(pfPath)
+		if err != nil {
+			return fmt.Errorf("loading personality: %w", err)
+		}
+		personalityMgr, err = personality.NewPersistentManager(stateDB, pf.Traits)
+		if err != nil {
+			return fmt.Errorf("initializing personality: %w", err)
+		}
+		personalityMgr.SetLearning(cfg.Personality.LearningEnabled)
+		slog.Info("personality loaded", "name", pf.Name, "learning", cfg.Personality.LearningEnabled)
+	} else {
+		personalityMgr = personality.NewManager(personality.DefaultTraits())
+		personalityMgr.SetLearning(false)
+	}
+
 	// Build repo profiles and resolver for multi-repo routing
 	profiles := config.BuildProfiles(cfg.Repos.List)
 	resolver := config.NewResolver(profiles, cfg.Repos.List)
 
 	triageEngine := triage.New(agentProvider, cfg.Triage.Model, profiles)
-	ribbitEngine := ribbit.New(agentProvider, cfg)
+	ribbitEngine := ribbit.New(agentProvider, cfg, personalityMgr)
 
 	// Separate concurrency pools: ribbits are fast (seconds), tadpoles are slow (minutes).
 	// Ribbit pool is generous so Q&A stays responsive even while tadpoles run.
@@ -150,7 +179,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	slackClient := islack.NewClient(cfg.Slack)
 
 	// Initialize tadpole runner and pool (with Slack client for status updates)
-	tadpoleRunner := tadpole.NewRunner(cfg, agentProvider, slackClient, stateManager, vcsResolver)
+	tadpoleRunner := tadpole.NewRunner(cfg, agentProvider, slackClient, stateManager, vcsResolver, personalityMgr)
 	tadpolePool := tadpole.NewPool(tadpoleSem, tadpoleRunner)
 
 	// Initialize issue tracker
@@ -176,6 +205,15 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		}
 		prWatcher.TrackPR(prNum, prURL, branch, runID, task.SlackChannel, task.SlackThreadTS, repoPath, task.Summary, task.Description)
 	})
+
+	// Wire personality outcome callback for PR terminal state signals
+	if cfg.Personality.Enabled {
+		prWatcher.OnPersonalityOutcome(func(signal personality.OutcomeSignal) {
+			if err := personalityMgr.ProcessOutcome(signal); err != nil {
+				slog.Warn("personality outcome processing failed", "error", err)
+			}
+		})
+	}
 
 	// Build path → name map for cross-repo prompts and path scrubbing
 	repoPaths := make(map[string]string, len(cfg.Repos.List))
@@ -311,6 +349,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			},
 			cfg.IssueTracker.RespectAssignees,
 			cfg.IssueTracker.StaleDays,
+			personalityMgr,
 		)
 	}
 
@@ -323,6 +362,19 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			handleMessage(ctx, msg, cfg, agentProvider, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, tadpolePool, digestEngine, tracker, resolver, repoPaths)
 		}()
 	})
+
+	if cfg.Personality.Enabled && personalityMgr.LearningEnabled() {
+		slackClient.OnPersonalityReaction(func(ctx context.Context, emoji, channel, ts string) {
+			if err := personalityMgr.ProcessEmoji(emoji, fmt.Sprintf("channel:%s ts:%s", channel, ts)); err != nil {
+				slog.Debug("personality emoji not mapped", "emoji", emoji)
+			}
+		})
+		slackClient.OnPersonalityText(func(ctx context.Context, text, channel, threadTS string) {
+			if err := personalityMgr.ProcessText(text, fmt.Sprintf("channel:%s ts:%s", channel, threadTS)); err != nil {
+				slog.Debug("personality text processing failed", "error", err)
+			}
+		})
+	}
 
 	// 11. Handle graceful shutdown (SIGINT/SIGTERM exit, SIGUSR1 restart)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

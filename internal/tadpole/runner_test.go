@@ -14,7 +14,7 @@ func TestBuildTadpolePrompt(t *testing.T) {
 		Summary:     "nil pointer fix",
 		Category:    "bug",
 	}
-	prompt := buildTadpolePrompt(task, 5, nil)
+	prompt := buildTadpolePrompt(task, 5, nil, nil)
 
 	if !strings.Contains(prompt, "Fix the nil pointer in handler.go") {
 		t.Error("prompt should contain task description")
@@ -35,7 +35,7 @@ func TestBuildTadpolePrompt_WithTriageHints(t *testing.T) {
 			FilesHint: []string{"handler.go", "server.go"},
 		},
 	}
-	prompt := buildTadpolePrompt(task, 5, nil)
+	prompt := buildTadpolePrompt(task, 5, nil, nil)
 
 	if !strings.Contains(prompt, "nil, pointer") {
 		t.Error("prompt should contain keywords")
@@ -49,7 +49,7 @@ func TestBuildTadpolePrompt_NoTriageResult(t *testing.T) {
 	task := Task{
 		Description: "Fix bug",
 	}
-	prompt := buildTadpolePrompt(task, 5, nil)
+	prompt := buildTadpolePrompt(task, 5, nil, nil)
 
 	// Should not panic and should still contain rules
 	if !strings.Contains(prompt, "Rules") {

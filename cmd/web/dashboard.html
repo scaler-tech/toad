@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>toad dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   :root {
     --bg: #0d1117;
@@ -347,6 +348,96 @@
     .two-col { grid-template-columns: 1fr; }
     body { padding: 12px; }
   }
+
+  /* Personality section */
+  .personality-grid {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+  .personality-chart-wrap {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .personality-chart-wrap canvas { max-width: 300px; max-height: 300px; }
+  .personality-chart-legend {
+    display: flex; gap: 16px; margin-top: 10px; font-size: 11px; color: var(--dim);
+  }
+  .personality-chart-legend span { display: flex; align-items: center; gap: 5px; }
+  .personality-chart-legend .swatch {
+    width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0;
+  }
+  .personality-traits-wrap {
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .trait-category {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px;
+  }
+  .trait-category-title {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--dim); margin-bottom: 10px;
+  }
+  .trait-row {
+    display: grid; grid-template-columns: 140px 1fr 40px;
+    align-items: center; gap: 8px; padding: 3px 0;
+  }
+  .trait-name {
+    font-size: 12px; color: var(--text); font-family: "SF Mono","Fira Code",Menlo,Consolas,monospace;
+  }
+  .trait-slider {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 4px; border-radius: 2px;
+    background: var(--border); outline: none; cursor: pointer;
+  }
+  .trait-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent); cursor: pointer;
+    border: 2px solid var(--bg);
+  }
+  .trait-slider::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent); cursor: pointer;
+    border: 2px solid var(--bg);
+  }
+  .trait-val {
+    font-size: 12px; color: var(--dim); text-align: right;
+    font-variant-numeric: tabular-nums; font-family: "SF Mono","Fira Code",Menlo,Consolas,monospace;
+  }
+  .personality-footer {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 16px; margin-top: 12px;
+  }
+  .adj-feed {
+    flex: 1; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px; min-height: 60px;
+  }
+  .adj-feed-title {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--dim); margin-bottom: 8px;
+  }
+  .adj-item {
+    display: flex; gap: 8px; padding: 3px 0;
+    font-size: 12px; border-bottom: 1px solid var(--border);
+    align-items: baseline;
+  }
+  .adj-item:last-child { border-bottom: none; }
+  .adj-trait { color: var(--blue); font-family: "SF Mono","Fira Code",Menlo,Consolas,monospace; flex-shrink: 0; }
+  .adj-delta-pos { color: var(--green); font-weight: 600; flex-shrink: 0; }
+  .adj-delta-neg { color: var(--red); font-weight: 600; flex-shrink: 0; }
+  .adj-source { color: var(--dim); flex-shrink: 0; }
+  .adj-reasoning { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .adj-time { color: var(--dim); font-size: 11px; flex-shrink: 0; }
+  .personality-export-wrap {
+    display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+  }
+  @media (max-width: 900px) {
+    .personality-grid { grid-template-columns: 1fr; }
+    .personality-chart-wrap canvas { max-width: 260px; max-height: 260px; }
+  }
 </style>
 </head>
 <body>
@@ -446,6 +537,72 @@
 <section id="watches-section" style="display:none">
   <h2><span id="watches-noun">PR</span> Watches <span class="count" id="watches-count">0</span></h2>
   <div class="table-wrap" id="watches-wrap"></div>
+</section>
+
+<!-- Personality -->
+<section id="personality-section">
+  <h2 class="section-header collapsed" id="personality-header" onclick="togglePersonality()">Personality <span class="chevron">&#x25BC;</span></h2>
+  <div id="personality-panel" style="display:none">
+    <div class="personality-grid">
+      <!-- Radar chart -->
+      <div class="personality-chart-wrap">
+        <canvas id="personality-radar" width="300" height="300"></canvas>
+        <div class="personality-chart-legend">
+          <span><span class="swatch" style="background:rgba(88,166,255,0.8)"></span>Effective</span>
+          <span><span class="swatch" style="background:rgba(188,140,255,0.4)"></span>Base</span>
+        </div>
+      </div>
+      <!-- Trait sliders -->
+      <div class="personality-traits-wrap" id="personality-traits">
+        <div class="trait-category">
+          <div class="trait-category-title">Investigation &amp; Analysis</div>
+          <div class="trait-row"><span class="trait-name">thoroughness</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="thoroughness" oninput="onSliderInput(this)"><span class="trait-val" id="tv-thoroughness">-</span></div>
+          <div class="trait-row"><span class="trait-name">context_hunger</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="context_hunger" oninput="onSliderInput(this)"><span class="trait-val" id="tv-context_hunger">-</span></div>
+          <div class="trait-row"><span class="trait-name">confidence_threshold</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="confidence_threshold" oninput="onSliderInput(this)"><span class="trait-val" id="tv-confidence_threshold">-</span></div>
+          <div class="trait-row"><span class="trait-name">pattern_recognition</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="pattern_recognition" oninput="onSliderInput(this)"><span class="trait-val" id="tv-pattern_recognition">-</span></div>
+        </div>
+        <div class="trait-category">
+          <div class="trait-category-title">Action &amp; Execution</div>
+          <div class="trait-row"><span class="trait-name">risk_tolerance</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="risk_tolerance" oninput="onSliderInput(this)"><span class="trait-val" id="tv-risk_tolerance">-</span></div>
+          <div class="trait-row"><span class="trait-name">scope_appetite</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="scope_appetite" oninput="onSliderInput(this)"><span class="trait-val" id="tv-scope_appetite">-</span></div>
+          <div class="trait-row"><span class="trait-name">test_affinity</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="test_affinity" oninput="onSliderInput(this)"><span class="trait-val" id="tv-test_affinity">-</span></div>
+          <div class="trait-row"><span class="trait-name">creativity</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="creativity" oninput="onSliderInput(this)"><span class="trait-val" id="tv-creativity">-</span></div>
+          <div class="trait-row"><span class="trait-name">retry_persistence</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="retry_persistence" oninput="onSliderInput(this)"><span class="trait-val" id="tv-retry_persistence">-</span></div>
+        </div>
+        <div class="trait-category">
+          <div class="trait-category-title">Quality &amp; Standards</div>
+          <div class="trait-row"><span class="trait-name">strictness</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="strictness" oninput="onSliderInput(this)"><span class="trait-val" id="tv-strictness">-</span></div>
+          <div class="trait-row"><span class="trait-name">pattern_conformity</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="pattern_conformity" oninput="onSliderInput(this)"><span class="trait-val" id="tv-pattern_conformity">-</span></div>
+          <div class="trait-row"><span class="trait-name">documentation_drive</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="documentation_drive" oninput="onSliderInput(this)"><span class="trait-val" id="tv-documentation_drive">-</span></div>
+          <div class="trait-row"><span class="trait-name">speed_vs_polish</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="speed_vs_polish" oninput="onSliderInput(this)"><span class="trait-val" id="tv-speed_vs_polish">-</span></div>
+        </div>
+        <div class="trait-category">
+          <div class="trait-category-title">Communication</div>
+          <div class="trait-row"><span class="trait-name">verbosity</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="verbosity" oninput="onSliderInput(this)"><span class="trait-val" id="tv-verbosity">-</span></div>
+          <div class="trait-row"><span class="trait-name">explanation_depth</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="explanation_depth" oninput="onSliderInput(this)"><span class="trait-val" id="tv-explanation_depth">-</span></div>
+          <div class="trait-row"><span class="trait-name">notification_eagerness</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="notification_eagerness" oninput="onSliderInput(this)"><span class="trait-val" id="tv-notification_eagerness">-</span></div>
+          <div class="trait-row"><span class="trait-name">defensiveness</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="defensiveness" oninput="onSliderInput(this)"><span class="trait-val" id="tv-defensiveness">-</span></div>
+          <div class="trait-row"><span class="trait-name">tone</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="tone" oninput="onSliderInput(this)"><span class="trait-val" id="tv-tone">-</span></div>
+        </div>
+        <div class="trait-category">
+          <div class="trait-category-title">Autonomy &amp; Initiative</div>
+          <div class="trait-row"><span class="trait-name">autonomy</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="autonomy" oninput="onSliderInput(this)"><span class="trait-val" id="tv-autonomy">-</span></div>
+          <div class="trait-row"><span class="trait-name">collaboration</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="collaboration" oninput="onSliderInput(this)"><span class="trait-val" id="tv-collaboration">-</span></div>
+          <div class="trait-row"><span class="trait-name">initiative</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="initiative" oninput="onSliderInput(this)"><span class="trait-val" id="tv-initiative">-</span></div>
+          <div class="trait-row"><span class="trait-name">scope_sensitivity</span><input class="trait-slider" type="range" min="0" max="1" step="0.01" data-trait="scope_sensitivity" oninput="onSliderInput(this)"><span class="trait-val" id="tv-scope_sensitivity">-</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="personality-footer">
+      <div class="adj-feed">
+        <div class="adj-feed-title">Recent Adjustments</div>
+        <div id="adj-feed-items"><span class="empty">No adjustments yet</span></div>
+      </div>
+      <div class="personality-export-wrap">
+        <a class="action-btn" href="/api/personality/export" download="personality.yaml">Export</a>
+      </div>
+    </div>
+  </div>
 </section>
 
 <!-- Config -->
@@ -1174,6 +1331,183 @@ document.addEventListener('keydown', (e) => {
 
 refresh();
 setInterval(refresh, 2000);
+
+// ── Personality ──────────────────────────────────────────────────────────────
+
+let personalityExpanded = false;
+let personalityChart = null;
+
+const TRAIT_NAMES = [
+  'thoroughness','context_hunger','confidence_threshold','pattern_recognition',
+  'risk_tolerance','scope_appetite','test_affinity','creativity','retry_persistence',
+  'strictness','pattern_conformity','documentation_drive','speed_vs_polish',
+  'verbosity','explanation_depth','notification_eagerness','defensiveness','tone',
+  'autonomy','collaboration','initiative','scope_sensitivity'
+];
+
+const TRAIT_LABELS = TRAIT_NAMES.map(t => t.replace(/_/g, ' '));
+
+function togglePersonality() {
+  personalityExpanded = !personalityExpanded;
+  const panel = document.getElementById('personality-panel');
+  const header = document.getElementById('personality-header');
+  panel.style.display = personalityExpanded ? '' : 'none';
+  header.className = 'section-header' + (personalityExpanded ? '' : ' collapsed');
+  if (personalityExpanded) loadPersonality();
+}
+
+async function loadPersonality() {
+  let data;
+  try {
+    const resp = await fetch('/api/personality');
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch (e) { return; }
+
+  const eff = data.effective || {};
+  const base = data.base || {};
+
+  // Update sliders and value labels
+  for (const trait of TRAIT_NAMES) {
+    const val = eff[trait] != null ? eff[trait] : 0;
+    const slider = document.querySelector('[data-trait="' + trait + '"]');
+    if (slider) slider.value = val;
+    const lbl = document.getElementById('tv-' + trait);
+    if (lbl) lbl.textContent = val.toFixed(2);
+  }
+
+  // Build chart datasets
+  const effData = TRAIT_NAMES.map(t => eff[t] != null ? eff[t] : 0);
+  const baseData = TRAIT_NAMES.map(t => base[t] != null ? base[t] : 0);
+
+  renderRadarChart(effData, baseData);
+
+  // Render adjustments feed
+  renderAdjFeed(data.adjustments || []);
+}
+
+function renderRadarChart(effData, baseData) {
+  const canvas = document.getElementById('personality-radar');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+
+  if (personalityChart) {
+    personalityChart.data.datasets[0].data = effData;
+    personalityChart.data.datasets[1].data = baseData;
+    personalityChart.update();
+    return;
+  }
+
+  personalityChart = new Chart(ctx, {
+    type: 'radar',
+    data: {
+      labels: TRAIT_LABELS,
+      datasets: [
+        {
+          label: 'Effective',
+          data: effData,
+          backgroundColor: 'rgba(88,166,255,0.15)',
+          borderColor: 'rgba(88,166,255,0.8)',
+          borderWidth: 2,
+          pointBackgroundColor: 'rgba(88,166,255,0.9)',
+          pointRadius: 2,
+        },
+        {
+          label: 'Base',
+          data: baseData,
+          backgroundColor: 'rgba(188,140,255,0.07)',
+          borderColor: 'rgba(188,140,255,0.35)',
+          borderWidth: 1,
+          pointRadius: 0,
+          borderDash: [4, 3],
+        }
+      ]
+    },
+    options: {
+      responsive: false,
+      scales: {
+        r: {
+          min: 0, max: 1,
+          ticks: {
+            stepSize: 0.25,
+            display: false,
+          },
+          grid: { color: 'rgba(48,54,61,0.8)' },
+          angleLines: { color: 'rgba(48,54,61,0.8)' },
+          pointLabels: {
+            color: '#7d8590',
+            font: { size: 9 }
+          }
+        }
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: function(ctx) {
+              return ctx.dataset.label + ': ' + ctx.raw.toFixed(2);
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function renderAdjFeed(adjs) {
+  const container = document.getElementById('adj-feed-items');
+  if (!container) return;
+  if (!adjs || adjs.length === 0) {
+    container.innerHTML = '<span class="empty">No adjustments yet</span>';
+    return;
+  }
+  const recent = adjs.slice(0, 8);
+  container.innerHTML = recent.map(a => {
+    const sign = a.delta >= 0 ? '+' : '';
+    const deltaClass = a.delta >= 0 ? 'adj-delta-pos' : 'adj-delta-neg';
+    const note = a.reasoning || a.trigger_detail || '';
+    const src = a.source ? '[' + esc(a.source) + ']' : '';
+    const when = a.created_at ? fmtRelTime(a.created_at) : '';
+    return '<div class="adj-item">' +
+      '<span class="adj-trait">' + esc(a.trait) + '</span>' +
+      '<span class="' + deltaClass + '">' + sign + a.delta.toFixed(3) + '</span>' +
+      (src ? '<span class="adj-source">' + src + '</span>' : '') +
+      (note ? '<span class="adj-reasoning">' + esc(note) + '</span>' : '') +
+      (when ? '<span class="adj-time">' + when + '</span>' : '') +
+      '</div>';
+  }).join('');
+}
+
+function fmtRelTime(ts) {
+  try {
+    const d = new Date(ts);
+    const diff = Math.round((Date.now() - d.getTime()) / 1000);
+    if (diff < 60) return diff + 's ago';
+    if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+    return Math.floor(diff/86400) + 'd ago';
+  } catch (e) { return ''; }
+}
+
+let sliderDebounceTimers = {};
+function onSliderInput(slider) {
+  const trait = slider.dataset.trait;
+  const val = parseFloat(slider.value);
+  const lbl = document.getElementById('tv-' + trait);
+  if (lbl) lbl.textContent = val.toFixed(2);
+
+  clearTimeout(sliderDebounceTimers[trait]);
+  sliderDebounceTimers[trait] = setTimeout(async () => {
+    try {
+      await fetch('/api/personality', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trait: trait, value: val, note: 'dashboard slider' })
+      });
+      await loadPersonality();
+    } catch (e) { /* ignore */ }
+  }, 400);
+}
 </script>
 </body>
 </html>

@@ -23,6 +23,7 @@ type Config struct {
 	Agent        AgentConfig        `yaml:"agent"`
 	Log          LogConfig          `yaml:"log"`
 	MCP          MCPConfig          `yaml:"mcp"`
+	Personality  PersonalityConfig  `yaml:"personality"`
 }
 
 type SlackConfig struct {
@@ -141,6 +142,12 @@ type MCPConfig struct {
 	Message string   `yaml:"message"` // optional message included in the connect DM
 }
 
+type PersonalityConfig struct {
+	Enabled         bool   `yaml:"enabled"`          // default: false (opt-in)
+	LearningEnabled bool   `yaml:"learning_enabled"` // default: true
+	FilePath        string `yaml:"file_path"`        // default: ~/.toad/personality.yaml
+}
+
 func defaults() *Config {
 	home, _ := toadpath.Home()
 
@@ -199,6 +206,10 @@ func defaults() *Config {
 			Enabled: false,
 			Host:    "localhost",
 			Port:    8099,
+		},
+		Personality: PersonalityConfig{
+			Enabled:         false,
+			LearningEnabled: true,
 		},
 	}
 }

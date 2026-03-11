@@ -11,6 +11,7 @@ import (
 
 	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/personality"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/tadpole"
@@ -20,20 +21,24 @@ import (
 // SpawnFunc spawns a tadpole task. Typically wraps tadpole.Pool.Spawn.
 type SpawnFunc func(ctx context.Context, task tadpole.Task) error
 
+// OutcomeCallback is called when a PR reaches a terminal state (merged or closed).
+type OutcomeCallback func(signal personality.OutcomeSignal)
+
 // Watcher polls toad PRs for new review comments and spawns fix tadpoles.
 type Watcher struct {
-	db              *state.DB
-	repos           []config.RepoConfig
-	spawn           SpawnFunc
-	slack           *islack.Client
-	agent           agent.Provider
-	vcs             vcs.Resolver
-	interval        time.Duration
-	maxReviewRounds int
-	maxCIFixRounds  int
-	triageModel     string
-	reviewBots      map[string]bool // bot usernames whose comments can trigger fixes
-	pollTick        uint64
+	db                 *state.DB
+	repos              []config.RepoConfig
+	spawn              SpawnFunc
+	slack              *islack.Client
+	agent              agent.Provider
+	vcs                vcs.Resolver
+	interval           time.Duration
+	maxReviewRounds    int
+	maxCIFixRounds     int
+	triageModel        string
+	reviewBots         map[string]bool // bot usernames whose comments can trigger fixes
+	pollTick           uint64
+	personalityOutcome OutcomeCallback
 }
 
 // NewWatcher creates a PR review watcher.
@@ -61,6 +66,11 @@ func NewWatcher(db *state.DB, repos []config.RepoConfig, spawn SpawnFunc, slack 
 		triageModel:     triageModel,
 		reviewBots:      botSet,
 	}
+}
+
+// OnPersonalityOutcome registers a callback to be called when a PR reaches a terminal state.
+func (w *Watcher) OnPersonalityOutcome(cb OutcomeCallback) {
+	w.personalityOutcome = cb
 }
 
 // Run starts the polling loop. Blocks until ctx is canceled.
@@ -142,7 +152,19 @@ func (w *Watcher) checkPR(ctx context.Context, watch *state.PRWatch) error {
 	}
 	if !strings.EqualFold(prState, "open") {
 		slog.Info("PR closed/merged, stopping watch", "pr", watch.PRNumber, "state", prState)
-		return w.db.ClosePRWatch(watch.PRNumber, strings.ToUpper(prState))
+		finalState := strings.ToUpper(prState)
+		if w.personalityOutcome != nil {
+			sigType := "pr_closed"
+			if strings.EqualFold(finalState, "MERGED") {
+				sigType = "pr_merged"
+			}
+			w.personalityOutcome(personality.OutcomeSignal{
+				Type:         sigType,
+				PRURL:        watch.PRURL,
+				ReviewRounds: watch.FixCount,
+			})
+		}
+		return w.db.ClosePRWatch(watch.PRNumber, finalState)
 	}
 
 	// 2. Check for merge conflicts (takes priority — can't review/CI a conflicting PR)

@@ -15,6 +15,7 @@ import (
 	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/personality"
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/tadpole"
 )
@@ -133,6 +134,7 @@ type Engine struct {
 	getPermalink        GetPermalinkFunc
 	respectAssignees    bool
 	staleDays           int
+	personality         *personality.Manager
 
 	mu     sync.Mutex
 	buffer []Message
@@ -150,7 +152,7 @@ type Engine struct {
 }
 
 // New creates a digest engine.
-func New(cfg *config.DigestConfig, agentProvider agent.Provider, triageModel string, spawn SpawnFunc, notify NotifyFunc, notifyInvestigation NotifyInvestigationFunc, investigate InvestigateFunc, react ReactFunc, claim ClaimFunc, unclaim UnclaimFunc, resolveRepo ResolveRepoFunc, repoPaths map[string]string, profiles []config.RepoProfile, db *state.DB, tracker issuetracker.Tracker, getPermalink GetPermalinkFunc, respectAssignees bool, staleDays int) *Engine {
+func New(cfg *config.DigestConfig, agentProvider agent.Provider, triageModel string, spawn SpawnFunc, notify NotifyFunc, notifyInvestigation NotifyInvestigationFunc, investigate InvestigateFunc, react ReactFunc, claim ClaimFunc, unclaim UnclaimFunc, resolveRepo ResolveRepoFunc, repoPaths map[string]string, profiles []config.RepoProfile, db *state.DB, tracker issuetracker.Tracker, getPermalink GetPermalinkFunc, respectAssignees bool, staleDays int, mgr *personality.Manager) *Engine {
 	e := &Engine{
 		cfg:                 cfg,
 		agent:               agentProvider,
@@ -169,6 +171,7 @@ func New(cfg *config.DigestConfig, agentProvider agent.Provider, triageModel str
 		getPermalink:        getPermalink,
 		respectAssignees:    respectAssignees,
 		staleDays:           staleDays,
+		personality:         mgr,
 		spawnHour:           time.Now().Hour(),
 	}
 	if len(profiles) > 1 {
@@ -997,7 +1000,14 @@ func (e *Engine) buildChunks(msgs []Message) []chunk {
 
 func (e *Engine) passesGuardrails(opp Opportunity) bool {
 	// Confidence check
-	if opp.Confidence < e.cfg.MinConfidence {
+	minConf := e.cfg.MinConfidence
+	if e.personality != nil {
+		ov := e.personality.ConfigOverrides(personality.ModeDigest)
+		if ov.MinConfidence != nil {
+			minConf = *ov.MinConfidence
+		}
+	}
+	if opp.Confidence < minConf {
 		return false
 	}
 

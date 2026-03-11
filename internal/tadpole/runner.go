@@ -14,6 +14,7 @@ import (
 	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/personality"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/triage"
@@ -48,11 +49,12 @@ type Runner struct {
 	stateManager *state.Manager
 	vcs          vcs.Resolver
 	onShip       ShipCallback
+	personality  *personality.Manager
 }
 
 // NewRunner creates a tadpole runner.
-func NewRunner(cfg *config.Config, agentProvider agent.Provider, slack *islack.Client, sm *state.Manager, vcsResolver vcs.Resolver) *Runner {
-	return &Runner{cfg: cfg, agent: agentProvider, slack: slack, stateManager: sm, vcs: vcsResolver}
+func NewRunner(cfg *config.Config, agentProvider agent.Provider, slack *islack.Client, sm *state.Manager, vcsResolver vcs.Resolver, mgr *personality.Manager) *Runner {
+	return &Runner{cfg: cfg, agent: agentProvider, slack: slack, stateManager: sm, vcs: vcsResolver, personality: mgr}
 }
 
 // OnShip registers a callback that fires after a successful PR is created.
@@ -135,11 +137,34 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	r.updateStatus(task, statusTS, ":hammer_and_wrench: Coding agent is working...")
 	r.stateManager.Update(runID, "running")
 
-	prompt := buildTadpolePrompt(task, r.cfg.Limits.MaxFilesChanged, task.RepoPaths)
+	maxTurns := r.cfg.Limits.MaxTurns
+	maxRetries := r.cfg.Limits.MaxRetries
+	valCfg := ValidateConfig{
+		TestCommand:     repo.TestCommand,
+		LintCommand:     repo.LintCommand,
+		MaxFilesChanged: r.cfg.Limits.MaxFilesChanged,
+		DefaultBranch:   repo.DefaultBranch,
+		Services:        repo.Services,
+		BaseCommit:      wt.BaseCommit,
+	}
+	if r.personality != nil {
+		ov := r.personality.ConfigOverrides(personality.ModeTadpole)
+		if ov.MaxTurns != nil {
+			maxTurns = *ov.MaxTurns
+		}
+		if ov.MaxRetries != nil {
+			maxRetries = *ov.MaxRetries
+		}
+		if ov.MaxFilesChanged != nil {
+			valCfg.MaxFilesChanged = *ov.MaxFilesChanged
+		}
+	}
+
+	prompt := buildTadpolePrompt(task, valCfg.MaxFilesChanged, task.RepoPaths, r.personality)
 	agentOut, err := r.agent.Run(ctx, agent.RunOpts{
 		Prompt:             prompt,
 		Model:              r.cfg.Agent.Model,
-		MaxTurns:           r.cfg.Limits.MaxTurns,
+		MaxTurns:           maxTurns,
 		Timeout:            time.Duration(r.cfg.Limits.TimeoutMinutes) * time.Minute,
 		Permissions:        agent.PermissionFull,
 		WorkDir:            wt.Path,
@@ -154,32 +179,23 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	r.updateStatus(task, statusTS, ":mag: Validating changes...")
 	r.stateManager.Update(runID, "validating")
 
-	valCfg := ValidateConfig{
-		TestCommand:     repo.TestCommand,
-		LintCommand:     repo.LintCommand,
-		MaxFilesChanged: r.cfg.Limits.MaxFilesChanged,
-		DefaultBranch:   repo.DefaultBranch,
-		Services:        repo.Services,
-		BaseCommit:      wt.BaseCommit, // non-empty for review fixes, diff against pre-agent state
-	}
-
 	valResult, err := Validate(ctx, wt.Path, valCfg)
 	if err != nil {
 		return fail(fmt.Sprintf("validation error: %s", err))
 	}
 
-	for attempt := 0; !valResult.Passed && attempt < r.cfg.Limits.MaxRetries; attempt++ {
+	for attempt := 0; !valResult.Passed && attempt < maxRetries; attempt++ {
 		slog.Info("validation failed, retrying",
-			"attempt", attempt+1, "max_retries", r.cfg.Limits.MaxRetries, "reason", valResult.FailReason)
+			"attempt", attempt+1, "max_retries", maxRetries, "reason", valResult.FailReason)
 
 		r.updateStatus(task, statusTS,
-			fmt.Sprintf(":recycle: Retry %d/%d — %s", attempt+1, r.cfg.Limits.MaxRetries, valResult.FailReason))
+			fmt.Sprintf(":recycle: Retry %d/%d — %s", attempt+1, maxRetries, valResult.FailReason))
 
 		retryPrompt := buildRetryPrompt(valResult)
 		_, err := r.agent.Run(ctx, agent.RunOpts{
 			Prompt:             retryPrompt,
 			Model:              r.cfg.Agent.Model,
-			MaxTurns:           r.cfg.Limits.MaxTurns,
+			MaxTurns:           maxTurns,
 			Timeout:            time.Duration(r.cfg.Limits.TimeoutMinutes) * time.Minute,
 			Permissions:        agent.PermissionFull,
 			WorkDir:            wt.Path,
@@ -476,7 +492,7 @@ func sanitizeForPR(text string, maxLen int) string {
 	return text
 }
 
-func buildTadpolePrompt(task Task, maxFiles int, repoPaths map[string]string) string {
+func buildTadpolePrompt(task Task, maxFiles int, repoPaths map[string]string, pm *personality.Manager) string {
 	var sb strings.Builder
 	sb.WriteString("You are a tadpole — a focused coding agent. Your job is to make a small, targeted code change.\n\n")
 
@@ -523,6 +539,16 @@ func buildTadpolePrompt(task Task, maxFiles int, repoPaths map[string]string) st
 		sb.WriteString("You can search these using Read, Glob, and Grep to understand cross-repo dependencies:\n")
 		for _, name := range repoPaths {
 			sb.WriteString("- " + name + "\n")
+		}
+	}
+
+	if pm != nil {
+		frags := pm.PromptFragments(personality.ModeTadpole)
+		if len(frags) > 0 {
+			sb.WriteString("\n## Personality instructions\n\n")
+			for _, f := range frags {
+				sb.WriteString("- " + f + "\n")
+			}
 		}
 	}
 

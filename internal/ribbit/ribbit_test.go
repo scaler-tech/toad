@@ -21,7 +21,7 @@ func TestRespond_RunOptsWiring(t *testing.T) {
 		Agent:  config.AgentConfig{Model: "sonnet"},
 		Limits: config.LimitsConfig{TimeoutMinutes: 10},
 	}
-	e := New(mock, cfg)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{
 		Summary:  "nil pointer",
@@ -80,7 +80,7 @@ func TestRespond_EmptyResult(t *testing.T) {
 		Agent:  config.AgentConfig{Model: "sonnet"},
 		Limits: config.LimitsConfig{TimeoutMinutes: 5},
 	}
-	e := New(mock, cfg)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
 	_, err := e.Respond(context.Background(), "test", tr, nil, "/repo", nil)
@@ -97,7 +97,7 @@ func TestRespond_ProviderError(t *testing.T) {
 		Agent:  config.AgentConfig{Model: "sonnet"},
 		Limits: config.LimitsConfig{TimeoutMinutes: 5},
 	}
-	e := New(mock, cfg)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
 	_, err := e.Respond(context.Background(), "test", tr, nil, "/repo", nil)
@@ -116,7 +116,7 @@ func TestRespond_PriorContext(t *testing.T) {
 		Agent:  config.AgentConfig{Model: "sonnet"},
 		Limits: config.LimitsConfig{TimeoutMinutes: 5},
 	}
-	e := New(mock, cfg)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "follow-up"}
 	prior := &PriorContext{

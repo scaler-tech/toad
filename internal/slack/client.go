@@ -45,21 +45,29 @@ func (m *IncomingMessage) ThreadTS() string {
 // MessageHandler is called for each incoming message.
 type MessageHandler func(ctx context.Context, msg *IncomingMessage)
 
+// PersonalityReactionHandler is called when a non-trigger emoji is added to a Toad message.
+type PersonalityReactionHandler func(ctx context.Context, emoji, channel, ts string)
+
+// PersonalityTextHandler is called when a thread reply is posted in a Toad thread.
+type PersonalityTextHandler func(ctx context.Context, text, channel, threadTS string)
+
 // Client manages the Slack Socket Mode connection and event routing.
 type Client struct {
-	api          *slack.Client
-	socket       *socketmode.Client
-	cfgChannels  map[string]bool // channel names from config (empty = all)
-	channels     map[string]bool // resolved channel IDs to monitor (empty when cfgChannels is empty)
-	triggers     config.Triggers
-	handler      MessageHandler
-	botUserID    string
-	seen         map[string]time.Time // dedup: key → first-seen time
-	seenMu       sync.Mutex
-	replies      map[string]time.Time // toad's own reply timestamps (channel:ts → sent time)
-	repliesMu    sync.Mutex
-	pathScrubber func(string) string  // replaces absolute paths with repo-relative
-	mcpHandler   *SlashCommandHandler // handles /toad slash commands
+	api                    *slack.Client
+	socket                 *socketmode.Client
+	cfgChannels            map[string]bool // channel names from config (empty = all)
+	channels               map[string]bool // resolved channel IDs to monitor (empty when cfgChannels is empty)
+	triggers               config.Triggers
+	handler                MessageHandler
+	personalityHandler     PersonalityReactionHandler
+	personalityTextHandler PersonalityTextHandler
+	botUserID              string
+	seen                   map[string]time.Time // dedup: key → first-seen time
+	seenMu                 sync.Mutex
+	replies                map[string]time.Time // toad's own reply timestamps (channel:ts → sent time)
+	repliesMu              sync.Mutex
+	pathScrubber           func(string) string  // replaces absolute paths with repo-relative
+	mcpHandler             *SlashCommandHandler // handles /toad slash commands
 }
 
 // NewClient creates a new Slack client configured for Socket Mode.
@@ -473,6 +481,24 @@ func (c *Client) IsToadReply(channel, ts string) bool {
 	defer c.repliesMu.Unlock()
 	_, exists := c.replies[key]
 	return exists
+}
+
+// IsReplyToToad returns true if the given thread was started by toad.
+func (c *Client) IsReplyToToad(channel, threadTS string) bool {
+	if threadTS == "" {
+		return false
+	}
+	return c.IsToadReply(channel, threadTS)
+}
+
+// OnPersonalityReaction sets the handler for non-trigger emoji reactions on Toad messages.
+func (c *Client) OnPersonalityReaction(handler PersonalityReactionHandler) {
+	c.personalityHandler = handler
+}
+
+// OnPersonalityText sets the handler for thread replies in Toad threads.
+func (c *Client) OnPersonalityText(handler PersonalityTextHandler) {
+	c.personalityTextHandler = handler
 }
 
 func (c *Client) handleEvents(ctx context.Context) {

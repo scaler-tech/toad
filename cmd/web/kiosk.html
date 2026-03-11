@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>toad kiosk</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   :root {
     --bg: #0d1117;
@@ -110,6 +111,31 @@
     grid-template-columns: 1fr 1fr;
     min-height: 0;
     overflow: hidden;
+  }
+  .main.has-personality {
+    grid-template-columns: 1fr 1fr 280px;
+  }
+
+  /* ── Personality panel ── */
+  .personality-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    border-left: 1px solid var(--border);
+  }
+  .personality-panel canvas {
+    max-width: 250px;
+    max-height: 250px;
+  }
+  .personality-name {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--dim);
+    margin-top: 8px;
   }
 
   /* Panels */
@@ -382,6 +408,10 @@
       <span class="panel-count" id="right-count"></span>
     </div>
     <div class="panel-body" id="right-body"></div>
+  </div>
+  <div class="panel personality-panel" id="personality-panel" style="display:none">
+    <canvas id="personality-radar"></canvas>
+    <div class="personality-name" id="personality-name"></div>
   </div>
 </div>
 
@@ -657,6 +687,83 @@ async function refresh() {
 
 refresh();
 setInterval(refresh, 3000);
+
+// ── Personality radar (read-only) ──
+let pChart = null;
+const traitLabels = [
+  'thoroughness','context_hunger','confidence_threshold','pattern_recognition',
+  'risk_tolerance','scope_appetite','test_affinity','creativity','retry_persistence',
+  'strictness','pattern_conformity','documentation_drive','speed_vs_polish',
+  'verbosity','explanation_depth','notification_eagerness','defensiveness','tone',
+  'autonomy','collaboration','initiative','scope_sensitivity'
+];
+const shortLabels = [
+  'Thorough','Context','Confidence','Patterns',
+  'Risk','Scope','Tests','Creative','Retry',
+  'Strict','Conformity','Docs','Polish',
+  'Verbose','Explain','Notify','Defensive','Tone',
+  'Autonomy','Collab','Initiative','Scope Sens'
+];
+
+async function loadPersonality() {
+  try {
+    const resp = await fetch('/api/personality');
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const eff = d.effective;
+    if (!eff) return;
+
+    // Show panel and adjust grid
+    document.getElementById('personality-panel').style.display = '';
+    document.querySelector('.main').classList.add('has-personality');
+
+    const values = traitLabels.map(k => eff[k] || 0);
+
+    if (pChart) {
+      pChart.data.datasets[0].data = values;
+      pChart.update('none');
+      return;
+    }
+
+    const ctx = document.getElementById('personality-radar').getContext('2d');
+    pChart = new Chart(ctx, {
+      type: 'radar',
+      data: {
+        labels: shortLabels,
+        datasets: [{
+          data: values,
+          backgroundColor: 'rgba(88,166,255,0.15)',
+          borderColor: 'rgba(88,166,255,0.7)',
+          borderWidth: 1.5,
+          pointRadius: 2,
+          pointBackgroundColor: 'rgba(88,166,255,0.9)',
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          r: {
+            min: 0, max: 1,
+            ticks: { display: false, stepSize: 0.25 },
+            grid: { color: 'rgba(48,54,61,0.6)' },
+            angleLines: { color: 'rgba(48,54,61,0.4)' },
+            pointLabels: {
+              color: '#7d8590',
+              font: { size: 8 }
+            }
+          }
+        }
+      }
+    });
+
+    document.getElementById('personality-name').textContent = 'personality';
+  } catch {}
+}
+
+loadPersonality();
+setInterval(loadPersonality, 10000);
 </script>
 </body>
 </html>

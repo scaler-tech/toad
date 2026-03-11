@@ -168,6 +168,21 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("creating github_slack_mappings table: %w", err)
 	}
 
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS personality_adjustments (
+	id INTEGER PRIMARY KEY,
+	trait TEXT NOT NULL,
+	delta REAL NOT NULL,
+	source TEXT NOT NULL,
+	trigger_detail TEXT,
+	reasoning TEXT,
+	before_value REAL NOT NULL,
+	after_value REAL NOT NULL,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)`)
+	if err != nil {
+		return fmt.Errorf("creating personality_adjustments table: %w", err)
+	}
+
 	// Add columns for existing databases that predate the investigation gate.
 	// SQLite has no IF NOT EXISTS for ALTER TABLE, so check first.
 	var count int
@@ -1060,6 +1075,16 @@ func (d *DB) ListGitHubMappings(slackUserID string) ([]string, error) {
 		logins = append(logins, login)
 	}
 	return logins, nil
+}
+
+// ExecContext exposes the underlying DB ExecContext for other packages.
+func (d *DB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return d.db.ExecContext(ctx, query, args...)
+}
+
+// QueryContext exposes the underlying DB QueryContext for other packages.
+func (d *DB) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	return d.db.QueryContext(ctx, query, args...)
 }
 
 // Close closes the database connection.

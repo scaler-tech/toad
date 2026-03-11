@@ -64,7 +64,7 @@ func runTadpole(cmd *cobra.Command, args []string) error {
 	fmt.Printf(":frog: Starting tadpole: %s\n\n", taskDesc)
 
 	sm := state.NewManager()
-	runner := tadpole.NewRunner(cfg, agentProvider, nil, sm, vcsResolver)
+	runner := tadpole.NewRunner(cfg, agentProvider, nil, sm, vcsResolver, nil)
 
 	repoPaths := make(map[string]string, len(cfg.Repos.List))
 	for _, r := range cfg.Repos.List {
