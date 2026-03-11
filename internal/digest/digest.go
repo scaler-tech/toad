@@ -144,6 +144,11 @@ type Engine struct {
 	spawnCount int
 	spawnHour  int
 
+	// Acted-on issue refs — prevents re-collecting bot notifications about issues
+	// toad already investigated (e.g. Linear echoing back investigation findings).
+	actedIssuesMu sync.RWMutex
+	actedIssues   map[string]time.Time
+
 	// Observable counters
 	totalProcessed atomic.Int64
 	totalOpps      atomic.Int64
@@ -195,6 +200,7 @@ func New(cfg *config.DigestConfig, opts EngineOpts) *Engine {
 		staleDays:           opts.StaleDays,
 		personality:         opts.Personality,
 		spawnHour:           time.Now().Hour(),
+		actedIssues:         make(map[string]time.Time),
 	}
 	if len(opts.Profiles) > 1 {
 		e.repoProfiles = config.FormatForPrompt(opts.Profiles)
@@ -203,10 +209,52 @@ func New(cfg *config.DigestConfig, opts EngineOpts) *Engine {
 }
 
 // Collect adds a message to the buffer for batch analysis.
+// Bot messages referencing issues toad already acted on are silently dropped
+// to prevent feedback loops (e.g. Linear echoing back investigation findings).
 func (e *Engine) Collect(msg Message) {
+	if msg.BotID != "" && e.tracker != nil {
+		refs := e.tracker.ExtractAllIssueRefs(msg.Text)
+		for _, ref := range refs {
+			if e.isActedIssue(ref.ID) {
+				slog.Debug("digest skipping bot message: references acted-on issue",
+					"issue", ref.ID, "bot", msg.BotID)
+				return
+			}
+		}
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.buffer = append(e.buffer, msg)
+}
+
+const actedIssueTTL = 4 * time.Hour
+
+// recordActedIssue marks an issue ID as acted on, preventing re-collection.
+func (e *Engine) recordActedIssue(issueID string) {
+	e.actedIssuesMu.Lock()
+	defer e.actedIssuesMu.Unlock()
+	if e.actedIssues == nil {
+		e.actedIssues = make(map[string]time.Time)
+	}
+	e.actedIssues[issueID] = time.Now()
+
+	// Prune expired entries
+	if len(e.actedIssues) > 100 {
+		now := time.Now()
+		for id, t := range e.actedIssues {
+			if now.Sub(t) > actedIssueTTL {
+				delete(e.actedIssues, id)
+			}
+		}
+	}
+}
+
+func (e *Engine) isActedIssue(issueID string) bool {
+	e.actedIssuesMu.RLock()
+	defer e.actedIssuesMu.RUnlock()
+	t, ok := e.actedIssues[issueID]
+	return ok && time.Since(t) < actedIssueTTL
 }
 
 // ResumeInvestigations re-runs opportunities that were interrupted mid-investigation
@@ -558,6 +606,12 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 				e.unclaim(threadTS)
 			}
 			continue
+		}
+
+		// Record acted-on issue refs to prevent re-collecting bot notifications
+		// (e.g. Linear/Jira echoing back toad's investigation findings).
+		for _, ref := range allRefs {
+			e.recordActedIssue(ref.ID)
 		}
 
 		// Check hourly spawn limit AFTER investigation — dismissed opportunities

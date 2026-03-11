@@ -115,6 +115,15 @@ func handleMessage(ctx context.Context, c *Client, ev *slackevents.MessageEvent)
 	}
 
 	isBot := ev.BotID != ""
+
+	// Skip toad's own bot_messages. The self-event filter in handleEventsAPI
+	// checks User, but bot_messages have an empty User field and use BotID
+	// instead. Check tracked reply timestamps to identify our own messages.
+	if isBot && c.IsToadReply(ev.Channel, ev.TimeStamp) {
+		slog.Debug("skipping: self bot_message", "ts", ev.TimeStamp)
+		return
+	}
+
 	triggered := !isBot && hasKeywordTrigger(fullText, c.triggers.Keywords)
 
 	// Personality feedback: thread replies to Toad messages (non-mention, non-bot).
