@@ -138,6 +138,7 @@ type MCPConfig struct {
 	Enabled bool     `yaml:"enabled"`
 	Host    string   `yaml:"host"`
 	Port    int      `yaml:"port"`
+	TLS     bool     `yaml:"tls"`
 	Devs    []string `yaml:"devs"`
 	Message string   `yaml:"message"` // optional message included in the connect DM
 }

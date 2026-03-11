@@ -430,10 +430,10 @@ func (h *SlashCommandHandler) handleGitHubHelp(cmd slack.SlashCommand) {
 // --- helpers ---
 
 func (h *SlashCommandHandler) mcpScheme() string {
-	if h.cfg.Host == "localhost" || h.cfg.Host == "127.0.0.1" {
-		return "http"
+	if h.cfg.TLS {
+		return "https"
 	}
-	return "https"
+	return "http"
 }
 
 func (h *SlashCommandHandler) post(cmd slack.SlashCommand, text string) {
