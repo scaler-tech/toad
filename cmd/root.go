@@ -364,13 +364,15 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	})
 
 	if cfg.Personality.Enabled && personalityMgr.LearningEnabled() {
+		personalityMgr.SetInterpreter(personality.NewInterpreter(agentProvider))
 		slackClient.OnPersonalityReaction(func(ctx context.Context, emoji, channel, ts string) {
 			if err := personalityMgr.ProcessEmoji(emoji, fmt.Sprintf("channel:%s ts:%s", channel, ts)); err != nil {
-				slog.Debug("personality emoji not mapped", "emoji", emoji)
+				slog.Debug("personality emoji feedback failed", "emoji", emoji, "error", err)
 			}
 		})
 		slackClient.OnPersonalityText(func(ctx context.Context, text, channel, threadTS string) {
-			if err := personalityMgr.ProcessText(text, fmt.Sprintf("channel:%s ts:%s", channel, threadTS)); err != nil {
+			threadKey := fmt.Sprintf("channel:%s ts:%s", channel, threadTS)
+			if err := personalityMgr.ProcessText(ctx, text, threadKey); err != nil {
 				slog.Debug("personality text processing failed", "error", err)
 			}
 		})

@@ -21,8 +21,14 @@ func TestProcessEmoji(t *testing.T) {
 func TestProcessEmojiUnknown(t *testing.T) {
 	m := NewManager(DefaultTraits())
 	err := m.ProcessEmoji("sparkles", "some context")
-	if err == nil {
-		t.Error("expected error for unknown emoji")
+	if err != nil {
+		t.Errorf("expected nil for unknown emoji, got %v", err)
+	}
+	// Verify no traits changed
+	eff := m.Effective()
+	base := DefaultTraits()
+	if eff != base {
+		t.Error("unknown emoji should not change any traits")
 	}
 }
 

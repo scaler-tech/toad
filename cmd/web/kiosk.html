@@ -70,32 +70,32 @@
   /* ── Stat tiles row ── */
   .tiles {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    grid-template-columns: repeat(3, 1fr);
     gap: 1px;
     background: var(--border);
     border-bottom: 1px solid var(--border);
   }
   .tile {
     background: var(--bg);
-    padding: 20px 24px;
+    padding: 12px 16px;
     text-align: center;
   }
   .tile-val {
-    font-size: 36px;
+    font-size: 24px;
     font-weight: 700;
     line-height: 1.1;
     font-variant-numeric: tabular-nums;
   }
   .tile-label {
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.8px;
     color: var(--dim);
-    margin-top: 6px;
+    margin-top: 4px;
   }
   .tile-sub {
-    font-size: 12px;
+    font-size: 11px;
     color: var(--muted);
     margin-top: 2px;
   }
@@ -113,28 +113,13 @@
     overflow: hidden;
   }
 
-  /* ── Personality radar card ── */
-  .personality-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 12px;
-    margin-bottom: 10px;
+  /* ── Personality radar ── */
+  .personality-tile {
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 12px;
-  }
-  .personality-card canvas {
-    width: 160px !important;
-    height: 160px !important;
-    flex-shrink: 0;
-  }
-  .personality-card-label {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: var(--dim);
+    padding: 16px 12px 8px;
+    border-bottom: 1px solid var(--border);
   }
 
   /* Panels */
@@ -391,10 +376,11 @@
   </div>
 </div>
 
-<div class="tiles" id="tiles"></div>
-
 <div class="main">
   <div class="panel">
+    <div class="personality-tile" id="personality-tile" style="display:none">
+      <canvas id="personality-radar" width="280" height="280"></canvas>
+    </div>
     <div class="panel-head">
       <span class="panel-title" id="left-title">Active</span>
       <span class="panel-count" id="left-count"></span>
@@ -402,6 +388,7 @@
     <div class="panel-body" id="left-body"></div>
   </div>
   <div class="panel">
+    <div class="tiles" id="tiles"></div>
     <div class="panel-head">
       <span class="panel-title" id="right-title">Opportunities</span>
       <span class="panel-count" id="right-count"></span>
@@ -683,9 +670,8 @@ async function refresh() {
 refresh();
 setInterval(refresh, 3000);
 
-// ── Personality radar (read-only, embedded in right panel) ──
+// ── Personality radar ──
 let pChart = null;
-let pCardInjected = false;
 const traitLabels = [
   'thoroughness','context_hunger','confidence_threshold','pattern_recognition',
   'risk_tolerance','scope_appetite','test_affinity','creativity','retry_persistence',
@@ -694,11 +680,11 @@ const traitLabels = [
   'autonomy','collaboration','initiative','scope_sensitivity'
 ];
 const shortLabels = [
-  'Thorough','Ctx','Conf','Pattern',
-  'Risk','Scope','Test','Create','Retry',
+  'Thorough','Context','Confidence','Patterns',
+  'Risk','Scope','Tests','Creative','Retry',
   'Strict','Conform','Docs','Polish',
   'Verbose','Explain','Notify','Defend','Tone',
-  'Auto','Collab','Init','Scope S'
+  'Autonomy','Collab','Initiative','Scope Sens'
 ];
 
 async function loadPersonality() {
@@ -709,22 +695,14 @@ async function loadPersonality() {
     const eff = d.effective;
     if (!eff) return;
 
-    // Inject the card at the top of the right panel (once)
-    if (!pCardInjected) {
-      const rbody = document.getElementById('right-body');
-      const card = document.createElement('div');
-      card.className = 'personality-card';
-      card.id = 'personality-card';
-      card.innerHTML = '<canvas id="personality-radar"></canvas>'
-        + '<span class="personality-card-label">Personality</span>';
-      rbody.insertBefore(card, rbody.firstChild);
-      pCardInjected = true;
-    }
-
+    document.getElementById('personality-tile').style.display = '';
+    const base = d.base;
     const values = traitLabels.map(k => eff[k] || 0);
+    const baseValues = base ? traitLabels.map(k => base[k] || 0) : values;
 
     if (pChart) {
       pChart.data.datasets[0].data = values;
+      pChart.data.datasets[1].data = baseValues;
       pChart.update('none');
       return;
     }
@@ -739,8 +717,15 @@ async function loadPersonality() {
           backgroundColor: 'rgba(88,166,255,0.15)',
           borderColor: 'rgba(88,166,255,0.7)',
           borderWidth: 1.5,
-          pointRadius: 1.5,
+          pointRadius: 1,
           pointBackgroundColor: 'rgba(88,166,255,0.9)',
+        }, {
+          data: baseValues,
+          backgroundColor: 'rgba(163,113,247,0.08)',
+          borderColor: 'rgba(163,113,247,0.4)',
+          borderWidth: 1,
+          pointRadius: 0,
+          borderDash: [3, 3],
         }]
       },
       options: {
@@ -750,11 +735,11 @@ async function loadPersonality() {
           r: {
             min: 0, max: 1,
             ticks: { display: false, stepSize: 0.25 },
-            grid: { color: 'rgba(48,54,61,0.6)' },
-            angleLines: { color: 'rgba(48,54,61,0.4)' },
+            grid: { color: 'rgba(48,54,61,0.5)' },
+            angleLines: { color: 'rgba(48,54,61,0.3)' },
             pointLabels: {
               color: '#7d8590',
-              font: { size: 7 }
+              font: { size: 8 }
             }
           }
         }
@@ -764,7 +749,7 @@ async function loadPersonality() {
 }
 
 loadPersonality();
-setInterval(loadPersonality, 10000);
+setInterval(loadPersonality, 30000);
 </script>
 </body>
 </html>

@@ -89,6 +89,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/api/personality", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "GET":
+			_ = personalityMgr.Reload() // re-read from DB (daemon writes via WAL)
 			eff := personalityMgr.Effective()
 			base := personalityMgr.Base()
 			recent, _ := personalityMgr.RecentAdjustments(20)
@@ -108,6 +109,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 				http.Error(w, "invalid request body", 400)
 				return
 			}
+			if req.Value < 0.0 || req.Value > 1.0 {
+				http.Error(w, "value must be between 0.0 and 1.0", 400)
+				return
+			}
+			if req.Trait == "" {
+				http.Error(w, "trait is required", 400)
+				return
+			}
 			if err := personalityMgr.ManualAdjust(req.Trait, req.Value, req.Note); err != nil {
 				http.Error(w, err.Error(), 400)
 				return
@@ -116,8 +125,16 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 	})
 	mux.HandleFunc("/api/personality/export", func(w http.ResponseWriter, r *http.Request) {
-		pf, _ := personalityMgr.Export("exported", "Exported from dashboard")
-		data, _ := pf.Marshal()
+		pf, err := personalityMgr.Export("exported", "Exported from dashboard")
+		if err != nil {
+			http.Error(w, "export failed", 500)
+			return
+		}
+		data, err := pf.Marshal()
+		if err != nil {
+			http.Error(w, "marshal failed", 500)
+			return
+		}
 		w.Header().Set("Content-Type", "application/x-yaml")
 		w.Header().Set("Content-Disposition", "attachment; filename=personality.yaml")
 		w.Write(data)

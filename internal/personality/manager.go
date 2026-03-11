@@ -1,6 +1,7 @@
 package personality
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -12,11 +13,12 @@ import (
 const learnedCap = 0.35
 
 type Manager struct {
-	mu       sync.RWMutex
-	base     Traits
-	learned  Traits
-	store    *Store
-	learning bool
+	mu          sync.RWMutex
+	base        Traits
+	learned     Traits
+	store       *Store
+	learning    bool
+	interpreter *Interpreter
 }
 
 func NewManager(base Traits) *Manager {
@@ -42,6 +44,25 @@ func (m *Manager) Effective() Traits {
 	return m.base.Add(m.learned).Clamp()
 }
 
+// Reload re-reads learned deltas from the DB. Useful for read-only instances
+// (e.g. status server) that share the SQLite DB via WAL with the daemon.
+func (m *Manager) Reload() error {
+	if m.store == nil {
+		return nil
+	}
+	deltas, err := m.store.SumDeltas()
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.learned = Traits{}
+	for trait, delta := range deltas {
+		m.learned.Set(trait, delta)
+	}
+	return nil
+}
+
 func (m *Manager) Base() Traits {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -58,6 +79,13 @@ func (m *Manager) SetLearning(enabled bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.learning = enabled
+}
+
+// SetInterpreter attaches an LLM interpreter for text-based feedback.
+func (m *Manager) SetInterpreter(i *Interpreter) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.interpreter = i
 }
 
 // ManualAdjust sets a trait to an absolute value by computing the required delta.
@@ -77,6 +105,8 @@ func (m *Manager) ManualAdjust(trait string, targetValue float64, note string) e
 	adjustDelta := requiredDelta - currentLearned
 
 	m.learned.Set(trait, requiredDelta)
+
+	slog.Info("personality manual adjustment", "trait", trait, "value", targetValue, "delta", adjustDelta)
 
 	if m.store != nil {
 		return m.store.Insert(Adjustment{
@@ -138,9 +168,38 @@ func (m *Manager) applyAdjustment(trait string, rawDelta float64, source, trigge
 	return nil
 }
 
-// ProcessText is a stub for LLM-interpreted feedback (deferred to follow-up plan).
-func (m *Manager) ProcessText(text, context string) error {
-	slog.Debug("personality text feedback received (not yet interpreted)", "text", text, "context", context)
+// ProcessText interprets free-text feedback using an LLM and applies trait adjustments.
+func (m *Manager) ProcessText(ctx context.Context, text, threadKey string) error {
+	if !m.LearningEnabled() {
+		return nil
+	}
+
+	m.mu.RLock()
+	interp := m.interpreter
+	m.mu.RUnlock()
+
+	if interp == nil {
+		slog.Debug("personality text feedback skipped (no interpreter)")
+		return nil
+	}
+
+	effective := m.Effective()
+	adjustments, err := interp.Interpret(ctx, text, threadKey, effective)
+	if err != nil {
+		slog.Warn("personality text interpretation failed", "error", err)
+		return nil // fail-open: skip adjustment on error
+	}
+
+	for _, adj := range adjustments {
+		detail := fmt.Sprintf("text feedback: %s", truncate(text, 60))
+		if err := m.applyAdjustment(adj.Trait, adj.Delta, "text", detail, adj.Reasoning); err != nil {
+			slog.Error("personality text adjustment failed", "trait", adj.Trait, "error", err)
+		}
+	}
+
+	if len(adjustments) > 0 {
+		slog.Info("personality text feedback applied", "adjustments", len(adjustments), "thread", threadKey)
+	}
 	return nil
 }
 
@@ -164,6 +223,7 @@ func (m *Manager) Export(name, description string) (*PersonalityFile, error) {
 func (m *Manager) Import(pf *PersonalityFile) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	slog.Info("personality imported, clearing adjustment history", "name", pf.Name)
 	m.base = pf.Traits
 	m.learned = Traits{}
 	if m.store != nil {
