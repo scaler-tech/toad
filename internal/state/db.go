@@ -80,6 +80,7 @@ func migrate(db *sql.DB) error {
 			worktree_path TEXT,
 			task          TEXT,
 			repo_name     TEXT DEFAULT '',
+			claim_scope   TEXT DEFAULT '',
 			started_at    DATETIME NOT NULL,
 			result_json   TEXT,
 			updated_at    DATETIME NOT NULL
@@ -203,6 +204,7 @@ func migrate(db *sql.DB) error {
 		{7, `ALTER TABLE pr_watches ADD COLUMN final_state TEXT DEFAULT ''`},
 		{8, `ALTER TABLE pr_watches ADD COLUMN original_summary TEXT DEFAULT '';
 		     ALTER TABLE pr_watches ADD COLUMN original_description TEXT DEFAULT ''`},
+		{9, `ALTER TABLE runs ADD COLUMN claim_scope TEXT DEFAULT ''`},
 	}
 
 	// Read current schema version. If no version is stored, detect whether
@@ -262,10 +264,10 @@ func (d *DB) SaveRun(run *Run) error {
 	ctx, cancel := dbCtx()
 	defer cancel()
 	_, err := d.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO runs (id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, started_at, result_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT OR REPLACE INTO runs (id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		run.ID, run.Status, run.SlackChannel, run.SlackThreadTS,
-		run.Branch, run.WorktreePath, run.Task, run.RepoName, run.StartedAt,
+		run.Branch, run.WorktreePath, run.Task, run.RepoName, run.ClaimScope, run.StartedAt,
 		string(resultJSON), time.Now(),
 	)
 	return err
@@ -309,7 +311,7 @@ func (d *DB) GetByThread(threadTS string) (*Run, error) {
 	ctx, cancel := dbCtx()
 	defer cancel()
 	row := d.db.QueryRowContext(ctx,
-		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, started_at, result_json FROM runs WHERE slack_thread = ? AND status NOT IN ('done', 'failed') LIMIT 1",
+		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json FROM runs WHERE slack_thread = ? AND status NOT IN ('done', 'failed') LIMIT 1",
 		threadTS,
 	)
 	return scanRun(row)
@@ -320,7 +322,7 @@ func (d *DB) ActiveRuns() ([]*Run, error) {
 	ctx, cancel := dbCtx()
 	defer cancel()
 	rows, err := d.db.QueryContext(ctx,
-		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, started_at, result_json FROM runs WHERE status NOT IN ('done', 'failed') ORDER BY started_at",
+		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json FROM runs WHERE status NOT IN ('done', 'failed') ORDER BY started_at",
 	)
 	if err != nil {
 		return nil, err
@@ -334,7 +336,7 @@ func (d *DB) History(limit int) ([]*Run, error) {
 	ctx, cancel := dbCtx()
 	defer cancel()
 	rows, err := d.db.QueryContext(ctx,
-		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, started_at, result_json FROM runs WHERE status IN ('done', 'failed') ORDER BY started_at DESC LIMIT ?",
+		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json FROM runs WHERE status IN ('done', 'failed') ORDER BY started_at DESC LIMIT ?",
 		limit,
 	)
 	if err != nil {
@@ -1118,7 +1120,7 @@ func scanRun(row *sql.Row) (*Run, error) {
 	var resultJSON sql.NullString
 	err := row.Scan(
 		&run.ID, &run.Status, &run.SlackChannel, &run.SlackThreadTS,
-		&run.Branch, &run.WorktreePath, &run.Task, &run.RepoName, &run.StartedAt, &resultJSON,
+		&run.Branch, &run.WorktreePath, &run.Task, &run.RepoName, &run.ClaimScope, &run.StartedAt, &resultJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1142,7 +1144,7 @@ func scanRuns(rows *sql.Rows) ([]*Run, error) {
 		var resultJSON sql.NullString
 		if err := rows.Scan(
 			&run.ID, &run.Status, &run.SlackChannel, &run.SlackThreadTS,
-			&run.Branch, &run.WorktreePath, &run.Task, &run.RepoName, &run.StartedAt, &resultJSON,
+			&run.Branch, &run.WorktreePath, &run.Task, &run.RepoName, &run.ClaimScope, &run.StartedAt, &resultJSON,
 		); err != nil {
 			return nil, err
 		}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"strings"
 	"sync"
@@ -86,12 +87,12 @@ type NotifyInvestigationFunc func(notice InvestigationNotice)
 // ReactFunc adds an emoji reaction to a message.
 type ReactFunc func(channel, timestamp, emoji string)
 
-// ClaimFunc atomically claims a thread to prevent duplicate spawns.
-// Returns true if the claim succeeded (thread was free).
-type ClaimFunc func(threadTS string) bool
+// ClaimFunc atomically claims a thread+scope to prevent duplicate spawns.
+// Returns true if the claim succeeded (thread+scope was free).
+type ClaimFunc func(threadTS, scope string) bool
 
-// UnclaimFunc releases a thread claim without registering a run (error cleanup).
-type UnclaimFunc func(threadTS string)
+// UnclaimFunc releases a thread+scope claim without registering a run (error cleanup).
+type UnclaimFunc func(threadTS, scope string)
 
 // ResolveRepoFunc resolves a repo config from triage hints.
 type ResolveRepoFunc func(triageRepo string, fileHints []string) *config.RepoConfig
@@ -206,6 +207,20 @@ func New(cfg *config.DigestConfig, opts EngineOpts) *Engine {
 		e.repoProfiles = config.FormatForPrompt(opts.Profiles)
 	}
 	return e
+}
+
+// scopeKey derives a scope key from an opportunity for scoped claims.
+// If an issue tracker is available and the message references a ticket, uses the ticket ID.
+// Otherwise, hashes the opportunity summary to produce a stable scope key.
+func scopeKey(opp Opportunity, tracker issuetracker.Tracker, msgText string) string {
+	if tracker != nil {
+		if ref := tracker.ExtractIssueRef(msgText); ref != nil {
+			return ref.ID
+		}
+	}
+	h := fnv.New32a()
+	h.Write([]byte(opp.Summary))
+	return fmt.Sprintf("digest-%x", h.Sum32())
 }
 
 // Collect adds a message to the buffer for batch analysis.
@@ -354,9 +369,10 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 
 		repo := e.resolveRepo(opp.Repo, opp.FilesHint)
 
+		scope := scopeKey(Opportunity{Summary: opp.Summary}, e.tracker, msg.Text)
 		if e.claim != nil {
-			if !e.claim(threadTS) {
-				slog.Info("resumed investigation: thread already claimed", "summary", opp.Summary)
+			if !e.claim(threadTS, scope) {
+				slog.Info("resumed investigation: thread+scope already claimed", "summary", opp.Summary, "scope", scope)
 				continue
 			}
 		}
@@ -374,7 +390,7 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 		if err := e.spawn(ctx, task); err != nil {
 			slog.Error("resumed investigation: spawn failed", "error", err, "summary", opp.Summary)
 			if e.unclaim != nil {
-				e.unclaim(threadTS)
+				e.unclaim(threadTS, scope)
 			}
 			if e.notify != nil {
 				e.notify(msg.Channel, threadTS,
@@ -513,10 +529,14 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			threadTS = msg.Timestamp
 		}
 
-		// Claim thread early — before investigation — so a :frog: reaction spawn
+		// Compute a scope key for scoped claims — uses ticket ID if available,
+		// otherwise a hash of the opportunity summary.
+		scope := scopeKey(opp, e.tracker, msg.Text)
+
+		// Claim thread+scope early — before investigation — so a :frog: reaction spawn
 		// doesn't race with us during the (slow) Sonnet investigation call.
-		if e.claim != nil && !e.claim(threadTS) {
-			slog.Info("digest skipping: thread already claimed", "summary", opp.Summary, "thread", threadTS)
+		if e.claim != nil && !e.claim(threadTS, scope) {
+			slog.Info("digest skipping: thread+scope already claimed", "summary", opp.Summary, "thread", threadTS, "scope", scope)
 			continue
 		}
 
@@ -603,7 +623,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 
 		if dismissed {
 			if e.unclaim != nil {
-				e.unclaim(threadTS)
+				e.unclaim(threadTS, scope)
 			}
 			continue
 		}
@@ -619,7 +639,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 		if !e.trySpawn() {
 			slog.Info("digest hourly spawn limit reached", "limit", e.cfg.MaxAutoSpawnHour)
 			if e.unclaim != nil {
-				e.unclaim(threadTS)
+				e.unclaim(threadTS, scope)
 			}
 			return false
 		}
@@ -644,7 +664,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			}
 			e.totalSpawns.Add(1)
 			if e.unclaim != nil {
-				e.unclaim(threadTS)
+				e.unclaim(threadTS, scope)
 			}
 			continue
 		}
@@ -697,7 +717,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 				slog.Info("digest skipping: ticket already gated in this flush",
 					"issue", issueRef.ID, "summary", opp.Summary)
 				if e.unclaim != nil {
-					e.unclaim(threadTS)
+					e.unclaim(threadTS, scope)
 				}
 				continue
 			}
@@ -720,7 +740,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 							issueRef.ID, gate.Status.AssigneeName))
 				}
 				if e.unclaim != nil {
-					e.unclaim(threadTS)
+					e.unclaim(threadTS, scope)
 				}
 				continue
 			}
@@ -761,7 +781,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 		if err := e.spawn(ctx, task); err != nil {
 			slog.Error("digest spawn failed", "error", err, "summary", opp.Summary)
 			if e.unclaim != nil {
-				e.unclaim(threadTS)
+				e.unclaim(threadTS, scope)
 			}
 			if e.notify != nil {
 				e.notify(msg.Channel, threadTS,

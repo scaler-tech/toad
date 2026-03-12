@@ -13,8 +13,8 @@ func TestDefaultTraits(t *testing.T) {
 	if d.Thoroughness != 0.70 {
 		t.Errorf("Thoroughness = %v, want 0.70", d.Thoroughness)
 	}
-	if d.ConfidenceThreshold != 0.80 {
-		t.Errorf("ConfidenceThreshold = %v, want 0.80", d.ConfidenceThreshold)
+	if d.ConfidenceThreshold != 0.78 {
+		t.Errorf("ConfidenceThreshold = %v, want 0.78", d.ConfidenceThreshold)
 	}
 	if d.ScopeAppetite != 0.20 {
 		t.Errorf("ScopeAppetite = %v, want 0.20", d.ScopeAppetite)

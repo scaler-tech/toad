@@ -339,8 +339,8 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			React: func(channel, timestamp, emoji string) {
 				slackClient.React(channel, timestamp, emoji)
 			},
-			Claim:       stateManager.Claim,
-			Unclaim:     stateManager.Unclaim,
+			Claim:       stateManager.ClaimScoped,
+			Unclaim:     stateManager.UnclaimScoped,
 			ResolveRepo: resolver.Resolve,
 			RepoPaths:   repoPaths,
 			Profiles:    profiles,
@@ -669,9 +669,13 @@ func handleTriggered(
 ) {
 	// Check if already working on this thread
 	threadTS := msg.ThreadTS()
-	if existing := stateManager.GetByThread(threadTS); existing != nil {
+	if existing := stateManager.GetByThread(threadTS); len(existing) > 0 {
+		statuses := make([]string, len(existing))
+		for i, r := range existing {
+			statuses[i] = r.Status
+		}
 		slackClient.ReplyInThread(msg.Channel, threadTS,
-			fmt.Sprintf(":frog: Already working on this (status: %s)", existing.Status))
+			fmt.Sprintf(":frog: Already working on this thread (%d active: %s)", len(existing), strings.Join(statuses, ", ")))
 		return
 	}
 
@@ -704,6 +708,10 @@ func handleTriggered(
 			msg.ThreadContext = recentMsgs
 		}
 	}
+
+	// Enrich thread context by resolving any Linear ticket URLs/references
+	// into full issue descriptions so triage and ribbit have real context.
+	msg.ThreadContext = enrichWithIssueDetails(ctx, tracker, msg.Text, msg.ThreadContext)
 
 	// Retry detection: if user says "try again" / "retry" in a thread with a previous
 	// toad failure, skip triage and re-spawn directly.
@@ -1041,6 +1049,9 @@ func handleTadpoleRequest(
 	if threadText == "" {
 		threadText = msg.Text
 	}
+
+	// Enrich thread context by resolving any Linear ticket URLs/references
+	threadMsgs = enrichWithIssueDetails(ctx, tracker, threadText, threadMsgs)
 
 	triageMsg := &islack.IncomingMessage{
 		Text:          threadText,
@@ -1551,6 +1562,58 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(runes[:n-3]) + "..."
+}
+
+// enrichWithIssueDetails scans the primary message and thread context for
+// issue tracker references (e.g. Linear URLs, bare ticket IDs). For each
+// unique reference found, it fetches the full issue title and description
+// and appends them as additional context lines. This lets triage and ribbit
+// see what a linked ticket actually says rather than just its ID.
+func enrichWithIssueDetails(ctx context.Context, tracker issuetracker.Tracker, text string, threadContext []string) []string {
+	// Gather all text to scan for references
+	allText := text
+	for _, tc := range threadContext {
+		allText += "\n" + tc
+	}
+
+	refs := tracker.ExtractAllIssueRefs(allText)
+	if len(refs) == 0 {
+		return threadContext
+	}
+
+	// Resolve each unique ref (cap at 3 to avoid slow lookups)
+	limit := 3
+	if len(refs) < limit {
+		limit = len(refs)
+	}
+	var enriched []string
+	for _, ref := range refs[:limit] {
+		details, err := tracker.GetIssueDetails(ctx, ref)
+		if err != nil {
+			slog.Warn("failed to fetch issue details for enrichment", "issue", ref.ID, "error", err)
+			continue
+		}
+		if details == nil {
+			continue
+		}
+		entry := fmt.Sprintf("[%s] %s", details.ID, details.Title)
+		if details.Description != "" {
+			// Truncate long descriptions to keep the prompt reasonable
+			desc := details.Description
+			if len(desc) > 500 {
+				desc = desc[:500] + "..."
+			}
+			entry += "\n" + desc
+		}
+		enriched = append(enriched, entry)
+		slog.Debug("enriched thread context with issue details", "issue", details.ID)
+	}
+
+	if len(enriched) == 0 {
+		return threadContext
+	}
+
+	return append(threadContext, enriched...)
 }
 
 // syncRepos periodically fetches and fast-forward pulls all configured repos.

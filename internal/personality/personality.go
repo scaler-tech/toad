@@ -49,7 +49,7 @@ func DefaultTraits() Traits {
 	return Traits{
 		Thoroughness:          0.70,
 		ContextHunger:         0.50,
-		ConfidenceThreshold:   0.80,
+		ConfidenceThreshold:   0.78,
 		PatternRecognition:    0.30,
 		RiskTolerance:         0.30,
 		ScopeAppetite:         0.20,

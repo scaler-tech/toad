@@ -17,6 +17,7 @@ type Run struct {
 	WorktreePath  string
 	Task          string
 	RepoName      string
+	ClaimScope    string
 	StartedAt     time.Time
 	Result        *RunResult
 }
@@ -35,7 +36,7 @@ type Manager struct {
 	mu          sync.RWMutex
 	db          *DB // nil for in-memory only (tests, CLI)
 	runs        map[string]*Run
-	threads     map[string]string // slackThreadTS → runID
+	threads     map[string]map[string]string // slackThreadTS → scope → runID
 	history     []*Run
 	historySize int
 }
@@ -44,7 +45,7 @@ type Manager struct {
 func NewManager() *Manager {
 	return &Manager{
 		runs:    make(map[string]*Run),
-		threads: make(map[string]string),
+		threads: make(map[string]map[string]string),
 	}
 }
 
@@ -58,7 +59,7 @@ func NewPersistentManager(db *DB, historySize int) (*Manager, error) {
 	m := &Manager{
 		db:          db,
 		runs:        make(map[string]*Run),
-		threads:     make(map[string]string),
+		threads:     make(map[string]map[string]string),
 		historySize: historySize,
 	}
 
@@ -70,7 +71,10 @@ func NewPersistentManager(db *DB, historySize int) (*Manager, error) {
 	for _, run := range active {
 		m.runs[run.ID] = run
 		if run.SlackThreadTS != "" {
-			m.threads[run.SlackThreadTS] = run.ID
+			if m.threads[run.SlackThreadTS] == nil {
+				m.threads[run.SlackThreadTS] = make(map[string]string)
+			}
+			m.threads[run.SlackThreadTS][run.ClaimScope] = run.ID
 		}
 	}
 
@@ -90,20 +94,46 @@ func (m *Manager) DB() *DB {
 	return m.db
 }
 
-// Claim atomically checks if a thread is already tracked and registers it if not.
-// Returns true if the claim succeeded (thread was not tracked), false if already taken.
-func (m *Manager) Claim(threadTS string) bool {
+// ClaimScoped atomically checks if a thread+scope is already tracked and registers it if not.
+// Scope "" is exclusive: fails if ANY claim exists, and blocks all other claims.
+// Non-empty scopes coexist with each other but not with exclusive claims.
+// Returns true if the claim succeeded, false if already taken.
+func (m *Manager) ClaimScoped(threadTS, scope string) bool {
 	if threadTS == "" {
 		return true
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, exists := m.threads[threadTS]; exists {
+	inner, exists := m.threads[threadTS]
+	if !exists {
+		// No claims on this thread yet — always succeeds.
+		m.threads[threadTS] = map[string]string{scope: ""}
+		return true
+	}
+	// If an exclusive claim ("") exists, everything fails.
+	if _, hasExclusive := inner[""]; hasExclusive {
 		return false
 	}
-	// Reserve the thread with a placeholder — Track will fill in the real run
-	m.threads[threadTS] = ""
+	// If requesting exclusive, fail if any scoped claim exists.
+	if scope == "" {
+		if len(inner) > 0 {
+			return false
+		}
+		inner[""] = ""
+		return true
+	}
+	// Scoped claim: fail only if same scope already claimed.
+	if _, taken := inner[scope]; taken {
+		return false
+	}
+	inner[scope] = ""
 	return true
+}
+
+// Claim atomically checks if a thread is already tracked and registers it if not.
+// Returns true if the claim succeeded (thread was not tracked), false if already taken.
+func (m *Manager) Claim(threadTS string) bool {
+	return m.ClaimScoped(threadTS, "")
 }
 
 // Track registers a new run.
@@ -112,7 +142,10 @@ func (m *Manager) Track(run *Run) {
 	defer m.mu.Unlock()
 	m.runs[run.ID] = run
 	if run.SlackThreadTS != "" {
-		m.threads[run.SlackThreadTS] = run.ID
+		if m.threads[run.SlackThreadTS] == nil {
+			m.threads[run.SlackThreadTS] = make(map[string]string)
+		}
+		m.threads[run.SlackThreadTS][run.ClaimScope] = run.ID
 	}
 	if m.db != nil {
 		if err := m.db.SaveRun(run); err != nil {
@@ -121,17 +154,30 @@ func (m *Manager) Track(run *Run) {
 	}
 }
 
-// Unclaim removes a thread claim without registering a run (for error cleanup).
-func (m *Manager) Unclaim(threadTS string) {
+// UnclaimScoped removes a thread+scope claim without registering a run (for error cleanup).
+// Only removes placeholder entries (empty runID). Cleans outer map if inner becomes empty.
+func (m *Manager) UnclaimScoped(threadTS, scope string) {
 	if threadTS == "" {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Only unclaim if it's still a placeholder (empty runID)
-	if runID, exists := m.threads[threadTS]; exists && runID == "" {
-		delete(m.threads, threadTS)
+	inner, exists := m.threads[threadTS]
+	if !exists {
+		return
 	}
+	// Only unclaim if it's still a placeholder (empty runID)
+	if runID, ok := inner[scope]; ok && runID == "" {
+		delete(inner, scope)
+		if len(inner) == 0 {
+			delete(m.threads, threadTS)
+		}
+	}
+}
+
+// Unclaim removes a thread claim without registering a run (for error cleanup).
+func (m *Manager) Unclaim(threadTS string) {
+	m.UnclaimScoped(threadTS, "")
 }
 
 // Update updates the status of an existing run.
@@ -164,7 +210,12 @@ func (m *Manager) Complete(runID string, result *RunResult) {
 	run.Result = result
 	delete(m.runs, runID)
 	if run.SlackThreadTS != "" {
-		delete(m.threads, run.SlackThreadTS)
+		if inner, exists := m.threads[run.SlackThreadTS]; exists {
+			delete(inner, run.ClaimScope)
+			if len(inner) == 0 {
+				delete(m.threads, run.SlackThreadTS)
+			}
+		}
 	}
 	m.history = append(m.history, run)
 	cap := m.historySize
@@ -181,15 +232,21 @@ func (m *Manager) Complete(runID string, result *RunResult) {
 	}
 }
 
-// GetByThread looks up a run by its Slack thread timestamp.
-func (m *Manager) GetByThread(threadTS string) *Run {
+// GetByThread looks up all active runs for a Slack thread timestamp.
+func (m *Manager) GetByThread(threadTS string) []*Run {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	runID, ok := m.threads[threadTS]
+	inner, ok := m.threads[threadTS]
 	if !ok {
 		return nil
 	}
-	return m.runs[runID]
+	var runs []*Run
+	for _, runID := range inner {
+		if run, exists := m.runs[runID]; exists {
+			runs = append(runs, run)
+		}
+	}
+	return runs
 }
 
 // Active returns all currently running tadpoles.
