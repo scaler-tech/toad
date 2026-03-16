@@ -1030,6 +1030,22 @@ func apiDevInfoHandler(cfg *config.Config) http.HandlerFunc {
 	}
 }
 
+// serveFileDownload reads a file into memory and serves it as a download with
+// explicit Content-Length so the browser can finalize the download cleanly.
+// http.ServeFile keeps connections alive which can cause downloads to hang.
+func serveFileDownload(w http.ResponseWriter, filename, contentType, path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		http.Error(w, "failed to read file", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename="+filename)
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	w.Header().Set("Connection", "close")
+	w.Write(data)
+}
+
 func apiDevDownloadLogHandler(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := devLogPath(cfg)
@@ -1037,9 +1053,7 @@ func apiDevDownloadLogHandler(cfg *config.Config) http.HandlerFunc {
 			http.Error(w, "log file not configured", 404)
 			return
 		}
-		w.Header().Set("Content-Disposition", "attachment; filename=toad.log")
-		w.Header().Set("Content-Type", "text/plain")
-		http.ServeFile(w, r, path)
+		serveFileDownload(w, "toad.log", "text/plain", path)
 	}
 }
 
@@ -1050,9 +1064,7 @@ func apiDevDownloadDBHandler() http.HandlerFunc {
 			http.Error(w, "db path not found", 404)
 			return
 		}
-		w.Header().Set("Content-Disposition", "attachment; filename=state.db")
-		w.Header().Set("Content-Type", "application/octet-stream")
-		http.ServeFile(w, r, path)
+		serveFileDownload(w, "state.db", "application/octet-stream", path)
 	}
 }
 
