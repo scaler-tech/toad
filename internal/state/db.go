@@ -22,6 +22,19 @@ func dbCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), dbTimeout)
 }
 
+// dbRetry retries fn up to 3 times on SQLITE_BUSY errors with exponential backoff.
+func dbRetry(fn func() error) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		err = fn()
+		if err == nil || !strings.Contains(strings.ToUpper(err.Error()), "SQLITE_BUSY") {
+			return err
+		}
+		time.Sleep(time.Duration(100<<attempt) * time.Millisecond) // 100ms, 200ms, 400ms
+	}
+	return err
+}
+
 // DB wraps SQLite for persistent state.
 type DB struct {
 	db *sql.DB
@@ -55,8 +68,8 @@ func OpenDBAt(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("setting WAL mode: %w", err)
 	}
 
-	// Wait up to 5s on write contention instead of failing immediately with SQLITE_BUSY
-	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+	// Wait up to 10s on write contention instead of failing immediately with SQLITE_BUSY
+	if _, err := db.Exec("PRAGMA busy_timeout=10000"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("setting busy timeout: %w", err)
 	}
@@ -261,16 +274,18 @@ func (d *DB) SaveRun(run *Run) error {
 		}
 	}
 
-	ctx, cancel := dbCtx()
-	defer cancel()
-	_, err := d.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO runs (id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.ID, run.Status, run.SlackChannel, run.SlackThreadTS,
-		run.Branch, run.WorktreePath, run.Task, run.RepoName, run.ClaimScope, run.StartedAt,
-		string(resultJSON), time.Now(),
-	)
-	return err
+	return dbRetry(func() error {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		_, err := d.db.ExecContext(ctx, `
+			INSERT OR REPLACE INTO runs (id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			run.ID, run.Status, run.SlackChannel, run.SlackThreadTS,
+			run.Branch, run.WorktreePath, run.Task, run.RepoName, run.ClaimScope, run.StartedAt,
+			string(resultJSON), time.Now(),
+		)
+		return err
+	})
 }
 
 // UpdateStatus updates the status of a run.
@@ -395,15 +410,19 @@ func (d *DB) GetThreadMemory(threadTS string) (*ThreadMemory, error) {
 
 // PruneThreadMemory removes thread memories older than the given duration.
 func (d *DB) PruneThreadMemory(olderThan time.Duration) (int, error) {
-	ctx, cancel := dbCtx()
-	defer cancel()
 	cutoff := time.Now().Add(-olderThan)
-	result, err := d.db.ExecContext(ctx, "DELETE FROM thread_memory WHERE created_at < ?", cutoff)
-	if err != nil {
-		return 0, err
-	}
-	n, _ := result.RowsAffected()
-	return int(n), nil
+	var n int64
+	err := dbRetry(func() error {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		result, err := d.db.ExecContext(ctx, "DELETE FROM thread_memory WHERE created_at < ?", cutoff)
+		if err != nil {
+			return err
+		}
+		n, _ = result.RowsAffected()
+		return nil
+	})
+	return int(n), err
 }
 
 // SavePRWatch registers a PR for review comment monitoring.
@@ -863,14 +882,16 @@ func (d *DB) WriteDaemonStats(stats *DaemonStats) error {
 	if err != nil {
 		return fmt.Errorf("marshaling daemon stats: %w", err)
 	}
-	ctx, cancel := dbCtx()
-	defer cancel()
-	_, err = d.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO daemon_stats (id, stats_json, updated_at)
-		VALUES (1, ?, ?)`,
-		string(data), time.Now(),
-	)
-	return err
+	return dbRetry(func() error {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		_, err := d.db.ExecContext(ctx, `
+			INSERT OR REPLACE INTO daemon_stats (id, stats_json, updated_at)
+			VALUES (1, ?, ?)`,
+			string(data), time.Now(),
+		)
+		return err
+	})
 }
 
 // ReadDaemonStats reads the daemon's live stats. Returns nil if never written.

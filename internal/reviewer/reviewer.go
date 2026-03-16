@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -113,6 +114,16 @@ func (w *Watcher) poll(ctx context.Context) {
 	var active int
 	now := time.Now()
 	for _, watch := range watches {
+		// Close watches whose repo path no longer exists on disk (e.g. stale worktree references).
+		if watch.RepoPath != "" {
+			if _, err := os.Stat(watch.RepoPath); err != nil {
+				slog.Info("closing PR watch with stale repo path",
+					"pr", watch.PRNumber, "repo_path", watch.RepoPath)
+				_ = w.db.ClosePRWatch(watch.PRNumber, "path_stale")
+				continue
+			}
+		}
+
 		age := now.Sub(watch.CreatedAt)
 		switch {
 		case age > 24*time.Hour && w.pollTick%15 != 0:

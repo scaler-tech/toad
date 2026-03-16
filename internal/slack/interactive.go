@@ -1,8 +1,12 @@
 package slack
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net/http"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
@@ -40,14 +44,14 @@ func handleInteractive(ctx context.Context, c *Client, evt socketmode.Event) {
 
 	// Instant feedback: replace button with processing indicator before any API calls.
 	processingBlocks := SpawnedByBlocks(cb.Message.Blocks, "")
-	if err := c.UpdateMessageWithBlocks(channel, cb.MessageTs, cb.Message.Text, processingBlocks); err != nil {
+	if err := respondToInteraction(cb.ResponseURL, cb.Message.Text, processingBlocks); err != nil {
 		slog.Warn("failed to update button message", "error", err)
 	}
 
 	go func() {
 		userName := c.ResolveUserName(userID)
 		finalBlocks := SpawnedByBlocks(cb.Message.Blocks, userName)
-		if err := c.UpdateMessageWithBlocks(channel, cb.MessageTs, cb.Message.Text, finalBlocks); err != nil {
+		if err := respondToInteraction(cb.ResponseURL, cb.Message.Text, finalBlocks); err != nil {
 			slog.Warn("failed to update button message", "error", err)
 		}
 
@@ -63,4 +67,34 @@ func handleInteractive(ctx context.Context, c *Client, evt socketmode.Event) {
 			c.handler(ctx, msg)
 		}
 	}()
+}
+
+// respondToInteraction POSTs a response payload to a Slack ResponseURL,
+// replacing the original message with updated blocks.
+func respondToInteraction(responseURL, fallbackText string, blocks []slack.Block) error {
+	payload := struct {
+		ReplaceOriginal bool          `json:"replace_original"`
+		Text            string        `json:"text"`
+		Blocks          []slack.Block `json:"blocks"`
+	}{
+		ReplaceOriginal: true,
+		Text:            fallbackText,
+		Blocks:          blocks,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal response payload: %w", err)
+	}
+
+	resp, err := http.Post(responseURL, "application/json", bytes.NewReader(body)) //nolint:gosec // URL is a trusted Slack ResponseURL from InteractionCallback
+	if err != nil {
+		return fmt.Errorf("post to response_url: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("response_url returned status %d", resp.StatusCode)
+	}
+	return nil
 }
