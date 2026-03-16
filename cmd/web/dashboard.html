@@ -1216,15 +1216,19 @@ async function loadDevInfo() {
     document.getElementById('dev-home').textContent = d.toad_home || 'N/A';
   } catch(e) { console.error('dev info failed', e); }
 }
-function devDownload(url) {
-  const iframe = document.createElement('iframe');
-  iframe.style.display = 'none';
-  iframe.src = url;
-  document.body.appendChild(iframe);
-  setTimeout(() => iframe.remove(), 30000);
+async function devDownload(url, filename) {
+  try {
+    const r = await fetch(url);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch(e) { alert('Download failed: ' + e.message); }
 }
-function devDownloadLog() { devDownload('/api/dev/download-log'); }
-function devDownloadDB() { devDownload('/api/dev/download-db'); }
+function devDownloadLog() { devDownload('/api/dev/download-log', 'toad.log'); }
+function devDownloadDB() { devDownload('/api/dev/download-db', 'state.db'); }
 async function devResetLog() {
   if (!confirm('This will permanently delete the log file. Continue?')) return;
   try {
