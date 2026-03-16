@@ -119,6 +119,10 @@
     padding: 2px 8px; border-radius: 10px;
     background: rgba(255,193,7,0.1);
   }
+  /* Dev mode info grid */
+  .dev-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
+  .dev-label { font-size: 12px; color: var(--dim); }
+  .dev-value { font-size: 12px; font-family: monospace; color: var(--text); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Modal overlay */
   .modal-overlay {
     display: none; position: fixed; inset: 0;
@@ -475,6 +479,10 @@
         <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
         <span class="tooltip">Kiosk mode</span>
       </a>
+      <button class="icon-btn" onclick="showDevModal()" title="Dev mode">
+        <svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <span class="tooltip">Dev mode</span>
+      </button>
     </div>
     <span class="refresh-info" id="last-refresh"></span>
   </div>
@@ -624,6 +632,35 @@
       <span class="refresh-info" id="modal-elapsed"></span>
       <button class="action-btn" id="btn-force-reload" onclick="forceReloadDashboard()" style="display:none;margin-left:8px" title="Force the dashboard to restart on the new binary">Force reload</button>
       <button class="action-btn" onclick="hideRestartModal()" style="margin-left:8px">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="dev-modal">
+  <div class="modal" style="min-width:480px">
+    <h3>Dev Mode</h3>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="dev-info-grid" id="dev-info-grid">
+        <div class="dev-row"><span class="dev-label">Log file</span><span class="dev-value" id="dev-log-path">-</span></div>
+        <div class="dev-row"><span class="dev-label">Log size</span><span class="dev-value" id="dev-log-size">-</span></div>
+        <div class="dev-row"><span class="dev-label">Database</span><span class="dev-value" id="dev-db-path">-</span></div>
+        <div class="dev-row"><span class="dev-label">DB size</span><span class="dev-value" id="dev-db-size">-</span></div>
+        <div class="dev-row"><span class="dev-label">Toad home</span><span class="dev-value" id="dev-home">-</span></div>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="action-btn" onclick="devDownloadLog()">Download log</button>
+        <button class="action-btn" onclick="devDownloadDB()">Download DB</button>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:12px">
+        <div style="font-size:11px;color:var(--red);margin-bottom:8px;font-weight:600">Danger zone</div>
+        <div style="display:flex;gap:8px">
+          <button class="action-btn danger" onclick="devResetLog()">Reset log</button>
+          <button class="action-btn danger" onclick="devResetDB()">Reset DB</button>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="action-btn" onclick="hideDevModal()">Close</button>
     </div>
   </div>
 </div>
@@ -1152,6 +1189,51 @@ function hideRestartModal() {
   const btn = document.getElementById('btn-restart');
   btn.disabled = false;
   btn.classList.remove('spinning');
+}
+
+// --- Dev mode ---
+function showDevModal() {
+  document.getElementById('dev-modal').classList.add('visible');
+  loadDevInfo();
+}
+function hideDevModal() {
+  document.getElementById('dev-modal').classList.remove('visible');
+}
+function formatBytes(b) {
+  if (b < 0) return 'N/A';
+  if (b < 1024) return b + ' B';
+  if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
+  return (b/(1024*1024)).toFixed(1) + ' MB';
+}
+async function loadDevInfo() {
+  try {
+    const r = await fetch('/api/dev/info');
+    const d = await r.json();
+    document.getElementById('dev-log-path').textContent = d.log_path || 'N/A';
+    document.getElementById('dev-log-size').textContent = formatBytes(d.log_size);
+    document.getElementById('dev-db-path').textContent = d.db_path || 'N/A';
+    document.getElementById('dev-db-size').textContent = formatBytes(d.db_size);
+    document.getElementById('dev-home').textContent = d.toad_home || 'N/A';
+  } catch(e) { console.error('dev info failed', e); }
+}
+function devDownloadLog() { window.open('/api/dev/download-log', '_blank'); }
+function devDownloadDB() { window.open('/api/dev/download-db', '_blank'); }
+async function devResetLog() {
+  if (!confirm('This will permanently delete the log file. Continue?')) return;
+  try {
+    const r = await fetch('/api/dev/reset-log', {method:'POST'});
+    const d = await r.json();
+    if (d.ok) { loadDevInfo(); } else { alert('Error: ' + (d.error || 'unknown')); }
+  } catch(e) { alert('Failed: ' + e.message); }
+}
+async function devResetDB() {
+  if (!confirm('This will permanently delete the state database including all run history, PR watches, and personality data. This cannot be undone. Continue?')) return;
+  try {
+    const r = await fetch('/api/dev/reset-db', {method:'POST'});
+    const d = await r.json();
+    if (d.ok) { alert('Database reset. Dashboard will need a restart.'); location.reload(); }
+    else { alert('Error: ' + (d.error || 'unknown')); }
+  } catch(e) { alert('Failed: ' + e.message); }
 }
 
 function updateRestartModal(dm, active, now) {

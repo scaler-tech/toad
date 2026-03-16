@@ -71,6 +71,8 @@ Category definitions:
 
 Key distinction: if the user wants INFORMATION delivered in a reply, that is "question". If they want a CODE CHANGE shipped as a PR, that is "bug" or "feature". When ambiguous, prefer "question" — the user can always escalate.
 
+Thread messages prefixed with "[toad's previous reply]" are toad's own earlier responses. If the user is replying to toad's own analysis, they are most likely continuing a conversation (follow-up question, pushback, clarification) — prefer "question" unless the message explicitly requests a code change (e.g. "fix this", "ship it", "create a PR").
+
 Set confidence based on the combined specifics available (primary message + thread context). Confidence should be LOW (< 0.5) when there are no file paths, no clear behavior to change, no error details, or it's unclear what code should be modified — even after considering thread context.
 
 Your response MUST be ONLY a JSON object — no prose, no markdown fences, no explanation before or after:

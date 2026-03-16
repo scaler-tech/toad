@@ -799,7 +799,7 @@ func handleTriggered(
 	// INVESTIGATE + SPAWN: bugs and features go through an investigation gate before spawning.
 	// Sonnet verifies the request is a real code change with enough context. If not, we fall
 	// through to ribbit — the user gets a helpful reply instead of a wasted PR.
-	if result.Category == "bug" || result.Category == "feature" {
+	if (result.Category == "bug" || result.Category == "feature") && result.Confidence >= 0.5 {
 		slog.Info("investigating before spawn", "summary", result.Summary, "category", result.Category)
 
 		taskText := buildTaskDescription(msg.Text, msg.ThreadContext)

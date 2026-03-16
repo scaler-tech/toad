@@ -239,6 +239,9 @@ func (c *Client) SetMCPHandler(h *SlashCommandHandler) {
 }
 
 // FetchThreadMessages retrieves all messages in a thread.
+// Messages sent by toad itself are prefixed with "[toad's previous reply] "
+// so that downstream consumers (triage, ribbit) can distinguish toad's own
+// analysis from user-provided content.
 func (c *Client) FetchThreadMessages(channel, threadTS string) ([]string, error) {
 	msgs, _, _, err := c.api.GetConversationReplies(&slack.GetConversationRepliesParameters{
 		ChannelID: channel,
@@ -249,9 +252,25 @@ func (c *Client) FetchThreadMessages(channel, threadTS string) ([]string, error)
 	}
 	var texts []string
 	for _, m := range msgs {
-		texts = append(texts, extractFullText(m.Msg))
+		text := extractFullText(m.Msg)
+		if c.isToadMessage(channel, m.Msg) {
+			text = "[toad's previous reply] " + text
+		}
+		texts = append(texts, text)
 	}
 	return texts, nil
+}
+
+// isToadMessage checks if a message was sent by toad, either by user ID match
+// or by checking the tracked reply timestamps.
+func (c *Client) isToadMessage(channel string, m slack.Msg) bool {
+	if c.botUserID != "" && m.User == c.botUserID {
+		return true
+	}
+	if m.BotID != "" && c.IsToadReply(channel, m.Timestamp) {
+		return true
+	}
+	return false
 }
 
 // FetchRecentMessages retrieves recent channel messages before the given timestamp.

@@ -164,6 +164,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		w.Header().Set("Content-Disposition", "attachment; filename=personality.yaml")
 		w.Write(data)
 	})
+	mux.HandleFunc("/api/dev/info", apiDevInfoHandler(cfg))
+	mux.HandleFunc("/api/dev/download-log", apiDevDownloadLogHandler(cfg))
+	mux.HandleFunc("/api/dev/download-db", apiDevDownloadDBHandler())
+	mux.HandleFunc("/api/dev/reset-log", apiDevResetLogHandler(cfg))
+	mux.HandleFunc("/api/dev/reset-db", apiDevResetDBHandler())
+
 	// Start auto-update background loop
 	go autoUpdateLoop(db)
 
@@ -978,4 +984,114 @@ func extractOAuthToken(data []byte) string {
 		return ""
 	}
 	return oauth.AccessToken
+}
+
+// --- Dev mode API handlers ---
+
+func devLogPath(cfg *config.Config) string {
+	if cfg != nil && cfg.Log.File != "" {
+		return cfg.Log.File
+	}
+	home, err := toadpath.Home()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "toad.log")
+}
+
+func devDBPath() string {
+	home, err := toadpath.Home()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "state.db")
+}
+
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return -1
+	}
+	return info.Size()
+}
+
+func apiDevInfoHandler(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		logPath := devLogPath(cfg)
+		dbPath := devDBPath()
+		json.NewEncoder(w).Encode(map[string]any{
+			"log_path":  logPath,
+			"log_size":  fileSize(logPath),
+			"db_path":   dbPath,
+			"db_size":   fileSize(dbPath),
+			"toad_home": func() string { h, _ := toadpath.Home(); return h }(),
+		})
+	}
+}
+
+func apiDevDownloadLogHandler(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := devLogPath(cfg)
+		if path == "" {
+			http.Error(w, "log file not configured", 404)
+			return
+		}
+		w.Header().Set("Content-Disposition", "attachment; filename=toad.log")
+		w.Header().Set("Content-Type", "text/plain")
+		http.ServeFile(w, r, path)
+	}
+}
+
+func apiDevDownloadDBHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := devDBPath()
+		if path == "" {
+			http.Error(w, "db path not found", 404)
+			return
+		}
+		w.Header().Set("Content-Disposition", "attachment; filename=state.db")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeFile(w, r, path)
+	}
+}
+
+func apiDevResetLogHandler(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		path := devLogPath(cfg)
+		if path == "" {
+			json.NewEncoder(w).Encode(map[string]any{"error": "log file not configured"})
+			return
+		}
+		if err := os.Truncate(path, 0); err != nil {
+			json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}
+}
+
+func apiDevResetDBHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		path := devDBPath()
+		if path == "" {
+			json.NewEncoder(w).Encode(map[string]any{"error": "db path not found"})
+			return
+		}
+		// Remove the DB and WAL/SHM files
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			_ = os.Remove(path + suffix)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}
 }
