@@ -1058,13 +1058,23 @@ async function refresh() {
               + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>'
               + '</a>';
           }
-          const chanPill = o.channel ? '<span class="badge" style="background:rgba(125,133,144,0.15);color:var(--dim)">#' + esc(o.channel) + '</span>' : '';
+          let chanPill = '';
+          if (o.channel) {
+            const chanInner = '<span class="badge" style="background:rgba(125,133,144,0.15);color:var(--dim)">#' + esc(o.channel) + '</span>';
+            if (o.channel_id && o.thread_ts) {
+              const ts = o.thread_ts.replace('.', '');
+              const url = 'https://slack.com/archives/' + o.channel_id + '/p' + ts;
+              chanPill = '<a href="' + url + '" target="_blank" rel="noopener" style="text-decoration:none">' + chanInner + '</a>';
+            } else {
+              chanPill = chanInner;
+            }
+          }
           ohtml += '<tr' + rowStyle + '><td>' + relTimeAgo(o.created_at, now) + '</td>'
             + '<td style="white-space:normal">' + esc(o.summary) + reasonTip + '</td>'
             + '<td>' + chanPill + '</td>'
             + '<td>' + esc(o.category) + '</td>'
             + '<td class="mono">' + (o.confidence * 100).toFixed(0) + '%</td>'
-            + '<td>' + abbrevSize(o.est_size) + '</td>'
+            + '<td><span class="badge" style="background:rgba(125,133,144,0.15);color:var(--dim)">' + abbrevSize(o.est_size) + '</span></td>'
             + '<td>' + obadge + '</td>'
             + '<td style="text-align:center">' + slackLink + '</td></tr>';
         }

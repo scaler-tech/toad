@@ -432,6 +432,10 @@ function esc(s) {
   el.textContent = s;
   return el.innerHTML;
 }
+function abbrevSize(s) {
+  const m = {tiny: 'xs', small: 's', medium: 'm', large: 'l', xlarge: 'xl', 'extra-large': 'xl'};
+  return m[s] || esc(s);
+}
 function relTimeAgo(unixTs, now) {
   const diff = now - unixTs;
   if (diff < 60) return 'just now';
@@ -626,13 +630,14 @@ async function refresh() {
 
         rhtml += '<div class="opp-card' + (o.dismissed ? ' dismissed' : '') + '">'
           + '<div class="opp-top">'
-          + '<span class="opp-cat ' + catCls + '">' + esc(o.category) + ' \u00b7 ' + esc(o.est_size) + '</span>'
+          + '<span class="opp-cat ' + catCls + '">' + esc(o.category) + ' \u00b7 ' + abbrevSize(o.est_size) + '</span>'
           + badge
           + '</div>'
           + '<div class="opp-summary">' + esc(o.summary) + '</div>'
           + '<div class="opp-bottom">'
           + '<div class="opp-conf-bar"><div class="opp-conf-fill" style="width:' + conf + '%;background:' + confColor + '"></div></div>'
           + '<span>' + conf + '% confidence</span>'
+          + (o.channel ? '<span class="opp-badge" style="background:rgba(125,133,144,0.1);color:var(--dim)">#' + esc(o.channel) + '</span>' : '')
           + '<span>' + relTimeAgo(o.created_at, now) + '</span>'
           + '</div></div>';
       }
