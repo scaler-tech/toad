@@ -499,8 +499,8 @@ func (e *Engine) flush(ctx context.Context) {
 func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, opportunities []Opportunity, gatedTickets map[string]bool) bool {
 	for _, opp := range opportunities {
 		if !e.passesGuardrails(opp) {
-			slog.Debug("digest opportunity filtered by guardrails",
-				"summary", opp.Summary, "confidence", opp.Confidence, "category", opp.Category)
+			slog.Info("digest near-miss filtered by guardrails",
+				"summary", opp.Summary, "confidence", opp.Confidence, "category", opp.Category, "size", opp.EstSize)
 			continue
 		}
 
@@ -814,15 +814,16 @@ Return [] if no opportunities (the most common case), or an array of objects:
 - Do NOT include any text before or after the JSON array
 
 Critical rules:
-- MOST batches should return [] — be extremely conservative
-- Only flag messages that describe a SPECIFIC, CONCRETE code change
+- MOST batches should return [] — be conservative
+- Only flag messages where the DESIRED CHANGE is clear and scoped — you should be able to describe what code to add, modify, or fix
 - The message must contain enough detail that a human developer would know what to do — the coding agent WILL search the codebase to find the relevant files, so "which file" is NOT required
 - Needing to explore the codebase (find the right component, read existing patterns) is NORMAL and expected — that does NOT reduce confidence
-- What DOES reduce confidence: vague intent, ambiguous requirements, needing a product decision, unclear desired behavior
-- Vague complaints, general discussions, or questions should NEVER be flagged
+- Casual tone does NOT reduce confidence — "it would be nice to add X" is just as actionable as "add X" if the change is clear and scoped
+- What DOES reduce confidence: ambiguous requirements, needing a product decision, unclear desired behavior, or multiple conflicting interpretations of what to build
+- Off-topic chat, questions, or messages with no identifiable code change should NOT be flagged
 - Only "bug" and "feature" categories are allowed
 - Estimated sizes: "tiny" (1-2 lines), "small" (1 file), or "medium" (2-3 files). Prefer smaller estimates, but use "medium" when the root cause clearly spans multiple files.
-- confidence must be >= 0.95 to be considered
+- confidence must be >= %.2f to be considered
 - message_index is 0-based, referring to the message list above
 
 Deduplication — one opportunity per issue:
@@ -882,7 +883,25 @@ func (e *Engine) analyze(ctx context.Context, msgs []Message) ([]Opportunity, er
 		repoField = `, "repo": "<name>"`
 	}
 
-	prompt := fmt.Sprintf(digestPrompt, sb.String(), repoSection, repoField)
+	minConf := 0.95
+	if e.cfg != nil && e.cfg.MinConfidence > 0 {
+		minConf = e.cfg.MinConfidence
+	}
+	if e.personality != nil {
+		ov := e.personality.ConfigOverrides(personality.ModeDigest)
+		if ov.MinConfidence != nil {
+			minConf = *ov.MinConfidence
+		}
+	}
+
+	// Tell Haiku to return opportunities slightly below the active threshold
+	// so near-misses are visible (dismissed by guardrails but logged for analysis).
+	promptConf := minConf - 0.20
+	if promptConf < 0.50 {
+		promptConf = 0.50
+	}
+
+	prompt := fmt.Sprintf(digestPrompt, sb.String(), repoSection, repoField, promptConf)
 
 	result, err := e.agent.Run(ctx, agent.RunOpts{
 		Prompt:      prompt,
@@ -1096,7 +1115,10 @@ func (e *Engine) buildChunks(msgs []Message) []chunk {
 
 func (e *Engine) passesGuardrails(opp Opportunity) bool {
 	// Confidence check
-	minConf := e.cfg.MinConfidence
+	minConf := 0.95
+	if e.cfg != nil && e.cfg.MinConfidence > 0 {
+		minConf = e.cfg.MinConfidence
+	}
 	if e.personality != nil {
 		ov := e.personality.ConfigOverrides(personality.ModeDigest)
 		if ov.MinConfidence != nil {

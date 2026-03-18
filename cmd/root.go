@@ -275,25 +275,44 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 				if isBot {
 					// Resolve file contributors to Slack mentions
-					if len(notice.FilesHint) > 0 {
+					if len(notice.FilesHint) == 0 {
+						slog.Debug("digest dev tag skipped: no files_hint from investigation")
+					} else {
 						repo := resolver.Resolve(notice.Repo, notice.FilesHint)
-						if repo != nil {
+						if repo == nil {
+							slog.Debug("digest dev tag skipped: could not resolve repo",
+								"repo_hint", notice.Repo, "files_hint", notice.FilesHint)
+						} else {
 							botSet := make(map[string]bool)
 							for _, u := range cfg.VCS.BotUsernames {
 								botSet[strings.ToLower(u)] = true
 							}
-							if logins := vcsResolver(repo.Path).GetSuggestedReviewers(
+							logins := vcsResolver(repo.Path).GetSuggestedReviewers(
 								context.Background(), repo.Path, notice.FilesHint, botSet, 2,
-							); len(logins) > 0 {
+							)
+							if len(logins) == 0 {
+								slog.Debug("digest dev tag skipped: no git contributors found",
+									"files_hint", notice.FilesHint, "repo", repo.Name)
+							} else {
 								resolved := islack.ResolveGitHubToSlack(stateDB, slackClient.API(), logins)
 								var mentions []string
+								var unresolved []string
 								for _, login := range logins {
 									if slackID, ok := resolved[login]; ok {
 										mentions = append(mentions, fmt.Sprintf("<@%s>", slackID))
+									} else {
+										unresolved = append(unresolved, login)
 									}
+								}
+								if len(unresolved) > 0 {
+									slog.Debug("digest dev tag: some GitHub users not mapped to Slack",
+										"unresolved", unresolved)
 								}
 								if len(mentions) > 0 {
 									text += "\n\ncc " + strings.Join(mentions, " ")
+								} else {
+									slog.Debug("digest dev tag skipped: GitHub logins found but none mapped to Slack",
+										"logins", logins)
 								}
 							}
 						}
