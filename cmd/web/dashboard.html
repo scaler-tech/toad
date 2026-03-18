@@ -747,6 +747,10 @@ function relTimeAgo(unixTs, now) {
   return Math.floor(diff / 86400) + 'd ago';
 }
 function num(n) { return n != null ? n.toLocaleString() : '-'; }
+function abbrevSize(s) {
+  const m = {tiny: 'xs', small: 's', medium: 'm', large: 'l', xlarge: 'xl', 'extra-large': 'xl'};
+  return m[s] || esc(s);
+}
 
 async function refresh() {
   try {
@@ -1016,7 +1020,7 @@ async function refresh() {
         ohtml = '<div class="empty">Toad King is monitoring your channels (' + modeLabel + ' mode). Opportunities will appear here as they are identified.</div>';
         document.getElementById('opps-wrap').innerHTML = ohtml;
       } else {
-        ohtml = '<table><tr><th style="width:80px">When</th><th>Summary</th><th style="width:70px">Category</th><th style="width:85px">Confidence</th><th style="width:70px">Size</th><th style="width:100px">Status</th><th style="width:28px"></th></tr>';
+        ohtml = '<table><tr><th style="width:80px">When</th><th>Summary</th><th style="width:90px">Channel</th><th style="width:70px">Category</th><th style="width:85px">Confidence</th><th style="width:40px">Size</th><th style="width:100px">Status</th><th style="width:28px"></th></tr>';
         for (let i = 0; i < opps.length; i++) {
           const o = opps[i];
           const hidden = !oppsExpanded && i >= MAX_VISIBLE ? ' display:none;' : '';
@@ -1054,11 +1058,13 @@ async function refresh() {
               + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>'
               + '</a>';
           }
+          const chanPill = o.channel ? '<span class="badge" style="background:rgba(125,133,144,0.15);color:var(--dim)">#' + esc(o.channel) + '</span>' : '';
           ohtml += '<tr' + rowStyle + '><td>' + relTimeAgo(o.created_at, now) + '</td>'
             + '<td style="white-space:normal">' + esc(o.summary) + reasonTip + '</td>'
+            + '<td>' + chanPill + '</td>'
             + '<td>' + esc(o.category) + '</td>'
             + '<td class="mono">' + (o.confidence * 100).toFixed(0) + '%</td>'
-            + '<td>' + esc(o.est_size) + '</td>'
+            + '<td>' + abbrevSize(o.est_size) + '</td>'
             + '<td>' + obadge + '</td>'
             + '<td style="text-align:center">' + slackLink + '</td></tr>';
         }
