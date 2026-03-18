@@ -3,20 +3,20 @@ name: Tag Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to tag (e.g. 0.1.101 or v0.1.101)"
-        required: true
-        type: string
       bump:
-        description: "Or auto-bump from latest tag"
-        required: false
+        description: "Version bump (or 'manual' to specify exact version)"
+        required: true
         type: choice
-        default: "manual"
+        default: "patch"
         options:
-          - manual
           - patch
           - minor
           - major
+          - manual
+      version:
+        description: "Manual version (only used when bump=manual, e.g. 0.2.0 or v0.2.0)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -34,7 +34,21 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          if [ "${{ inputs.bump }}" != "manual" ]; then
+          if [ "${{ inputs.bump }}" = "manual" ]; then
+            VERSION="${{ inputs.version }}"
+
+            if [ -z "$VERSION" ]; then
+              echo "::error::Version input is required when bump=manual"
+              exit 1
+            fi
+
+            # Normalize: add v prefix if missing
+            if [[ ! "$VERSION" =~ ^v ]]; then
+              VERSION="v${VERSION}"
+            fi
+
+            echo "Manual version: $VERSION"
+          else
             # Auto-bump from latest tag
             LATEST=$(git tag --list 'v*' --sort=-v:refname | head -1)
             if [ -z "$LATEST" ]; then
@@ -55,19 +69,12 @@ jobs:
             esac
 
             VERSION="v${MAJOR}.${MINOR}.${PATCH}"
-            echo "Auto-bumped from $LATEST to $VERSION (${{ inputs.bump }})"
-          else
-            VERSION="${{ inputs.version }}"
-
-            # Normalize: add v prefix if missing
-            if [[ ! "$VERSION" =~ ^v ]]; then
-              VERSION="v${VERSION}"
-            fi
+            echo "Auto-bumped from $LATEST → $VERSION (${{ inputs.bump }})"
           fi
 
           # Validate semantic version format: vMAJOR.MINOR.PATCH
           if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Invalid version format '$VERSION'. Must be vMAJOR.MINOR.PATCH (e.g. v0.1.101)"
+            echo "::error::Invalid version format '$VERSION'. Must be vMAJOR.MINOR.PATCH (e.g. v0.2.0)"
             exit 1
           fi
 
@@ -78,7 +85,7 @@ jobs:
           fi
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Version: $VERSION"
+          echo "### Version: $VERSION" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-go@v5
         with:
