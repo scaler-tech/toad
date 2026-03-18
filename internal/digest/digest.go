@@ -826,6 +826,10 @@ Critical rules:
 - confidence must be >= %.2f to be considered
 - message_index is 0-based, referring to the message list above
 
+Evaluating messages in a batch:
+- Evaluate EACH message individually — a batch may contain multiple unrelated requests. Return a separate opportunity for each distinct change, even if they come from the same person or channel.
+- Messages CAN provide context for each other (e.g. a follow-up clarifying an earlier request), but do NOT merge messages that describe DIFFERENT changes just because they are thematically related (e.g. two different dashboard improvements are two opportunities, not one).
+
 Deduplication — one opportunity per issue:
 - Messages ending with "(xN duplicates)" are recurring — the same text appeared N times. Treat as one issue, not N.
 - If multiple DIFFERENT messages describe the same underlying issue (e.g. an error alert and a human reporting the same error), create only ONE opportunity referencing the most specific/informative message.
