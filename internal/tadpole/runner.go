@@ -183,7 +183,8 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	if err != nil {
 		return fail(fmt.Sprintf("agent: %s", err))
 	}
-	slog.Info("agent completed", "duration", agentOut.Duration)
+	slog.Info("agent completed", "duration", agentOut.Duration,
+		"hit_max_turns", agentOut.HitMaxTurns, "cost_usd", agentOut.CostUSD)
 
 	// 3. Validate + retry loop
 	r.updateStatus(task, statusTS, ":mag: Validating changes...")
@@ -221,7 +222,13 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	}
 
 	if !valResult.Passed {
-		return fail(valResult.FailReason)
+		reason := valResult.FailReason
+		if agentOut.HitMaxTurns && valResult.FilesChanged == 0 {
+			reason = "this task may be too complex for an autonomous fix — the agent used all available turns without producing changes. Try breaking it into smaller steps or providing more specific instructions"
+		} else if valResult.FilesChanged == 0 {
+			reason = "the agent explored the codebase but couldn't determine what to change — try providing more detail about the desired behavior"
+		}
+		return fail(reason)
 	}
 
 	slog.Info("validation passed", "files_changed", valResult.FilesChanged)
