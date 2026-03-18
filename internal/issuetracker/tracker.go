@@ -17,6 +17,13 @@ type IssueDetails struct {
 	Title       string
 	Description string
 	URL         string
+	Comments    []IssueComment
+}
+
+// IssueComment holds a single comment on an issue.
+type IssueComment struct {
+	Author string
+	Body   string
 }
 
 // IssueStatus represents the current state and assignment of an issue.

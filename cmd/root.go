@@ -1246,6 +1246,16 @@ func formatTicketContext(tickets []digest.TicketContext) string {
 			}
 			fmt.Fprintf(&sb, "Description:\n%s\n", desc)
 		}
+		if len(t.Comments) > 0 {
+			sb.WriteString("Comments:\n")
+			for _, c := range t.Comments {
+				body := c.Body
+				if len(body) > 500 {
+					body = body[:500] + "..."
+				}
+				fmt.Fprintf(&sb, "- @%s: %s\n", c.Author, body)
+			}
+		}
 		sb.WriteString("\n")
 	}
 	sb.WriteString("</linked_tickets>\n")

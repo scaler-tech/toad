@@ -141,6 +141,12 @@ func (lt *LinearTracker) GetIssueDetails(ctx context.Context, ref *IssueRef) (*I
 				title
 				description
 				url
+				comments(first: 20, orderBy: createdAt) {
+					nodes {
+						body
+						user { name }
+					}
+				}
 			}
 		}
 	}`
@@ -165,6 +171,14 @@ func (lt *LinearTracker) GetIssueDetails(ctx context.Context, ref *IssueRef) (*I
 				Title       string `json:"title"`
 				Description string `json:"description"`
 				URL         string `json:"url"`
+				Comments    struct {
+					Nodes []struct {
+						Body string `json:"body"`
+						User struct {
+							Name string `json:"name"`
+						} `json:"user"`
+					} `json:"nodes"`
+				} `json:"comments"`
 			} `json:"nodes"`
 		} `json:"issues"`
 	}
@@ -177,12 +191,22 @@ func (lt *LinearTracker) GetIssueDetails(ctx context.Context, ref *IssueRef) (*I
 	}
 
 	node := result.Issues.Nodes[0]
+	var comments []IssueComment
+	for _, c := range node.Comments.Nodes {
+		if c.Body != "" {
+			comments = append(comments, IssueComment{
+				Author: c.User.Name,
+				Body:   c.Body,
+			})
+		}
+	}
 	return &IssueDetails{
 		ID:          node.Identifier,
 		InternalID:  node.ID,
 		Title:       node.Title,
 		Description: node.Description,
 		URL:         node.URL,
+		Comments:    comments,
 	}, nil
 }
 

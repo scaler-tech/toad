@@ -51,6 +51,13 @@ type TicketContext struct {
 	Title       string
 	Description string
 	URL         string
+	Comments    []TicketComment
+}
+
+// TicketComment holds a single comment on a ticket.
+type TicketComment struct {
+	Author string
+	Body   string
 }
 
 // InvestigateResult holds the outcome of a ribbit investigation.
@@ -580,6 +587,12 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 					tc.Description = details.Description
 					if tc.URL == "" {
 						tc.URL = details.URL
+					}
+					for _, c := range details.Comments {
+						tc.Comments = append(tc.Comments, TicketComment{
+							Author: c.Author,
+							Body:   c.Body,
+						})
 					}
 				}
 				tickets = append(tickets, tc)
