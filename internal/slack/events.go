@@ -171,7 +171,7 @@ func handleReaction(ctx context.Context, c *Client, ev *slackevents.ReactionAdde
 		slog.Debug("skipping: unmonitored channel", "channel", ev.Item.Channel)
 		return
 	}
-	if c.markSeen(ev.Item.Channel, ev.Item.Timestamp) {
+	if c.markSeen(ev.Item.Channel, "react:"+ev.Item.Timestamp) {
 		slog.Debug("skipping: duplicate reaction", "ts", ev.Item.Timestamp)
 		return
 	}
