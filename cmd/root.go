@@ -796,8 +796,14 @@ func handleTriggered(
 
 	// For non-mention triggers, respect triage's actionability decision
 	if !msg.IsMention && !result.Actionable {
-		slog.Debug("handler: triage said not actionable, skipping", "confidence", result.Confidence)
-		slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
+		slog.Info("handler: triage said not actionable, asking for clarification",
+			"confidence", result.Confidence, "summary", result.Summary)
+		slackClient.SwapReaction(msg.Channel, msg.Timestamp, "eyes", "thinking_face")
+		slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(),
+			fmt.Sprintf(":frog: I'd like to help, but I'm not sure exactly what to change — %s\n\n"+
+				"Could you add more detail about the desired behavior? "+
+				"Reply in this thread and `@toad` me to try again.",
+				result.Summary))
 		return
 	}
 
