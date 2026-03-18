@@ -62,11 +62,24 @@ func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, err
 	output := stdout.Bytes()
 	slog.Debug("claude raw output", "len", len(output), "duration", duration)
 
+	if stderrStr := strings.TrimSpace(stderr.String()); stderrStr != "" {
+		slog.Debug("claude stderr", "stderr", stderrStr)
+	}
+
 	result, err := parseEnvelope(output)
 	if err != nil {
 		return nil, err
 	}
 	result.Duration = duration
+
+	slog.Debug("claude result parsed",
+		"result_len", len(result.Result),
+		"cost_usd", result.CostUSD,
+		"hit_max_turns", result.HitMaxTurns,
+		"session_id", result.SessionID,
+		"duration", duration,
+	)
+
 	return result, nil
 }
 

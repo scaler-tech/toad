@@ -142,7 +142,7 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 		additionalDirs = append(additionalDirs, p)
 	}
 
-	result, err := e.agent.Run(ctx, agent.RunOpts{
+	runOpts := agent.RunOpts{
 		Prompt:         prompt,
 		Model:          e.model,
 		MaxTurns:       maxTurns,
@@ -150,15 +150,42 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 		Permissions:    agent.PermissionReadOnly,
 		WorkDir:        repoPath,
 		AdditionalDirs: additionalDirs,
-	})
+	}
+
+	result, err := e.agent.Run(ctx, runOpts)
 	if err != nil {
 		return nil, fmt.Errorf("ribbit call failed: %w", err)
 	}
 
-	slog.Debug("ribbit raw response", "output", result.Result)
+	slog.Debug("ribbit raw response", "output", result.Result,
+		"hit_max_turns", result.HitMaxTurns, "cost_usd", result.CostUSD, "duration", result.Duration)
 
+	// Retry once on empty result — the agent may have spent all turns searching
+	// without producing a response, or hit a transient issue.
 	if strings.TrimSpace(result.Result) == "" {
-		return nil, fmt.Errorf("agent returned empty result")
+		reason := "empty result"
+		if result.HitMaxTurns {
+			reason = "hit max turns without responding"
+			// Give more turns on retry
+			runOpts.MaxTurns = maxTurns + 5
+		}
+		slog.Warn("ribbit empty, retrying once", "reason", reason, "max_turns", runOpts.MaxTurns)
+
+		result, err = e.agent.Run(ctx, runOpts)
+		if err != nil {
+			return nil, fmt.Errorf("ribbit retry failed: %w", err)
+		}
+
+		slog.Debug("ribbit retry response", "output", result.Result,
+			"hit_max_turns", result.HitMaxTurns, "cost_usd", result.CostUSD, "duration", result.Duration)
+
+		if strings.TrimSpace(result.Result) == "" {
+			reason = "empty result after retry"
+			if result.HitMaxTurns {
+				reason = "hit max turns after retry"
+			}
+			return nil, fmt.Errorf("agent returned %s", reason)
+		}
 	}
 
 	return &Response{Text: result.Result}, nil
