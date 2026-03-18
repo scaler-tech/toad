@@ -117,13 +117,9 @@ jobs:
       - name: Create and push tag
         run: |
           git tag "${{ steps.version.outputs.version }}"
-          git push origin "${{ steps.version.outputs.version }}"
-
-      - name: Trigger release workflow
-        run: |
-          gh workflow run release.yml -f tag="${{ steps.version.outputs.version }}"
+          git push "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git" "${{ steps.version.outputs.version }}"
           echo "### Tagged ${{ steps.version.outputs.version }} :rocket:" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Release workflow triggered." >> "$GITHUB_STEP_SUMMARY"
+          echo "Release workflow will trigger automatically." >> "$GITHUB_STEP_SUMMARY"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUSH_TOKEN: ${{ secrets.GORELEASER_TOKEN }}
