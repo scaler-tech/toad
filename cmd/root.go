@@ -788,16 +788,61 @@ func handleTriggered(
 
 		taskText := buildTaskDescription(msg.Text, msg.ThreadContext)
 
+		var dbOpp *state.DigestOpportunity
+		if stateManager.DB() != nil {
+			dbOpp = &state.DigestOpportunity{
+				Summary:       result.Summary,
+				Category:      result.Category,
+				Confidence:    result.Confidence,
+				EstSize:       result.EstSize,
+				Channel:       channelName,
+				ChannelID:     msg.Channel,
+				ThreadTS:      threadTS,
+				Message:       msg.Text,
+				Keywords:      strings.Join(result.Keywords, ","),
+				Investigating: true,
+				CreatedAt:     time.Now(),
+			}
+			if err := stateManager.DB().SaveDigestOpportunity(dbOpp); err != nil {
+				slog.Warn("failed to save investigating opportunity", "error", err)
+				dbOpp = nil
+			}
+		}
+
 		investigation, err := investigateTriggered(ctx, cfg, agentProvider, result, taskText, channelName, resolver)
 		if err != nil {
 			slog.Warn("triggered investigation failed, falling through to ribbit",
 				"error", err, "summary", result.Summary)
+			if dbOpp != nil {
+				dbOpp.Dismissed = true
+				dbOpp.Reasoning = fmt.Sprintf("investigation error: %v", err)
+				dbOpp.Investigating = false
+				if err2 := stateManager.DB().UpdateDigestOpportunity(dbOpp); err2 != nil {
+					slog.Warn("failed to update digest opportunity", "error", err2)
+				}
+			}
 			// Fall through to ribbit below
 		} else if !investigation.Feasible {
 			slog.Info("investigation says not feasible, falling through to ribbit",
 				"reasoning", investigation.Reasoning, "summary", result.Summary)
+			if dbOpp != nil {
+				dbOpp.Dismissed = true
+				dbOpp.Reasoning = investigation.Reasoning
+				dbOpp.Investigating = false
+				if err := stateManager.DB().UpdateDigestOpportunity(dbOpp); err != nil {
+					slog.Warn("failed to update digest opportunity", "error", err)
+				}
+			}
 			// Fall through to ribbit below
 		} else {
+			if dbOpp != nil {
+				dbOpp.Dismissed = false
+				dbOpp.Reasoning = investigation.Reasoning
+				dbOpp.Investigating = false
+				if err := stateManager.DB().UpdateDigestOpportunity(dbOpp); err != nil {
+					slog.Warn("failed to update digest opportunity", "error", err)
+				}
+			}
 			slog.Info("investigation approved, spawning tadpole",
 				"summary", result.Summary, "reasoning", investigation.Reasoning)
 
