@@ -818,7 +818,7 @@ Critical rules:
 - Only flag messages where the DESIRED CHANGE is clear and scoped — you should be able to describe what code to add, modify, or fix
 - The message must contain enough detail that a human developer would know what to do — the coding agent WILL search the codebase to find the relevant files, so "which file" is NOT required
 - Needing to explore the codebase (find the right component, read existing patterns) is NORMAL and expected — that does NOT reduce confidence
-- Casual tone does NOT reduce confidence — "it would be nice to add X" is just as actionable as "add X" if the change is clear and scoped
+- Confidence reflects how CLEAR and FEASIBLE the change is, not how formal the request sounds. Casual phrasing like "it would be nice to add X" is just as actionable as "add X" if the desired change is specific and scoped
 - What DOES reduce confidence: ambiguous requirements, needing a product decision, unclear desired behavior, or multiple conflicting interpretations of what to build
 - Off-topic chat, questions, or messages with no identifiable code change should NOT be flagged
 - Only "bug" and "feature" categories are allowed
@@ -1124,6 +1124,16 @@ func (e *Engine) passesGuardrails(opp Opportunity) bool {
 		if ov.MinConfidence != nil {
 			minConf = *ov.MinConfidence
 		}
+	}
+	// In comment mode (dry-run + comment investigation), lower the floor —
+	// posting investigation findings has no downside, so we can be more inclusive.
+	if e.cfg != nil && e.cfg.DryRun && e.cfg.CommentInvestigation && minConf > 0.85 {
+		minConf = 0.85
+	}
+	// In comment mode (dry-run + comment investigation), lower the floor slightly —
+	// posting investigation findings has no downside so we can be more inclusive.
+	if e.cfg != nil && e.cfg.DryRun && e.cfg.CommentInvestigation && minConf > 0.90 {
+		minConf = 0.90
 	}
 	if opp.Confidence < minConf {
 		return false
