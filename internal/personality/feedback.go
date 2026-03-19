@@ -100,6 +100,9 @@ func (m *Manager) ProcessOutcome(signal OutcomeSignal) error {
 		apply("strictness", 0.01, "PR merged cleanly")
 	case "pr_closed":
 		apply("risk_tolerance", -0.03, "PR closed without merge")
+		apply("scope_appetite", -0.02, "PR closed without merge")
+		apply("test_affinity", -0.01, "PR closed without merge")
+		apply("strictness", -0.01, "PR closed without merge")
 		apply("confidence_threshold", 0.02, "PR closed without merge")
 		apply("scope_sensitivity", 0.02, "PR closed without merge")
 	case "pr_review_rounds":

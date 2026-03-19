@@ -10,7 +10,7 @@ import (
 	"github.com/scaler-tech/toad/internal/state"
 )
 
-const learnedCap = 0.35
+const learnedCap = 0.30
 
 type Manager struct {
 	mu          sync.RWMutex

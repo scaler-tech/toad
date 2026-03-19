@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -74,9 +75,11 @@ type Client struct {
 
 // NewClient creates a new Slack client configured for Socket Mode.
 func NewClient(cfg config.SlackConfig) *Client {
+	httpClient := &http.Client{Timeout: 30 * time.Second}
 	api := slack.New(
 		cfg.BotToken,
 		slack.OptionAppLevelToken(cfg.AppToken),
+		slack.OptionHTTPClient(httpClient),
 	)
 
 	socket := socketmode.New(api)
