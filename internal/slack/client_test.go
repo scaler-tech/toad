@@ -409,3 +409,18 @@ func TestSetPathScrubber_EmptyMap(t *testing.T) {
 		t.Error("expected nil scrubber for empty map")
 	}
 }
+
+func TestSetStatus_NilAPI(t *testing.T) {
+	c := &Client{}
+	c.SetStatus("C123", "1234.5678", "thinking...")
+}
+
+func TestClearStatus_NilAPI(t *testing.T) {
+	c := &Client{}
+	c.ClearStatus("C123", "1234.5678")
+}
+
+func TestSetStatus_WithLoadingMessages(t *testing.T) {
+	c := &Client{}
+	c.SetStatus("C123", "1234.5678", "thinking...", "loading 1", "loading 2")
+}

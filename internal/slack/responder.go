@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -130,6 +131,30 @@ func (c *Client) RemoveReaction(channel, timestamp, emoji string) {
 func (c *Client) SwapReaction(channel, timestamp, remove, add string) {
 	c.RemoveReaction(channel, timestamp, remove)
 	c.React(channel, timestamp, add)
+}
+
+// SetStatus shows a native Slack thinking indicator on a thread.
+// The status auto-clears when the bot posts a reply to the thread, or after 2 minutes.
+// Best-effort: errors are logged, not returned (purely cosmetic).
+func (c *Client) SetStatus(channel, threadTS, status string, loadingMessages ...string) {
+	if c.api == nil {
+		return
+	}
+	err := c.api.SetAssistantThreadsStatusContext(context.Background(), slack.AssistantThreadsSetStatusParameters{
+		ChannelID:       channel,
+		ThreadTS:        threadTS,
+		Status:          status,
+		LoadingMessages: loadingMessages,
+	})
+	if err != nil {
+		slog.Debug("failed to set thread status", "error", err, "status", status)
+	}
+}
+
+// ClearStatus explicitly clears the thinking indicator on a thread.
+// Use on error paths where no reply will be posted to auto-clear it.
+func (c *Client) ClearStatus(channel, threadTS string) {
+	c.SetStatus(channel, threadTS, "")
 }
 
 // GetPermalink returns a permanent URL to a specific Slack message.
