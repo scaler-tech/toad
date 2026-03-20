@@ -106,6 +106,48 @@ func TestRespond_ProviderError(t *testing.T) {
 	}
 }
 
+func TestRespond_VCSAndMCPWiring(t *testing.T) {
+	mock := &agent.MockProvider{
+		RunResult: &agent.RunResult{Result: "answer"},
+	}
+	cfg := &config.Config{
+		Agent:  config.AgentConfig{Model: "sonnet"},
+		Limits: config.LimitsConfig{TimeoutMinutes: 5},
+		VCS:    config.VCSConfig{Platform: "github"},
+		IssueTracker: config.IssueTrackerConfig{
+			Enabled:  true,
+			Provider: "linear",
+		},
+		MCP: config.MCPConfig{
+			Enabled: true,
+			Host:    "localhost",
+			Port:    8099,
+		},
+	}
+	e := New(mock, cfg, nil)
+
+	tr := &triage.Result{Summary: "test"}
+	_, err := e.Respond(context.Background(), "what is linear?", tr, nil, "/repo", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	opts := mock.LastRunOpts()
+
+	if len(opts.AllowedBashCommands) != 1 || opts.AllowedBashCommands[0] != "gh" {
+		t.Errorf("expected AllowedBashCommands=[gh], got %v", opts.AllowedBashCommands)
+	}
+	if len(opts.MCPServers) != 1 {
+		t.Fatalf("expected 1 MCPServer, got %d", len(opts.MCPServers))
+	}
+	if opts.MCPServers[0].Name != "linear" {
+		t.Errorf("expected MCPServer name 'linear', got %q", opts.MCPServers[0].Name)
+	}
+	if opts.MCPServers[0].URL != "http://localhost:8099" {
+		t.Errorf("expected MCPServer URL 'http://localhost:8099', got %q", opts.MCPServers[0].URL)
+	}
+}
+
 func TestRespond_PriorContext(t *testing.T) {
 	mock := &agent.MockProvider{
 		RunResult: &agent.RunResult{
