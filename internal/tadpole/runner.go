@@ -117,12 +117,14 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 		} else {
 			r.updateStatus(task, statusTS, failText)
 		}
+		r.clearStatus(task)
 		r.swapReact(task, "hatching_chick", "x")
 		return fmt.Errorf("tadpole failed: %s", reason)
 	}
 
 	// 1. Create worktree (or checkout existing branch for review fixes)
 	r.updateStatus(task, statusTS, ":gear: Setting up worktree...")
+	r.setStatus(task, "Setting up worktree...")
 	r.stateManager.Update(runID, "starting")
 
 	var wt *WorktreeResult
@@ -145,6 +147,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 
 	// 2. Run coding agent
 	r.updateStatus(task, statusTS, ":hammer_and_wrench: Coding agent is working...")
+	r.setStatus(task, "Coding agent is working...")
 	r.stateManager.Update(runID, "running")
 
 	maxTurns := r.cfg.Limits.MaxTurns
@@ -171,6 +174,23 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	}
 
 	prompt := buildTadpolePrompt(task, valCfg.MaxFilesChanged, task.RepoPaths, r.personality)
+
+	statusDone := make(chan struct{})
+	statusTicker := time.NewTicker(90 * time.Second)
+	go func() {
+		defer statusTicker.Stop()
+		for {
+			select {
+			case <-statusTicker.C:
+				r.setStatus(task, "Coding agent is working...")
+			case <-statusDone:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	agentOut, err := r.agent.Run(ctx, agent.RunOpts{
 		Prompt:             prompt,
 		Model:              r.cfg.Agent.Model,
@@ -180,6 +200,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 		WorkDir:            wt.Path,
 		AppendSystemPrompt: r.cfg.Agent.AppendSystemPrompt,
 	})
+	close(statusDone)
 	if err != nil {
 		return fail(fmt.Sprintf("agent: %s", err))
 	}
@@ -188,6 +209,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 
 	// 3. Validate + retry loop
 	r.updateStatus(task, statusTS, ":mag: Validating changes...")
+	r.setStatus(task, "Validating changes...")
 	r.stateManager.Update(runID, "validating")
 
 	valResult, err := Validate(ctx, wt.Path, valCfg)
@@ -201,8 +223,26 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 
 		r.updateStatus(task, statusTS,
 			fmt.Sprintf(":recycle: Retry %d/%d — %s", attempt+1, maxRetries, valResult.FailReason))
+		r.setStatus(task, fmt.Sprintf("Retrying — attempt %d/%d...", attempt+1, maxRetries))
 
 		retryPrompt := buildRetryPrompt(valResult)
+
+		retryDone := make(chan struct{})
+		retryTicker := time.NewTicker(90 * time.Second)
+		go func() {
+			defer retryTicker.Stop()
+			for {
+				select {
+				case <-retryTicker.C:
+					r.setStatus(task, fmt.Sprintf("Retrying — attempt %d/%d...", attempt+1, maxRetries))
+				case <-retryDone:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
 		_, err := r.agent.Run(ctx, agent.RunOpts{
 			Prompt:             retryPrompt,
 			Model:              r.cfg.Agent.Model,
@@ -212,6 +252,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 			WorkDir:            wt.Path,
 			AppendSystemPrompt: r.cfg.Agent.AppendSystemPrompt,
 		})
+		close(retryDone)
 		if err != nil {
 			return fail(fmt.Sprintf("retry agent: %s", err))
 		}
@@ -270,6 +311,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 
 		// Review fix: just push to existing branch, PR already exists
 		r.updateStatus(task, statusTS, ":rocket: Pushing fix...")
+		r.setStatus(task, "Pushing fix...")
 		if err := pushBranch(ctx, wt.Path, wt.Branch); err != nil {
 			return fail(fmt.Sprintf("pushing fix: %s", err))
 		}
@@ -283,6 +325,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 		}
 	} else {
 		r.updateStatus(task, statusTS, fmt.Sprintf(":rocket: Opening %s...", vcsProvider.PRNoun()))
+		r.setStatus(task, fmt.Sprintf("Opening %s...", vcsProvider.PRNoun()))
 
 		// Fetch Slack permalink for the PR body (non-fatal on error)
 		slackLink := ""
@@ -312,6 +355,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	finalMsg := fmt.Sprintf(":white_check_mark: Done! %s: %s\n_(%d files changed, %s)_",
 		vcsProvider.PRNoun(), prURL, valResult.FilesChanged, duration.Round(time.Second))
 	r.updateStatus(task, statusTS, finalMsg)
+	r.clearStatus(task)
 	r.swapReact(task, "hatching_chick", "white_check_mark")
 
 	// Notify ship callback (for PR review tracking) — only for new PRs
@@ -365,6 +409,22 @@ func (r *Runner) swapReact(task Task, remove, add string) {
 		return
 	}
 	r.slack.SwapReaction(task.SlackChannel, task.SlackThreadTS, remove, add)
+}
+
+// setStatus shows a Slack thinking indicator for the current phase.
+func (r *Runner) setStatus(task Task, status string, loadingMessages ...string) {
+	if r.slack == nil || task.SlackChannel == "" || task.SlackThreadTS == "" {
+		return
+	}
+	r.slack.SetStatus(task.SlackChannel, task.SlackThreadTS, status, loadingMessages...)
+}
+
+// clearStatus explicitly clears the Slack thinking indicator.
+func (r *Runner) clearStatus(task Task) {
+	if r.slack == nil || task.SlackChannel == "" || task.SlackThreadTS == "" {
+		return
+	}
+	r.slack.ClearStatus(task.SlackChannel, task.SlackThreadTS)
 }
 
 func (r *Runner) ship(ctx context.Context, vcsProvider vcs.Provider, worktreePath, branch string, task Task, autoMerge bool, prLabels []string, slackLink string, repoPaths map[string]string, defaultBranch string) (string, error) {
