@@ -123,6 +123,7 @@ Toad connects to Slack via Socket Mode, which means it runs as a daemon on your 
    - `channels:history` — read messages in public channels
    - `channels:join` — auto-join public channels
    - `channels:read` — list channels
+   - `assistant:write` — show thinking indicators
    - `chat:write` — send replies
    - `groups:history` — read messages in private channels
    - `groups:read` — list private channels
