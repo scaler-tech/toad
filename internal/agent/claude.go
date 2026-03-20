@@ -195,7 +195,7 @@ func writeMCPConfig(servers []MCPServerConfig) (string, error) {
 	defer f.Close()
 
 	if _, err := f.Write(data); err != nil {
-		_ = os.Remove(f.Name())
+		_ = os.Remove(f.Name()) //nolint:gosec // path is from os.CreateTemp, not user input
 		return "", err
 	}
 	return f.Name(), nil
