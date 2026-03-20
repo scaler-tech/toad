@@ -150,7 +150,7 @@ func TestBuildArgs_PermissionReadOnlyWithBash(t *testing.T) {
 		Model:               "sonnet",
 		Permissions:         PermissionReadOnly,
 		Prompt:              "investigate",
-		AllowedBashCommands: []string{"gh"},
+		AllowedBashCommands: []string{"gh pr view", "gh issue view"},
 	})
 
 	// Find the --allowedTools value
@@ -164,8 +164,11 @@ func TestBuildArgs_PermissionReadOnlyWithBash(t *testing.T) {
 	if tools == "" {
 		t.Fatal("expected --allowedTools flag")
 	}
-	if !strings.Contains(tools, "Bash(gh:*)") {
-		t.Errorf("expected tools to contain Bash(gh:*), got %q", tools)
+	if !strings.Contains(tools, "Bash(gh pr view:*)") {
+		t.Errorf("expected tools to contain Bash(gh pr view:*), got %q", tools)
+	}
+	if !strings.Contains(tools, "Bash(gh issue view:*)") {
+		t.Errorf("expected tools to contain Bash(gh issue view:*), got %q", tools)
 	}
 	if !strings.Contains(tools, "Read") {
 		t.Errorf("expected tools to contain Read, got %q", tools)

@@ -165,9 +165,16 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 
 	switch e.vcs.Platform {
 	case "github":
-		runOpts.AllowedBashCommands = []string{"gh"}
+		runOpts.AllowedBashCommands = []string{
+			"gh pr view", "gh pr list", "gh pr diff", "gh pr checks",
+			"gh issue view", "gh issue list",
+			"gh search",
+		}
 	case "gitlab":
-		runOpts.AllowedBashCommands = []string{"glab"}
+		runOpts.AllowedBashCommands = []string{
+			"glab mr view", "glab mr list", "glab mr diff",
+			"glab issue view", "glab issue list",
+		}
 	}
 
 	result, err := e.agent.Run(ctx, runOpts)

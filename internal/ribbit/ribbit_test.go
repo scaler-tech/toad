@@ -127,8 +127,49 @@ func TestRespond_VCSBashWiring(t *testing.T) {
 
 	opts := mock.LastRunOpts()
 
-	if len(opts.AllowedBashCommands) != 1 || opts.AllowedBashCommands[0] != "gh" {
-		t.Errorf("expected AllowedBashCommands=[gh], got %v", opts.AllowedBashCommands)
+	if len(opts.AllowedBashCommands) == 0 {
+		t.Fatal("expected AllowedBashCommands to be set")
+	}
+	// All commands should start with "gh " and be read-only subcommands
+	for _, cmd := range opts.AllowedBashCommands {
+		if !strings.HasPrefix(cmd, "gh ") {
+			t.Errorf("expected all commands to start with 'gh ', got %q", cmd)
+		}
+	}
+	// Verify no broad "gh" entry (would allow writes)
+	for _, cmd := range opts.AllowedBashCommands {
+		if cmd == "gh" {
+			t.Error("AllowedBashCommands should not contain broad 'gh', only specific subcommands")
+		}
+	}
+}
+
+func TestRespond_VCSBashWiring_GitLab(t *testing.T) {
+	mock := &agent.MockProvider{
+		RunResult: &agent.RunResult{Result: "answer"},
+	}
+	cfg := &config.Config{
+		Agent:  config.AgentConfig{Model: "sonnet"},
+		Limits: config.LimitsConfig{TimeoutMinutes: 5},
+		VCS:    config.VCSConfig{Platform: "gitlab"},
+	}
+	e := New(mock, cfg, nil, nil)
+
+	tr := &triage.Result{Summary: "test"}
+	_, err := e.Respond(context.Background(), "what is this MR?", tr, nil, "/repo", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	opts := mock.LastRunOpts()
+
+	if len(opts.AllowedBashCommands) == 0 {
+		t.Fatal("expected AllowedBashCommands to be set for gitlab")
+	}
+	for _, cmd := range opts.AllowedBashCommands {
+		if !strings.HasPrefix(cmd, "glab ") {
+			t.Errorf("expected all commands to start with 'glab ', got %q", cmd)
+		}
 	}
 }
 
