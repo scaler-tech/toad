@@ -10,6 +10,7 @@ import (
 
 	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/issuetracker"
 	"github.com/scaler-tech/toad/internal/personality"
 	"github.com/scaler-tech/toad/internal/triage"
 )
@@ -32,16 +33,18 @@ type Engine struct {
 	timeoutMinutes int
 	personality    *personality.Manager
 	vcs            config.VCSConfig
+	tracker        issuetracker.Tracker
 }
 
 // New creates a ribbit engine.
-func New(agentProvider agent.Provider, cfg *config.Config, mgr *personality.Manager) *Engine {
+func New(agentProvider agent.Provider, cfg *config.Config, mgr *personality.Manager, tracker issuetracker.Tracker) *Engine {
 	return &Engine{
 		agent:          agentProvider,
 		model:          cfg.Agent.Model,
 		timeoutMinutes: cfg.Limits.TimeoutMinutes,
 		personality:    mgr,
 		vcs:            cfg.VCS,
+		tracker:        tracker,
 	}
 }
 
@@ -118,6 +121,11 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 		for _, name := range repoPaths {
 			triageCtx += "- " + name + "\n"
 		}
+	}
+
+	// Enrich with issue tracker details for any ticket refs in the message
+	if issueCtx := e.fetchIssueContext(ctx, messageText); issueCtx != "" {
+		triageCtx += "\n\n" + issueCtx
 	}
 
 	if triageCtx != "" {
@@ -199,4 +207,58 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 	}
 
 	return &Response{Text: result.Result}, nil
+}
+
+// fetchIssueContext extracts issue references from text, fetches their details,
+// and returns formatted context for the prompt. Returns empty string if no refs found.
+func (e *Engine) fetchIssueContext(ctx context.Context, text string) string {
+	if e.tracker == nil {
+		return ""
+	}
+	refs := e.tracker.ExtractAllIssueRefs(text)
+	if len(refs) == 0 {
+		return ""
+	}
+
+	// Cap lookups to avoid slowing down the response
+	limit := 3
+	if len(refs) < limit {
+		limit = len(refs)
+	}
+
+	var entries []string
+	for _, ref := range refs[:limit] {
+		details, err := e.tracker.GetIssueDetails(ctx, ref)
+		if err != nil {
+			slog.Warn("failed to fetch issue details for ribbit", "issue", ref.ID, "error", err)
+			continue
+		}
+		if details == nil {
+			continue
+		}
+		entry := fmt.Sprintf("[%s] %s", details.ID, details.Title)
+		if details.Description != "" {
+			desc := details.Description
+			if len(desc) > 500 {
+				desc = desc[:500] + "..."
+			}
+			entry += "\n" + desc
+		}
+		if len(details.Comments) > 0 {
+			entry += "\nComments:"
+			for _, c := range details.Comments {
+				body := c.Body
+				if len(body) > 200 {
+					body = body[:200] + "..."
+				}
+				entry += fmt.Sprintf("\n- %s: %s", c.Author, body)
+			}
+		}
+		entries = append(entries, entry)
+	}
+
+	if len(entries) == 0 {
+		return ""
+	}
+	return "Linked issue tracker tickets:\n" + strings.Join(entries, "\n\n")
 }

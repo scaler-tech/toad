@@ -165,7 +165,11 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	resolver := config.NewResolver(profiles, cfg.Repos.List)
 
 	triageEngine := triage.New(agentProvider, cfg.Triage.Model, profiles)
-	ribbitEngine := ribbit.New(agentProvider, cfg, personalityMgr)
+
+	// Initialize issue tracker (before ribbit, which uses it for ticket enrichment)
+	tracker := issuetracker.NewTracker(cfg.IssueTracker)
+
+	ribbitEngine := ribbit.New(agentProvider, cfg, personalityMgr, tracker)
 
 	// Separate concurrency pools: ribbits are fast (seconds), tadpoles are slow (minutes).
 	// Ribbit pool is generous so Q&A stays responsive even while tadpoles run.
@@ -178,9 +182,6 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Initialize tadpole runner and pool (with Slack client for status updates)
 	tadpoleRunner := tadpole.NewRunner(cfg, agentProvider, slackClient, stateManager, vcsResolver, personalityMgr)
 	tadpolePool := tadpole.NewPool(tadpoleSem, tadpoleRunner)
-
-	// Initialize issue tracker
-	tracker := issuetracker.NewTracker(cfg.IssueTracker)
 
 	// 8. Initialize PR review watcher
 	prWatcher := reviewer.NewWatcher(stateDB, cfg.Repos.List, func(ctx context.Context, task tadpole.Task) error {
