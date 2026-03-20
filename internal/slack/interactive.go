@@ -42,8 +42,7 @@ func handleInteractive(ctx context.Context, c *Client, evt socketmode.Event) {
 
 	slog.Info("fix button clicked", "channel", channel, "user", userID, "thread", threadTS)
 
-	c.SetStatus(channel, threadTS, "Spawning tadpole...",
-		"Hatching...", "Preparing the lily pad...")
+	c.SetStatus(channel, threadTS, "Spawning tadpole...")
 
 	// Instant feedback: replace button with processing indicator before any API calls.
 	processingBlocks := SpawnedByBlocks(cb.Message.Blocks, "")

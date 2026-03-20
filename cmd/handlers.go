@@ -128,8 +128,7 @@ func handleTriggered(
 	}
 
 	// Acknowledge
-	slackClient.SetStatus(msg.Channel, threadTS, "Triaging message...",
-		"Hopping to it...", "Reading the lily pad...", "Warming up...")
+	slackClient.SetStatus(msg.Channel, threadTS, "Triaging message...")
 
 	// Gather conversation context (retry once on failure)
 	if msg.ThreadTimestamp != "" {
@@ -197,6 +196,8 @@ func handleTriggered(
 			RepoPaths:     repoPaths,
 		}
 
+		slackClient.SetStatus(msg.Channel, threadTS, "Spawning tadpole...")
+
 		if err := tadpolePool.Spawn(ctx, task); err != nil {
 			slog.Error("retry spawn failed", "error", err)
 			slackClient.ClearStatus(msg.Channel, threadTS)
@@ -257,8 +258,7 @@ func handleTriggered(
 
 		taskText := buildTaskDescription(msg.Text, msg.ThreadContext)
 
-		slackClient.SetStatus(msg.Channel, threadTS, "Investigating the codebase...",
-			"Searching the swamp...", "Following the breadcrumbs...")
+		slackClient.SetStatus(msg.Channel, threadTS, "Investigating the codebase...")
 
 		investigation, err := investigateTriggered(ctx, cfg, agentProvider, result, taskText, channelName, resolver)
 		if err != nil {
@@ -349,6 +349,8 @@ func handleTriggered(
 				RepoPaths:     repoPaths,
 			}
 
+			slackClient.SetStatus(msg.Channel, threadTS, "Spawning tadpole...")
+
 			if err := tadpolePool.Spawn(ctx, task); err != nil {
 				slog.Error("auto-spawn failed", "error", err)
 				slackClient.ClearStatus(msg.Channel, threadTS)
@@ -387,8 +389,7 @@ func handleTriggered(
 	if repo != nil {
 		repoPath = repo.Path
 	}
-	slackClient.SetStatus(msg.Channel, threadTS, "Reading the codebase...",
-		"Searching the swamp...", "Chasing down the answer...")
+	slackClient.SetStatus(msg.Channel, threadTS, "Reading the codebase...")
 	resp, err := ribbitEngine.Respond(ctx, msg.Text, result, prior, repoPath, repoPaths)
 	if err != nil {
 		slog.Error("ribbit generation failed", "error", err)

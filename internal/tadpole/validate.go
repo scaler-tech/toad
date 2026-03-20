@@ -34,10 +34,18 @@ type ValidationResult struct {
 	FailReason   string
 }
 
+// StatusFunc is an optional callback for reporting validation progress.
+type StatusFunc func(status string)
+
 // Validate runs test/lint commands and checks file change count in a worktree.
 // If services are configured, it detects which services were affected and runs
 // per-service lint/test commands from the service directory.
-func Validate(ctx context.Context, worktreePath string, cfg ValidateConfig) (*ValidationResult, error) {
+// An optional StatusFunc can be passed to receive granular progress updates.
+func Validate(ctx context.Context, worktreePath string, cfg ValidateConfig, onStatus ...StatusFunc) (*ValidationResult, error) {
+	var reportStatus StatusFunc
+	if len(onStatus) > 0 && onStatus[0] != nil {
+		reportStatus = onStatus[0]
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
@@ -88,16 +96,24 @@ func Validate(ctx context.Context, worktreePath string, cfg ValidateConfig) (*Va
 	// Determine which services are affected and which commands to run
 	checks := resolveChecks(changedFiles, cfg)
 
+	const rootLabel = "root"
 	var failReasons []string
 
 	for _, check := range checks {
 		runDir := filepath.Join(worktreePath, check.path)
+		label := check.path
+		if label == "" {
+			label = rootLabel
+		}
 
 		// Run test command
 		if check.testCommand != "" {
-			label := check.path
-			if label == "" {
-				label = "root"
+			if reportStatus != nil {
+				if label == rootLabel {
+					reportStatus("Running tests...")
+				} else {
+					reportStatus(fmt.Sprintf("Running tests (%s)...", label))
+				}
 			}
 			slog.Info("validation: running tests", "service", label, "command", check.testCommand)
 			output, err := shellRun(ctx, runDir, check.testCommand)
@@ -114,9 +130,12 @@ func Validate(ctx context.Context, worktreePath string, cfg ValidateConfig) (*Va
 
 		// Run lint command
 		if check.lintCommand != "" {
-			label := check.path
-			if label == "" {
-				label = "root"
+			if reportStatus != nil {
+				if label == rootLabel {
+					reportStatus("Running lint...")
+				} else {
+					reportStatus(fmt.Sprintf("Running lint (%s)...", label))
+				}
 			}
 			slog.Info("validation: running lint", "service", label, "command", check.lintCommand)
 			output, err := shellRun(ctx, runDir, check.lintCommand)

@@ -123,7 +123,6 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	}
 
 	// 1. Create worktree (or checkout existing branch for review fixes)
-	r.updateStatus(task, statusTS, ":gear: Setting up worktree...")
 	r.setStatus(task, "Setting up worktree...")
 	r.stateManager.Update(runID, "starting")
 
@@ -142,11 +141,10 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	slog.Info("worktree created", "path", wt.Path, "branch", wt.Branch)
 
 	if wt.StaleBase {
-		r.updateStatus(task, statusTS, ":warning: Working with potentially outdated code (fetch failed)")
+		slog.Warn("working with potentially outdated code (fetch failed)")
 	}
 
 	// 2. Run coding agent
-	r.updateStatus(task, statusTS, ":hammer_and_wrench: Coding agent is working...")
 	r.setStatus(task, "Coding agent is working...")
 	r.stateManager.Update(runID, "running")
 
@@ -175,6 +173,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 
 	prompt := buildTadpolePrompt(task, valCfg.MaxFilesChanged, task.RepoPaths, r.personality)
 
+	// Refresh the thinking indicator every 90s to prevent Slack's 2-minute auto-clear
 	statusDone := make(chan struct{})
 	statusTicker := time.NewTicker(90 * time.Second)
 	go func() {
@@ -208,11 +207,11 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 		"hit_max_turns", agentOut.HitMaxTurns, "cost_usd", agentOut.CostUSD)
 
 	// 3. Validate + retry loop
-	r.updateStatus(task, statusTS, ":mag: Validating changes...")
-	r.setStatus(task, "Validating changes...")
 	r.stateManager.Update(runID, "validating")
+	statusCb := StatusFunc(func(s string) { r.setStatus(task, s) })
 
-	valResult, err := Validate(ctx, wt.Path, valCfg)
+	r.setStatus(task, "Checking changed files...")
+	valResult, err := Validate(ctx, wt.Path, valCfg, statusCb)
 	if err != nil {
 		return fail(fmt.Sprintf("validation error: %s", err))
 	}
@@ -221,9 +220,8 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 		slog.Info("validation failed, retrying",
 			"attempt", attempt+1, "max_retries", maxRetries, "reason", valResult.FailReason)
 
-		r.updateStatus(task, statusTS,
-			fmt.Sprintf(":recycle: Retry %d/%d — %s", attempt+1, maxRetries, valResult.FailReason))
-		r.setStatus(task, fmt.Sprintf("Retrying — attempt %d/%d...", attempt+1, maxRetries))
+		retryStatus := fmt.Sprintf("Fixing %s (attempt %d/%d)...", valResult.FailReason, attempt+1, maxRetries)
+		r.setStatus(task, retryStatus)
 
 		retryPrompt := buildRetryPrompt(valResult)
 
@@ -234,7 +232,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 			for {
 				select {
 				case <-retryTicker.C:
-					r.setStatus(task, fmt.Sprintf("Retrying — attempt %d/%d...", attempt+1, maxRetries))
+					r.setStatus(task, retryStatus)
 				case <-retryDone:
 					return
 				case <-ctx.Done():
@@ -256,7 +254,8 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 		if err != nil {
 			return fail(fmt.Sprintf("retry agent: %s", err))
 		}
-		valResult, err = Validate(ctx, wt.Path, valCfg)
+		r.setStatus(task, "Re-running tests and lint...")
+		valResult, err = Validate(ctx, wt.Path, valCfg, statusCb)
 		if err != nil {
 			return fail(fmt.Sprintf("retry validation error: %s", err))
 		}
@@ -273,6 +272,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	}
 
 	slog.Info("validation passed", "files_changed", valResult.FilesChanged)
+	r.setStatus(task, fmt.Sprintf("Tests passed — %d files changed", valResult.FilesChanged))
 
 	// Pre-flight: check for empty diff against default branch before shipping.
 	// Catches "no changes vs main" early, avoiding wasted push/PR API calls.
@@ -310,8 +310,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 		}
 
 		// Review fix: just push to existing branch, PR already exists
-		r.updateStatus(task, statusTS, ":rocket: Pushing fix...")
-		r.setStatus(task, "Pushing fix...")
+		r.setStatus(task, fmt.Sprintf("Pushing fix to %s...", wt.Branch))
 		if err := pushBranch(ctx, wt.Path, wt.Branch); err != nil {
 			return fail(fmt.Sprintf("pushing fix: %s", err))
 		}
@@ -324,8 +323,7 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 			}
 		}
 	} else {
-		r.updateStatus(task, statusTS, fmt.Sprintf(":rocket: Opening %s...", vcsProvider.PRNoun()))
-		r.setStatus(task, fmt.Sprintf("Opening %s...", vcsProvider.PRNoun()))
+		r.setStatus(task, "Pushing branch...")
 
 		// Fetch Slack permalink for the PR body (non-fatal on error)
 		slackLink := ""
@@ -448,6 +446,7 @@ func (r *Runner) ship(ctx context.Context, vcsProvider vcs.Provider, worktreePat
 	}
 
 	// Create PR
+	r.setStatus(task, fmt.Sprintf("Creating %s...", vcsProvider.PRNoun()))
 	title := task.Summary
 	runes := []rune(title)
 	if len(runes) > 70 {
