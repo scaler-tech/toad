@@ -128,7 +128,8 @@ func handleTriggered(
 	}
 
 	// Acknowledge
-	slackClient.React(msg.Channel, msg.Timestamp, "eyes")
+	slackClient.SetStatus(msg.Channel, threadTS, "Triaging message...",
+		"Hopping to it...", "Reading the lily pad...", "Warming up...")
 
 	// Gather conversation context (retry once on failure)
 	if msg.ThreadTimestamp != "" {
@@ -168,7 +169,6 @@ func handleTriggered(
 
 		if !stateManager.Claim(threadTS) {
 			slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
-			slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
 			return
 		}
 		claimed := true
@@ -183,7 +183,6 @@ func handleTriggered(
 		if repo == nil {
 			slackClient.ReplyInThread(msg.Channel, threadTS,
 				":frog: I'm not sure which repo this is about — could you mention a file or project name?")
-			slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
 			return
 		}
 
@@ -200,13 +199,13 @@ func handleTriggered(
 
 		if err := tadpolePool.Spawn(ctx, task); err != nil {
 			slog.Error("retry spawn failed", "error", err)
-			slackClient.SwapReaction(msg.Channel, msg.Timestamp, "eyes", "warning")
+			slackClient.ClearStatus(msg.Channel, threadTS)
+			slackClient.React(msg.Channel, msg.Timestamp, "warning")
 			slackClient.ReplyInThread(msg.Channel, threadTS,
 				":x: Failed to spawn tadpole: "+err.Error())
 			return
 		}
 		claimed = false
-		slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
 		return
 	}
 
@@ -226,7 +225,7 @@ func handleTriggered(
 	if !msg.IsMention && !result.Actionable {
 		slog.Info("handler: triage said not actionable, asking for clarification",
 			"confidence", result.Confidence, "summary", result.Summary)
-		slackClient.SwapReaction(msg.Channel, msg.Timestamp, "eyes", "thinking_face")
+		slackClient.ClearStatus(msg.Channel, threadTS)
 		slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(),
 			fmt.Sprintf(":frog: I'd like to help, but I'm not sure exactly what to change — %s\n\n"+
 				"Could you add more detail about the desired behavior? "+
@@ -258,6 +257,9 @@ func handleTriggered(
 
 		taskText := buildTaskDescription(msg.Text, msg.ThreadContext)
 
+		slackClient.SetStatus(msg.Channel, threadTS, "Investigating the codebase...",
+			"Searching the swamp...", "Following the breadcrumbs...")
+
 		investigation, err := investigateTriggered(ctx, cfg, agentProvider, result, taskText, channelName, resolver)
 		if err != nil {
 			slog.Warn("triggered investigation failed, falling through to ribbit",
@@ -273,7 +275,6 @@ func handleTriggered(
 
 			if !stateManager.Claim(threadTS) {
 				slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
-				slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
 				return
 			}
 			claimed := true
@@ -314,7 +315,6 @@ func handleTriggered(
 					SlackPermalink: permalink,
 				})
 				if gate.Gated {
-					slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
 					if gate.Done {
 						slog.Info("ticket is done, skipping silently",
 							"issue", issueRef.ID, "state", gate.Status.State)
@@ -332,7 +332,6 @@ func handleTriggered(
 			if repo == nil {
 				slackClient.ReplyInThread(msg.Channel, threadTS,
 					":frog: I'm not sure which repo this is about — could you mention a file or project name?")
-				slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
 				return
 			}
 
@@ -351,13 +350,13 @@ func handleTriggered(
 
 			if err := tadpolePool.Spawn(ctx, task); err != nil {
 				slog.Error("auto-spawn failed", "error", err)
-				slackClient.SwapReaction(msg.Channel, msg.Timestamp, "eyes", "warning")
+				slackClient.ClearStatus(msg.Channel, threadTS)
+				slackClient.React(msg.Channel, msg.Timestamp, "warning")
 				slackClient.ReplyInThread(msg.Channel, threadTS,
 					":x: Failed to spawn tadpole: "+err.Error())
 				return
 			}
 			claimed = false
-			slackClient.RemoveReaction(msg.Channel, msg.Timestamp, "eyes")
 			return
 		}
 	}
@@ -387,10 +386,13 @@ func handleTriggered(
 	if repo != nil {
 		repoPath = repo.Path
 	}
+	slackClient.SetStatus(msg.Channel, threadTS, "Reading the codebase...",
+		"Searching the swamp...", "Chasing down the answer...")
 	resp, err := ribbitEngine.Respond(ctx, msg.Text, result, prior, repoPath, repoPaths)
 	if err != nil {
 		slog.Error("ribbit generation failed", "error", err)
-		slackClient.SwapReaction(msg.Channel, msg.Timestamp, "eyes", "warning")
+		slackClient.ClearStatus(msg.Channel, threadTS)
+		slackClient.React(msg.Channel, msg.Timestamp, "warning")
 		slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(),
 			":frog: I found this interesting but had trouble generating a response.")
 		return
@@ -412,7 +414,7 @@ func handleTriggered(
 	} else {
 		slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(), resp.Text)
 	}
-	slackClient.SwapReaction(msg.Channel, msg.Timestamp, "eyes", "speech_balloon")
+	slackClient.React(msg.Channel, msg.Timestamp, "speech_balloon")
 }
 
 func handlePassive(
