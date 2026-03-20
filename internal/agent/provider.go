@@ -21,12 +21,6 @@ const (
 	PermissionFull
 )
 
-// MCPServerConfig describes a remote MCP server the agent should connect to.
-type MCPServerConfig struct {
-	Name string
-	URL  string
-}
-
 // RunOpts configures a single agent invocation.
 type RunOpts struct {
 	Prompt              string
@@ -35,10 +29,9 @@ type RunOpts struct {
 	MaxTurns            int
 	Timeout             time.Duration
 	Permissions         Permission
-	AdditionalDirs      []string          // extra directories the agent can access
-	AppendSystemPrompt  string            // optional system prompt addition
-	AllowedBashCommands []string          // bash command prefixes allowed in read-only mode (e.g. ["gh"])
-	MCPServers          []MCPServerConfig // MCP servers the agent should connect to
+	AdditionalDirs      []string // extra directories the agent can access
+	AppendSystemPrompt  string   // optional system prompt addition
+	AllowedBashCommands []string // bash command prefixes allowed in read-only mode (e.g. ["gh"])
 }
 
 // RunResult holds the parsed output of an agent invocation.

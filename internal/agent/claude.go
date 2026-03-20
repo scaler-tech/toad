@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -24,8 +23,7 @@ func (c *ClaudeProvider) Check() error {
 }
 
 func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, error) {
-	args, cleanup := buildArgs(opts)
-	defer cleanup()
+	args := buildArgs(opts)
 
 	callCtx := ctx
 	var cancel context.CancelFunc
@@ -122,10 +120,7 @@ func (c *ClaudeProvider) Resume(ctx context.Context, sessionID, prompt, workDir 
 }
 
 // buildArgs constructs the Claude CLI argument list from RunOpts.
-// The returned cleanup function must be called when the args are no longer needed.
-func buildArgs(opts RunOpts) ([]string, func()) {
-	cleanup := func() {}
-
+func buildArgs(opts RunOpts) []string {
 	args := []string{
 		"--print",
 		"--output-format", "json",
@@ -150,13 +145,6 @@ func buildArgs(opts RunOpts) ([]string, func()) {
 		args = append(args, "--allowedTools", tools)
 	}
 
-	if len(opts.MCPServers) > 0 {
-		if path, err := writeMCPConfig(opts.MCPServers); err == nil {
-			args = append(args, "--mcp-config", path)
-			cleanup = func() { _ = os.Remove(path) }
-		}
-	}
-
 	for _, dir := range opts.AdditionalDirs {
 		args = append(args, "--add-dir", dir)
 	}
@@ -167,38 +155,7 @@ func buildArgs(opts RunOpts) ([]string, func()) {
 
 	// -p must be last
 	args = append(args, "-p", opts.Prompt)
-	return args, cleanup
-}
-
-// writeMCPConfig writes a Claude Code MCP config JSON file to a temp path and returns the path.
-func writeMCPConfig(servers []MCPServerConfig) (string, error) {
-	type serverEntry struct {
-		URL string `json:"url"`
-	}
-	mcpServers := make(map[string]serverEntry, len(servers))
-	for _, s := range servers {
-		mcpServers[s.Name] = serverEntry{URL: s.URL}
-	}
-	cfg := struct {
-		MCPServers map[string]serverEntry `json:"mcpServers"`
-	}{MCPServers: mcpServers}
-
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		return "", err
-	}
-
-	f, err := os.CreateTemp("", "toad-mcp-*.json")
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	if _, err := f.Write(data); err != nil {
-		_ = os.Remove(f.Name()) //nolint:gosec // path is from os.CreateTemp, not user input
-		return "", err
-	}
-	return f.Name(), nil
+	return args
 }
 
 // claudeEnvelope is the JSON structure returned by `claude --output-format json`.

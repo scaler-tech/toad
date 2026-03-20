@@ -73,12 +73,11 @@ func TestParseEnvelope_EmptyResult(t *testing.T) {
 }
 
 func TestBuildArgs_PermissionNone(t *testing.T) {
-	args, cleanup := buildArgs(RunOpts{
+	args := buildArgs(RunOpts{
 		Model:    "haiku",
 		MaxTurns: 1,
 		Prompt:   "classify this",
 	})
-	defer cleanup()
 	assertContains(t, args, "--print")
 	assertContains(t, args, "--output-format")
 	assertContains(t, args, "--model")
@@ -91,23 +90,21 @@ func TestBuildArgs_PermissionNone(t *testing.T) {
 }
 
 func TestBuildArgs_PermissionReadOnly(t *testing.T) {
-	args, cleanup := buildArgs(RunOpts{
+	args := buildArgs(RunOpts{
 		Model:       "sonnet",
 		Permissions: PermissionReadOnly,
 		Prompt:      "investigate",
 	})
-	defer cleanup()
 	assertContains(t, args, "--allowedTools")
 	assertNotContains(t, args, "--dangerously-skip-permissions")
 }
 
 func TestBuildArgs_PermissionFull(t *testing.T) {
-	args, cleanup := buildArgs(RunOpts{
+	args := buildArgs(RunOpts{
 		Model:       "sonnet",
 		Permissions: PermissionFull,
 		Prompt:      "fix it",
 	})
-	defer cleanup()
 	assertContains(t, args, "--permission-mode")
 	assertContains(t, args, "acceptEdits")
 	assertContains(t, args, "--allowedTools")
@@ -115,11 +112,10 @@ func TestBuildArgs_PermissionFull(t *testing.T) {
 }
 
 func TestBuildArgs_AdditionalDirs(t *testing.T) {
-	args, cleanup := buildArgs(RunOpts{
+	args := buildArgs(RunOpts{
 		Prompt:         "explore",
 		AdditionalDirs: []string{"/repo/a", "/repo/b"},
 	})
-	defer cleanup()
 	count := 0
 	for _, a := range args {
 		if a == "--add-dir" {
@@ -132,34 +128,30 @@ func TestBuildArgs_AdditionalDirs(t *testing.T) {
 }
 
 func TestBuildArgs_AppendSystemPrompt(t *testing.T) {
-	args, cleanup := buildArgs(RunOpts{
+	args := buildArgs(RunOpts{
 		Prompt:             "do work",
 		AppendSystemPrompt: "extra instructions",
 	})
-	defer cleanup()
 	assertContains(t, args, "--append-system-prompt")
 }
 
 func TestBuildArgs_NoModel(t *testing.T) {
-	args, cleanup := buildArgs(RunOpts{Prompt: "test"})
-	defer cleanup()
+	args := buildArgs(RunOpts{Prompt: "test"})
 	assertNotContains(t, args, "--model")
 }
 
 func TestBuildArgs_NoMaxTurns(t *testing.T) {
-	args, cleanup := buildArgs(RunOpts{Prompt: "test"})
-	defer cleanup()
+	args := buildArgs(RunOpts{Prompt: "test"})
 	assertNotContains(t, args, "--max-turns")
 }
 
 func TestBuildArgs_PermissionReadOnlyWithBash(t *testing.T) {
-	args, cleanup := buildArgs(RunOpts{
+	args := buildArgs(RunOpts{
 		Model:               "sonnet",
 		Permissions:         PermissionReadOnly,
 		Prompt:              "investigate",
 		AllowedBashCommands: []string{"gh"},
 	})
-	defer cleanup()
 
 	// Find the --allowedTools value
 	var tools string
@@ -178,16 +170,6 @@ func TestBuildArgs_PermissionReadOnlyWithBash(t *testing.T) {
 	if !strings.Contains(tools, "Read") {
 		t.Errorf("expected tools to contain Read, got %q", tools)
 	}
-}
-
-func TestBuildArgs_WithMCPServers(t *testing.T) {
-	args, cleanup := buildArgs(RunOpts{
-		Permissions: PermissionReadOnly,
-		Prompt:      "investigate",
-		MCPServers:  []MCPServerConfig{{Name: "linear", URL: "http://localhost:8099"}},
-	})
-	defer cleanup()
-	assertContains(t, args, "--mcp-config")
 }
 
 func assertContains(t *testing.T, args []string, flag string) {
