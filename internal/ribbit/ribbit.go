@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -213,7 +214,30 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 		}
 	}
 
-	return &Response{Text: result.Result}, nil
+	note := stalenessNote(repoPath)
+	return &Response{Text: result.Result + note}, nil
+}
+
+// stalenessNote returns a Slack-formatted warning if the repo's HEAD differs
+// from origin/HEAD (i.e. the local checkout is behind remote). Returns empty
+// string if the check cannot be performed or the repo is up to date.
+func stalenessNote(repoPath string) string {
+	headCmd := exec.Command("git", "rev-parse", "HEAD")
+	headCmd.Dir = repoPath
+	headOut, err := headCmd.Output()
+	if err != nil {
+		return ""
+	}
+	originCmd := exec.Command("git", "rev-parse", "origin/HEAD")
+	originCmd.Dir = repoPath
+	originOut, err := originCmd.Output()
+	if err != nil {
+		return ""
+	}
+	if strings.TrimSpace(string(headOut)) == strings.TrimSpace(string(originOut)) {
+		return ""
+	}
+	return "\n\n:warning: _Note: this repo may be slightly stale — the local checkout is behind origin. Answers are based on what's currently checked out._"
 }
 
 // fetchIssueContext extracts issue references from text, fetches their details,
