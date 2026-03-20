@@ -153,7 +153,7 @@ func buildArgs(opts RunOpts) ([]string, func()) {
 	if len(opts.MCPServers) > 0 {
 		if path, err := writeMCPConfig(opts.MCPServers); err == nil {
 			args = append(args, "--mcp-config", path)
-			cleanup = func() { os.Remove(path) }
+			cleanup = func() { _ = os.Remove(path) }
 		}
 	}
 
@@ -195,7 +195,7 @@ func writeMCPConfig(servers []MCPServerConfig) (string, error) {
 	defer f.Close()
 
 	if _, err := f.Write(data); err != nil {
-		os.Remove(f.Name())
+		_ = os.Remove(f.Name())
 		return "", err
 	}
 	return f.Name(), nil
