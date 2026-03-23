@@ -587,3 +587,76 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	return slackErr
 }
+
+// syncRepos periodically fetches and fast-forward pulls all configured repos.
+// This keeps the local checkout fresh for ribbit (read-only Q&A) and digest
+// investigations, which operate on the working tree without fetching.
+func syncRepos(ctx context.Context, repos []config.RepoConfig, interval time.Duration) {
+	slog.Info("repo sync started", "interval", interval, "repos", len(repos))
+
+	// Run immediately on startup, then on ticker.
+	syncAll(repos)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			syncAll(repos)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func syncAll(repos []config.RepoConfig) {
+	for _, repo := range repos {
+		fetchCmd := exec.Command("git", "fetch", "origin")
+		fetchCmd.Dir = repo.Path
+		if out, err := fetchCmd.CombinedOutput(); err != nil {
+			slog.Warn("repo sync fetch failed", "repo", repo.Name, "error", err, "output", strings.TrimSpace(string(out)))
+			continue
+		}
+
+		// Fast-forward pull if on the default branch (no-op if detached or on another branch).
+		branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+		branchCmd.Dir = repo.Path
+		branchOut, err := branchCmd.Output()
+		if err != nil {
+			continue
+		}
+		currentBranch := strings.TrimSpace(string(branchOut))
+		if currentBranch == repo.DefaultBranch {
+			pullCmd := exec.Command("git", "pull", "--ff-only")
+			pullCmd.Dir = repo.Path
+			if out, err := pullCmd.CombinedOutput(); err != nil {
+				slog.Warn("repo sync pull failed", "repo", repo.Name, "error", err, "output", strings.TrimSpace(string(out)))
+			}
+		}
+
+		slog.Debug("repo synced", "repo", repo.Name, "branch", currentBranch)
+	}
+}
+
+// buildVCSResolver constructs a VCS Resolver from config, merging per-repo
+// overrides with the global VCS settings. Each unique provider is Check()-ed
+// during construction.
+func buildVCSResolver(cfg *config.Config) (vcs.Resolver, error) {
+	repoVCS := make(map[string]vcs.ProviderConfig, len(cfg.Repos.List))
+	for _, r := range cfg.Repos.List {
+		resolved := config.ResolvedVCS(&r, cfg.VCS)
+		repoVCS[r.Path] = vcs.ProviderConfig{
+			Platform:     resolved.Platform,
+			Host:         resolved.Host,
+			BotUsernames: resolved.BotUsernames,
+		}
+	}
+	primary := config.PrimaryRepo(cfg.Repos.List)
+	fallbackVCS := config.ResolvedVCS(primary, cfg.VCS)
+	fallbackCfg := vcs.ProviderConfig{
+		Platform:     fallbackVCS.Platform,
+		Host:         fallbackVCS.Host,
+		BotUsernames: fallbackVCS.BotUsernames,
+	}
+	return vcs.NewResolver(repoVCS, fallbackCfg)
+}

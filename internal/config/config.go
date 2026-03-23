@@ -39,7 +39,7 @@ type Triggers struct {
 }
 
 type ReposConfig struct {
-	SyncMinutes int          `yaml:"sync_minutes"` // periodic git fetch interval; 0 = disabled (default)
+	SyncMinutes int          `yaml:"sync_minutes"` // periodic git fetch interval; 0 = disabled, default 10
 	List        []RepoConfig `yaml:"list"`
 }
 
@@ -153,6 +153,9 @@ func defaults() *Config {
 	home, _ := toadpath.Home()
 
 	return &Config{
+		Repos: ReposConfig{
+			SyncMinutes: 10,
+		},
 		Slack: SlackConfig{
 			Triggers: Triggers{
 				Emoji:    "frog",
