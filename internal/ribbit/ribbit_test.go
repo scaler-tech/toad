@@ -2,6 +2,7 @@ package ribbit
 
 import (
 	"context"
+	"os/exec"
 	"sort"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestRespond_RunOptsWiring(t *testing.T) {
 		"/repo/main":  "main-app",
 		"/repo/tools": "tools",
 	}
-	resp, err := e.Respond(context.Background(), "where is the nil pointer?", tr, nil, "/repo/main", repoPaths)
+	resp, err := e.Respond(context.Background(), "where is the nil pointer?", tr, nil, "/repo/main", "main", repoPaths)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestRespond_EmptyResult(t *testing.T) {
 	e := New(mock, cfg, nil, nil)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "test", tr, nil, "/repo", nil)
+	_, err := e.Respond(context.Background(), "test", tr, nil, "/repo", "main", nil)
 	if err == nil {
 		t.Fatal("expected error for empty result")
 	}
@@ -102,7 +103,7 @@ func TestRespond_ProviderError(t *testing.T) {
 	e := New(mock, cfg, nil, nil)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "test", tr, nil, "/repo", nil)
+	_, err := e.Respond(context.Background(), "test", tr, nil, "/repo", "main", nil)
 	if err == nil {
 		t.Fatal("expected error when provider fails")
 	}
@@ -120,7 +121,7 @@ func TestRespond_VCSBashWiring(t *testing.T) {
 	e := New(mock, cfg, nil, nil)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "what is this PR?", tr, nil, "/repo", nil)
+	_, err := e.Respond(context.Background(), "what is this PR?", tr, nil, "/repo", "main", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -156,7 +157,7 @@ func TestRespond_VCSBashWiring_GitLab(t *testing.T) {
 	e := New(mock, cfg, nil, nil)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "what is this MR?", tr, nil, "/repo", nil)
+	_, err := e.Respond(context.Background(), "what is this MR?", tr, nil, "/repo", "main", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestRespond_PriorContext(t *testing.T) {
 		Summary:  "nil pointer in handler",
 		Response: "It's in handler.go:42",
 	}
-	_, err := e.Respond(context.Background(), "can you show the full function?", tr, prior, "/repo", nil)
+	_, err := e.Respond(context.Background(), "can you show the full function?", tr, prior, "/repo", "main", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -224,7 +225,7 @@ func TestRespond_IssueTrackerEnrichment(t *testing.T) {
 	e := New(mock, cfg, nil, tracker)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "what's going on with PLF-123?", tr, nil, "/repo", nil)
+	_, err := e.Respond(context.Background(), "what's going on with PLF-123?", tr, nil, "/repo", "main", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -252,7 +253,7 @@ func TestRespond_NilTracker(t *testing.T) {
 	e := New(mock, cfg, nil, nil)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "what about PLF-999?", tr, nil, "/repo", nil)
+	_, err := e.Respond(context.Background(), "what about PLF-999?", tr, nil, "/repo", "main", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -290,4 +291,86 @@ func (m *mockTracker) GetIssueStatus(ctx context.Context, ref *issuetracker.Issu
 
 func (m *mockTracker) PostComment(ctx context.Context, ref *issuetracker.IssueRef, body string) error {
 	return nil
+}
+
+func TestStalenessNote_UpToDate(t *testing.T) {
+	// Create a temporary git repo where HEAD matches origin/main.
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.CommandContext(context.Background(), args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("command %v failed: %v\n%s", args, err, out)
+		}
+	}
+	run("git", "init", "-b", "main")
+	run("git", "commit", "--allow-empty", "-m", "init")
+	// Create a bare clone to act as origin, then add it as a remote.
+	bare := t.TempDir()
+	run2 := func(dir2 string, args ...string) {
+		cmd := exec.CommandContext(context.Background(), args[0], args[1:]...)
+		cmd.Dir = dir2
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("command %v failed: %v\n%s", args, err, out)
+		}
+	}
+	run2(bare, "git", "clone", "--bare", dir, bare+"/repo.git")
+	run("git", "remote", "add", "origin", bare+"/repo.git")
+	run("git", "fetch", "origin")
+
+	note := stalenessNote(context.Background(), dir, "main")
+	if note != "" {
+		t.Errorf("expected empty staleness note when up to date, got %q", note)
+	}
+}
+
+func TestStalenessNote_Stale(t *testing.T) {
+	// Create a temporary git repo where origin/main is ahead of HEAD.
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.CommandContext(context.Background(), args[0], args[1:]...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("command %v failed: %v\n%s", args, err, out)
+		}
+	}
+	run("git", "init", "-b", "main")
+	run("git", "commit", "--allow-empty", "-m", "init")
+	// Create a bare clone as origin.
+	bare := t.TempDir()
+	run2 := func(dir2 string, args ...string) {
+		cmd := exec.CommandContext(context.Background(), args[0], args[1:]...)
+		cmd.Dir = dir2
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("command %v failed: %v\n%s", args, err, out)
+		}
+	}
+	run2(bare, "git", "clone", "--bare", dir, bare+"/repo.git")
+	run("git", "remote", "add", "origin", bare+"/repo.git")
+	// Push a new commit to origin so it's ahead.
+	cloneDir := t.TempDir()
+	run2(cloneDir, "git", "clone", bare+"/repo.git", cloneDir+"/work")
+	run2(cloneDir+"/work", "git", "commit", "--allow-empty", "-m", "ahead")
+	run2(cloneDir+"/work", "git", "push", "origin", "main")
+	// Fetch in the original repo so origin/main is updated but HEAD stays behind.
+	run("git", "fetch", "origin")
+
+	note := stalenessNote(context.Background(), dir, "main")
+	if note == "" {
+		t.Error("expected non-empty staleness note when repo is behind origin")
+	}
+	if !strings.Contains(note, "stale") {
+		t.Errorf("expected note to contain 'stale', got %q", note)
+	}
+}
+
+func TestStalenessNote_EmptyDefaultBranch(t *testing.T) {
+	note := stalenessNote(context.Background(), t.TempDir(), "")
+	if note != "" {
+		t.Errorf("expected empty note for empty default branch, got %q", note)
+	}
 }

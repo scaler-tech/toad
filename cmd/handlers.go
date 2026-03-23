@@ -388,11 +388,13 @@ func handleTriggered(
 	}
 
 	repoPath := ""
+	defaultBranch := "main"
 	if repo != nil {
 		repoPath = repo.Path
+		defaultBranch = repo.DefaultBranch
 	}
 	slackClient.SetStatus(msg.Channel, threadTS, "Reading the codebase...")
-	resp, err := ribbitEngine.Respond(ctx, msg.Text, result, prior, repoPath, repoPaths)
+	resp, err := ribbitEngine.Respond(ctx, msg.Text, result, prior, repoPath, defaultBranch, repoPaths)
 	if err != nil {
 		slog.Error("ribbit generation failed", "error", err)
 		slackClient.ClearStatus(msg.Channel, threadTS)
@@ -448,11 +450,13 @@ func handlePassive(
 
 	repo := resolver.Resolve(result.Repo, result.FilesHint)
 	repoPath := ""
+	defaultBranch := "main"
 	if repo != nil {
 		repoPath = repo.Path
+		defaultBranch = repo.DefaultBranch
 	}
 
-	resp, err := ribbitEngine.Respond(ctx, msg.Text, result, nil, repoPath, repoPaths)
+	resp, err := ribbitEngine.Respond(ctx, msg.Text, result, nil, repoPath, defaultBranch, repoPaths)
 	if err != nil {
 		slog.Warn("passive ribbit failed", "error", err)
 		return
