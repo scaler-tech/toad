@@ -428,17 +428,11 @@ func (r *Runner) swapReact(task Task, remove, add string) {
 }
 
 // setStatus shows a Slack thinking indicator for the current phase.
-// The status text appears in the typing bar; the inline loading message
-// combines the phase with the task summary for context.
 func (r *Runner) setStatus(task Task, status string) {
 	if r.slack == nil || task.SlackChannel == "" || task.SlackThreadTS == "" {
 		return
 	}
-	loading := status
-	if task.Summary != "" {
-		loading = status + " — " + task.Summary
-	}
-	r.slack.SetStatus(task.SlackChannel, task.SlackThreadTS, status, loading)
+	r.slack.SetStatus(task.SlackChannel, task.SlackThreadTS, status)
 }
 
 // clearStatus explicitly clears the Slack thinking indicator.
