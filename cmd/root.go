@@ -587,8 +587,6 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	return slackErr
 }
-<<<<<<< HEAD
-=======
 
 func handleMessage(
 	ctx context.Context,
@@ -1690,4 +1688,3 @@ func buildVCSResolver(cfg *config.Config) (vcs.Resolver, error) {
 	}
 	return vcs.NewResolver(repoVCS, fallbackCfg)
 }
->>>>>>> main
