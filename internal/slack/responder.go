@@ -134,11 +134,19 @@ func (c *Client) SwapReaction(channel, timestamp, remove, add string) {
 }
 
 // SetStatus shows a native Slack thinking indicator on a thread.
+// The status text appears in the typing bar; loadingMessages control the inline
+// loading indicator. If no loadingMessages are provided, the status text is
+// used as the loading message so both displays stay consistent.
 // The status auto-clears when the bot posts a reply to the thread, or after 2 minutes.
 // Best-effort: errors are logged, not returned (purely cosmetic).
 func (c *Client) SetStatus(channel, threadTS, status string, loadingMessages ...string) {
 	if c.api == nil {
 		return
+	}
+	// Default the inline loading message to match the status text,
+	// otherwise Slack shows its own "Generating response..." default.
+	if len(loadingMessages) == 0 && status != "" {
+		loadingMessages = []string{status}
 	}
 	err := c.api.SetAssistantThreadsStatusContext(context.Background(), slack.AssistantThreadsSetStatusParameters{
 		ChannelID:       channel,

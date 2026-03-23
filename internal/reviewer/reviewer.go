@@ -258,6 +258,7 @@ func (w *Watcher) checkMergeConflicts(ctx context.Context, vcsProvider vcs.Provi
 		w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
 			fmt.Sprintf(":warning: Merge conflict detected on %s #%d — spawning fix tadpole...",
 				vcsProvider.PRNoun(), watch.PRNumber))
+		w.slack.SetStatus(watch.SlackChannel, watch.SlackThread, "Spawning fix tadpole...")
 	}
 
 	if err := w.spawn(ctx, task); err != nil {
@@ -401,6 +402,7 @@ func (w *Watcher) checkReviewComments(ctx context.Context, vcsProvider vcs.Provi
 		w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
 			fmt.Sprintf(":mag: Review feedback on %s #%d — spawning fix tadpole...\n> %s",
 				vcsProvider.PRNoun(), watch.PRNumber, triage.Summary))
+		w.slack.SetStatus(watch.SlackChannel, watch.SlackThread, "Spawning fix tadpole...")
 	}
 
 	// Spawn fix tadpole
@@ -536,6 +538,7 @@ func (w *Watcher) checkCI(ctx context.Context, vcsProvider vcs.Provider, watch *
 		w.slack.ReplyInThread(watch.SlackChannel, watch.SlackThread,
 			fmt.Sprintf(":rotating_light: CI failing on %s #%d (attempt %d/%d) — spawning fix tadpole...",
 				vcsProvider.PRNoun(), watch.PRNumber, watch.CIFixCount+1, w.maxCIFixRounds))
+		w.slack.SetStatus(watch.SlackChannel, watch.SlackThread, "Spawning fix tadpole...")
 	}
 
 	if err := w.spawn(ctx, task); err != nil {

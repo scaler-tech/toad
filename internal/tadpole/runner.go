@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/scaler-tech/toad/internal/agent"
@@ -97,27 +99,24 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	// React on the original message to show tadpole is working
 	r.react(task, "hatching_chick")
 
-	// Post initial status message
-	statusTS := r.postStatus(task, ":hatching_chick: Tadpole spawned — working on: "+task.Summary)
-
 	fail := func(reason string) error {
 		r.stateManager.Complete(runID, &state.RunResult{
 			Success:  false,
 			Error:    reason,
 			Duration: time.Since(start),
 		})
+		r.clearStatus(task)
 		// Post failure with retry CTA button
 		failText := ":x: Tadpole failed — " + reason
-		if r.slack != nil && task.SlackChannel != "" && statusTS != "" {
+		if r.slack != nil && task.SlackChannel != "" {
 			blocks := islack.FixThisBlocks(failText, task.SlackThreadTS)
-			if err := r.slack.UpdateMessageWithBlocks(task.SlackChannel, statusTS, failText, blocks); err != nil {
-				slog.Warn("failed to update status with retry button", "error", err)
-				r.updateStatus(task, statusTS, failText)
+			if _, err := r.slack.ReplyInThreadWithBlocks(task.SlackChannel, task.SlackThreadTS, failText, blocks); err != nil {
+				slog.Warn("failed to post failure with retry button", "error", err)
+				r.slack.ReplyInThread(task.SlackChannel, task.SlackThreadTS, failText)
 			}
 		} else {
-			r.updateStatus(task, statusTS, failText)
+			fmt.Println(failText)
 		}
-		r.clearStatus(task)
 		r.swapReact(task, "hatching_chick", "x")
 		return fmt.Errorf("tadpole failed: %s", reason)
 	}
@@ -208,7 +207,36 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 
 	// 3. Validate + retry loop
 	r.stateManager.Update(runID, "validating")
-	statusCb := StatusFunc(func(s string) { r.setStatus(task, s) })
+	// Track the latest status text so the refresh ticker can re-send it.
+	var lastValStatus atomic.Value
+	lastValStatus.Store("Checking changed files...")
+	statusCb := StatusFunc(func(s string) {
+		lastValStatus.Store(s)
+		r.setStatus(task, s)
+	})
+
+	// Refresh the validation status every 90s — individual test/lint
+	// commands can exceed Slack's 2-minute auto-clear timeout.
+	valDone := make(chan struct{})
+	var closeValOnce sync.Once
+	closeValDone := func() { closeValOnce.Do(func() { close(valDone) }) }
+	defer closeValDone()
+	valTicker := time.NewTicker(90 * time.Second)
+	go func() {
+		defer valTicker.Stop()
+		for {
+			select {
+			case <-valTicker.C:
+				if s, ok := lastValStatus.Load().(string); ok {
+					r.setStatus(task, s)
+				}
+			case <-valDone:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	r.setStatus(task, "Checking changed files...")
 	valResult, err := Validate(ctx, wt.Path, valCfg, statusCb)
@@ -260,6 +288,8 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 			return fail(fmt.Sprintf("retry validation error: %s", err))
 		}
 	}
+
+	closeValDone() // stop validation refresh ticker
 
 	if !valResult.Passed {
 		reason := valResult.FailReason
@@ -352,8 +382,8 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 
 	finalMsg := fmt.Sprintf(":white_check_mark: Done! %s: %s\n_(%d files changed, %s)_",
 		vcsProvider.PRNoun(), prURL, valResult.FilesChanged, duration.Round(time.Second))
-	r.updateStatus(task, statusTS, finalMsg)
 	r.clearStatus(task)
+	r.postResult(task, finalMsg)
 	r.swapReact(task, "hatching_chick", "white_check_mark")
 
 	// Notify ship callback (for PR review tracking) — only for new PRs
@@ -367,29 +397,15 @@ func (r *Runner) Execute(ctx context.Context, task Task) error {
 	return nil
 }
 
-// postStatus posts an initial status message to Slack and returns its timestamp.
-// No-ops if Slack client is nil (CLI mode).
-func (r *Runner) postStatus(task Task, text string) string {
+// postResult posts a final result message to the thread (success, failure, etc.).
+// In CLI mode, prints to stdout.
+func (r *Runner) postResult(task Task, text string) {
 	if r.slack == nil || task.SlackChannel == "" {
-		fmt.Println(text)
-		return ""
-	}
-	ts, err := r.slack.ReplyInThread(task.SlackChannel, task.SlackThreadTS, text)
-	if err != nil {
-		slog.Warn("failed to post status", "error", err)
-		return ""
-	}
-	return ts
-}
-
-// updateStatus edits the status message or prints to stdout in CLI mode.
-func (r *Runner) updateStatus(task Task, statusTS, text string) {
-	if r.slack == nil || task.SlackChannel == "" || statusTS == "" {
 		fmt.Println(text)
 		return
 	}
-	if err := r.slack.UpdateMessage(task.SlackChannel, statusTS, text); err != nil {
-		slog.Warn("failed to update status", "error", err)
+	if _, err := r.slack.ReplyInThread(task.SlackChannel, task.SlackThreadTS, text); err != nil {
+		slog.Warn("failed to post result", "error", err)
 	}
 }
 
@@ -410,11 +426,17 @@ func (r *Runner) swapReact(task Task, remove, add string) {
 }
 
 // setStatus shows a Slack thinking indicator for the current phase.
+// The status text appears in the typing bar; the inline loading message
+// combines the phase with the task summary for context.
 func (r *Runner) setStatus(task Task, status string) {
 	if r.slack == nil || task.SlackChannel == "" || task.SlackThreadTS == "" {
 		return
 	}
-	r.slack.SetStatus(task.SlackChannel, task.SlackThreadTS, status)
+	loading := status
+	if task.Summary != "" {
+		loading = status + " — " + task.Summary
+	}
+	r.slack.SetStatus(task.SlackChannel, task.SlackThreadTS, status, loading)
 }
 
 // clearStatus explicitly clears the Slack thinking indicator.

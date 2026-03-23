@@ -180,6 +180,7 @@ func handleTriggered(
 		taskDescription := buildTaskDescription(msg.Text, msg.ThreadContext)
 		repo := resolver.Resolve("", nil)
 		if repo == nil {
+			slackClient.ClearStatus(msg.Channel, threadTS)
 			slackClient.ReplyInThread(msg.Channel, threadTS,
 				":frog: I'm not sure which repo this is about — could you mention a file or project name?")
 			return
@@ -331,6 +332,7 @@ func handleTriggered(
 
 			repo := resolver.Resolve(result.Repo, result.FilesHint)
 			if repo == nil {
+				slackClient.ClearStatus(msg.Channel, threadTS)
 				slackClient.ReplyInThread(msg.Channel, threadTS,
 					":frog: I'm not sure which repo this is about — could you mention a file or project name?")
 				return
@@ -476,6 +478,7 @@ func handleTadpoleRequest(
 	repoPaths map[string]string,
 ) {
 	threadTS := msg.ThreadTS()
+	slackClient.SetStatus(msg.Channel, threadTS, "Triaging message...")
 
 	// Atomically claim this thread — prevents duplicate tadpoles from racing
 	// between the check and the eventual Track call inside Execute.
@@ -501,6 +504,7 @@ func handleTadpoleRequest(
 	}
 	if err != nil {
 		slog.Warn("failed to fetch thread context for tadpole after retry", "error", err)
+		slackClient.ClearStatus(msg.Channel, threadTS)
 		slackClient.ReplyInThread(msg.Channel, threadTS,
 			":x: Couldn't fetch thread context")
 		return
@@ -542,6 +546,7 @@ func handleTadpoleRequest(
 	// Resolve repo from triage
 	repo := resolver.Resolve(triageResult.Repo, triageResult.FilesHint)
 	if repo == nil {
+		slackClient.ClearStatus(msg.Channel, threadTS)
 		slackClient.ReplyInThread(msg.Channel, threadTS,
 			":frog: I'm not sure which repo this is about — could you mention a file or project name?")
 		return
@@ -565,9 +570,11 @@ func handleTadpoleRequest(
 		"category", task.Category,
 		"channel", channelName,
 	)
+	slackClient.SetStatus(msg.Channel, threadTS, "Spawning tadpole...")
 
 	if err := tadpolePool.Spawn(ctx, task); err != nil {
 		slog.Error("failed to spawn tadpole", "error", err)
+		slackClient.ClearStatus(msg.Channel, threadTS)
 		slackClient.ReplyInThread(msg.Channel, threadTS,
 			":x: Failed to spawn tadpole: "+err.Error())
 		return
