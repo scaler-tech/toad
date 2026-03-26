@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
@@ -53,7 +54,12 @@ func handleInteractive(ctx context.Context, c *Client, evt socketmode.Event) {
 	// The button's message text is the investigation finding — use it as the
 	// primary text so the tadpole knows exactly what to fix, rather than
 	// re-triaging from the thread root (which may be a planning doc or unrelated).
+	// However, if the button is on a toad system message (e.g. failure notification),
+	// fall back to the thread root so toad retries the original request.
 	buttonMessageText := cb.Message.Text
+	isToadSystemMessage := strings.HasPrefix(buttonMessageText, ":x: ") ||
+		strings.HasPrefix(buttonMessageText, ":warning: ") ||
+		strings.HasPrefix(buttonMessageText, ":white_check_mark: ")
 
 	go func() {
 		userName := c.ResolveUserName(userID)
@@ -67,7 +73,9 @@ func handleInteractive(ctx context.Context, c *Client, evt socketmode.Event) {
 			slog.Error("failed to fetch thread message for fix button", "error", err)
 			return
 		}
-		msg.Text = buttonMessageText
+		if !isToadSystemMessage {
+			msg.Text = buttonMessageText
+		}
 		msg.IsTriggered = true
 		msg.IsTadpoleRequest = true
 
