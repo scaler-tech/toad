@@ -194,6 +194,8 @@ func syncAll(repos []config.RepoConfig) {
 		}
 
 		// Fast-forward pull if on the default branch (no-op if detached or on another branch).
+		// Falls back to hard reset when branches have diverged — these are toad's
+		// working copies with no local changes to preserve.
 		branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 		branchCmd.Dir = repo.Path
 		branchOut, err := branchCmd.Output()
@@ -204,8 +206,15 @@ func syncAll(repos []config.RepoConfig) {
 		if currentBranch == repo.DefaultBranch {
 			pullCmd := exec.Command("git", "pull", "--ff-only")
 			pullCmd.Dir = repo.Path
-			if out, err := pullCmd.CombinedOutput(); err != nil {
-				slog.Warn("repo sync pull failed", "repo", repo.Name, "error", err, "output", strings.TrimSpace(string(out)))
+			if _, err := pullCmd.CombinedOutput(); err != nil {
+				// Diverged branch — reset to match origin (no local work to lose).
+				resetCmd := exec.Command("git", "reset", "--hard", "origin/"+repo.DefaultBranch)
+				resetCmd.Dir = repo.Path
+				if out, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
+					slog.Warn("repo sync reset failed", "repo", repo.Name, "error", resetErr, "output", strings.TrimSpace(string(out)))
+				} else {
+					slog.Info("repo sync reset to origin", "repo", repo.Name, "branch", repo.DefaultBranch)
+				}
 			}
 		}
 
