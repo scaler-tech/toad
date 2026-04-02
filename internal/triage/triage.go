@@ -63,6 +63,8 @@ Examples:
 
 If the primary message is a greeting, pleasantry, or casual remark, classify as "other" regardless of thread context.
 
+If the channel name suggests a PR/review context (e.g. contains "review", "pr", or "please-review"), treat messages that describe a PR or code change as "other" — they are PR notifications or shares, not fix requests.
+
 Category definitions:
 - "bug": A concrete defect with specific symptoms (error messages, wrong behavior, stack traces). Describes WHAT is broken.
 - "feature": A request for a code change to be shipped as a PR — new endpoint, new field, new logic, behavior change. Must describe WHAT to build or change in code.
