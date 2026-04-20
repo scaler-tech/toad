@@ -270,8 +270,8 @@ func TestFixThisBlocks(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ActionBlock, got %T", blocks[1])
 	}
-	if len(actions.Elements.ElementSet) != 1 {
-		t.Fatalf("expected 1 element, got %d", len(actions.Elements.ElementSet))
+	if len(actions.Elements.ElementSet) != 2 {
+		t.Fatalf("expected 2 elements, got %d", len(actions.Elements.ElementSet))
 	}
 	btn, ok := actions.Elements.ElementSet[0].(*goslack.ButtonBlockElement)
 	if !ok {
@@ -285,6 +285,16 @@ func TestFixThisBlocks(t *testing.T) {
 	}
 	if btn.Style != goslack.StylePrimary {
 		t.Errorf("expected primary style, got %q", btn.Style)
+	}
+	mutBtn, ok := actions.Elements.ElementSet[1].(*goslack.ButtonBlockElement)
+	if !ok {
+		t.Fatalf("expected ButtonBlockElement for mute, got %T", actions.Elements.ElementSet[1])
+	}
+	if mutBtn.ActionID != "toad_mute" {
+		t.Errorf("expected action_id 'toad_mute', got %q", mutBtn.ActionID)
+	}
+	if mutBtn.Value != threadTS {
+		t.Errorf("expected mute value %q, got %q", threadTS, mutBtn.Value)
 	}
 }
 
