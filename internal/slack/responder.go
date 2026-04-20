@@ -19,7 +19,10 @@ func FixThisBlocks(text, threadTS string) []slack.Block {
 		slack.NewTextBlockObject(slack.PlainTextType, "Let Toad fix this", false, false),
 	)
 	btn.WithStyle(slack.StylePrimary)
-	actions := slack.NewActionBlock("toad_fix_actions", btn)
+	mutBtn := slack.NewButtonBlockElement("toad_mute", threadTS,
+		slack.NewTextBlockObject(slack.PlainTextType, "Mute", false, false),
+	)
+	actions := slack.NewActionBlock("toad_fix_actions", btn, mutBtn)
 	return []slack.Block{section, actions}
 }
 

@@ -14,6 +14,7 @@ import (
 )
 
 const actionIDFix = "toad_fix"
+const actionIDMute = "toad_mute"
 
 // parseFixAction extracts the "toad_fix" button click from an InteractionCallback.
 // Returns (found, threadTS, channelID, userID).
@@ -26,6 +27,30 @@ func parseFixAction(cb *slack.InteractionCallback) (bool, string, string, string
 	return false, "", "", ""
 }
 
+// parseMuteAction extracts the "toad_mute" button click from an InteractionCallback.
+// Returns (found, threadTS, channelID, userID).
+func parseMuteAction(cb *slack.InteractionCallback) (bool, string, string, string) {
+	for _, a := range cb.ActionCallback.BlockActions {
+		if a.ActionID == actionIDMute {
+			return true, a.Value, cb.Channel.ID, cb.User.ID
+		}
+	}
+	return false, "", "", ""
+}
+
+func mutedBlocks(origBlocks slack.Blocks) []slack.Block {
+	var result []slack.Block
+	for _, b := range origBlocks.BlockSet {
+		if _, isAction := b.(*slack.ActionBlock); !isAction {
+			result = append(result, b)
+		}
+	}
+	result = append(result, slack.NewContextBlock("toad_mute_status",
+		slack.NewTextBlockObject(slack.MarkdownType, ":mute: Toad will be quieter", false, false),
+	))
+	return result
+}
+
 func handleInteractive(ctx context.Context, c *Client, evt socketmode.Event) {
 	cb, ok := evt.Data.(slack.InteractionCallback)
 	if !ok {
@@ -33,6 +58,17 @@ func handleInteractive(ctx context.Context, c *Client, evt socketmode.Event) {
 	}
 
 	if cb.Type != slack.InteractionTypeBlockActions {
+		return
+	}
+
+	if found, threadTS, channel, _ := parseMuteAction(&cb); found {
+		mb := mutedBlocks(cb.Message.Blocks)
+		if err := respondToInteraction(cb.ResponseURL, cb.Message.Text, mb); err != nil {
+			slog.Warn("failed to update mute button message", "error", err)
+		}
+		if c.personalityHandler != nil {
+			go c.personalityHandler(ctx, "mute", channel, threadTS)
+		}
 		return
 	}
 
