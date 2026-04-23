@@ -148,7 +148,7 @@ func (g *GitHubProvider) GetCIStatus(ctx context.Context, prNumber int, repoPath
 	failedIDs := make(map[string]bool)
 
 	for _, c := range checks {
-		if strings.Contains(strings.ToLower(c.Name), "approval") {
+		if strings.Contains(strings.ToLower(c.Name), "approval gate") {
 			continue
 		}
 		state := strings.ToUpper(c.State)
