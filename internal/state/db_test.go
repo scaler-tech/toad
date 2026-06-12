@@ -1184,3 +1184,40 @@ func TestDB_MergeStats(t *testing.T) {
 		t.Errorf("expected merge rate ~50%%, got %.1f%%", rate)
 	}
 }
+
+func TestDB_VacationMessages(t *testing.T) {
+	db := openTestDB(t)
+
+	if err := db.SaveVacationMessage("C123", "general", "U1", "first message", "111.222"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := db.SaveVacationMessage("C456", "dev", "U2", "second message", ""); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	msgs, err := db.VacationMessages(10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Text != "second message" {
+		t.Errorf("expected newest first, got %q", msgs[0].Text)
+	}
+	got := msgs[1]
+	if got.Channel != "C123" || got.ChannelName != "general" || got.User != "U1" || got.ThreadTS != "111.222" {
+		t.Errorf("unexpected fields: %+v", got)
+	}
+	if got.CreatedAt.IsZero() {
+		t.Error("expected created_at to be set")
+	}
+
+	msgs, err = db.VacationMessages(1)
+	if err != nil {
+		t.Fatalf("list with limit: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1", len(msgs))
+	}
+}

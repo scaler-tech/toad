@@ -362,3 +362,18 @@ func TestGetByThread_ReturnsMultiple(t *testing.T) {
 		t.Errorf("expected run-1 and run-2, got %v", ids)
 	}
 }
+
+func TestManager_SaveVacationMessage(t *testing.T) {
+	m := NewManager()
+	if err := m.SaveVacationMessage("C1", "general", "U1", "hello", ""); err == nil {
+		t.Error("expected error from in-memory manager")
+	}
+
+	pm, err := NewPersistentManager(openTestDB(t), 0)
+	if err != nil {
+		t.Fatalf("creating manager: %v", err)
+	}
+	if err := pm.SaveVacationMessage("C1", "general", "U1", "hello", ""); err != nil {
+		t.Errorf("save via persistent manager: %v", err)
+	}
+}

@@ -24,6 +24,7 @@ The complete guide to installing, configuring, and running toad — from zero to
   - [log](#log)
   - [mcp](#mcp)
   - [personality](#personality)
+  - [vacation_mode](#vacation_mode)
 - [Environment Variables](#environment-variables)
 - [CLI Commands](#cli-commands)
 - [Interacting with Toad](#interacting-with-toad)
@@ -636,6 +637,29 @@ personality:
 
 The radar chart in `toad status` and the kiosk view visualize current trait values.
 
+### `vacation_mode`
+
+Turn off all autonomous behavior without uninstalling toad.
+
+```yaml
+vacation_mode: false
+vacation_admins: []
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `vacation_mode` | bool | `false` | Force vacation mode on; it cannot be disabled from Slack while set |
+| `vacation_admins` | list | `[]` | Slack user IDs allowed to toggle vacation from Slack; empty = anyone |
+
+When on vacation, toad stays connected to Slack but does nothing on its own: no message triage, no digest analysis, no PR review or CI fix tadpoles. Anyone who directly addresses toad (an @mention, keyword or emoji trigger, or button click) gets a polite decline, and their message is saved to the `vacation_messages` table in the state database for review when toad returns.
+
+Vacation can also be toggled at runtime from Slack, no restart needed:
+
+- A mention containing **"go on vacation"** or **"vacation time"** starts the vacation
+- A mention containing **"come back"** (or "back from vacation", "vacation is over") ends it
+
+The runtime state is persisted in the state database and survives restarts. The `vacation_mode` config flag forces vacation on; while set, the Slack toggle cannot end it.
+
 ---
 
 ## Environment Variables
@@ -648,6 +672,7 @@ Environment variables override config file values.
 | `TOAD_SLACK_BOT_TOKEN` | `slack.bot_token` | Slack bot OAuth token (`xoxb-...`) |
 | `TOAD_LINEAR_API_TOKEN` | `issue_tracker.api_token` | Linear API token for issue tracking |
 | `TOAD_GITLAB_HOST` | `vcs.host` | Self-hosted GitLab hostname |
+| `TOAD_VACATION_MODE` | `vacation_mode` | Set to `1` or `true` to enable vacation mode |
 | `SUPERVISED` | — | Set to `1` when running under a process supervisor (see [Running Under a Process Supervisor](#running-under-a-process-supervisor)) |
 
 You can also use `${ENV_VAR}` syntax in YAML values to reference environment variables:
@@ -1178,4 +1203,10 @@ personality:
   enabled: false                          # opt-in adaptive personality
   learning_enabled: true                  # allow traits to adapt
   file_path: ~/.toad/personality.yaml     # personality state file
+
+# Vacation mode: disable all autonomous behavior. Direct interactions get a
+# polite decline and the message is saved for later review. Toggle from Slack
+# with "@toad go on vacation" / "@toad back from vacation".
+vacation_mode: false
+vacation_admins: []                       # Slack user IDs allowed to toggle; empty = anyone
 ```

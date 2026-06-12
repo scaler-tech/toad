@@ -184,6 +184,19 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("creating github_slack_mappings table: %w", err)
 	}
 
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS vacation_messages (
+		id           INTEGER PRIMARY KEY AUTOINCREMENT,
+		channel      TEXT NOT NULL,
+		channel_name TEXT DEFAULT '',
+		user         TEXT DEFAULT '',
+		text         TEXT NOT NULL,
+		thread_ts    TEXT DEFAULT '',
+		created_at   DATETIME NOT NULL
+	)`)
+	if err != nil {
+		return fmt.Errorf("creating vacation_messages table: %w", err)
+	}
+
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS personality_adjustments (
 	id INTEGER PRIMARY KEY,
 	trait TEXT NOT NULL,
@@ -301,7 +314,7 @@ func (d *DB) UpdateStatus(runID, status string) error {
 
 // CompleteRun marks a run as done or failed with a result.
 func (d *DB) CompleteRun(runID string, result *RunResult) error {
-	status := "done"
+	status := statusDone
 	if !result.Success {
 		status = "failed"
 	}
@@ -576,7 +589,7 @@ func (d *DB) Stats() (*Stats, error) {
 			return nil, fmt.Errorf("scanning run: %w", err)
 		}
 		s.TotalRuns++
-		if status == "done" {
+		if status == statusDone {
 			s.Succeeded++
 		} else {
 			s.Failed++
@@ -933,6 +946,43 @@ func (d *DB) SetSetting(key, value string) error {
 	return err
 }
 
+// SaveVacationMessage stores a message received while in vacation mode.
+func (d *DB) SaveVacationMessage(channel, channelName, user, text, threadTS string) error {
+	return dbRetry(func() error {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		_, err := d.db.ExecContext(ctx, `
+			INSERT INTO vacation_messages (channel, channel_name, user, text, thread_ts, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			channel, channelName, user, text, threadTS, time.Now(),
+		)
+		return err
+	})
+}
+
+// VacationMessages returns the most recent messages saved during vacation mode.
+func (d *DB) VacationMessages(limit int) ([]*VacationMessage, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT id, channel, channel_name, user, text, thread_ts, created_at
+		FROM vacation_messages ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []*VacationMessage
+	for rows.Next() {
+		m := &VacationMessage{}
+		if err := rows.Scan(&m.ID, &m.Channel, &m.ChannelName, &m.User, &m.Text, &m.ThreadTS, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
 // ClearDaemonStats removes daemon stats (called on clean shutdown).
 func (d *DB) ClearDaemonStats() error {
 	ctx, cancel := dbCtx()
@@ -1135,6 +1185,17 @@ type ThreadMemory struct {
 
 // ThreadMemoryTTL is how long thread memories are kept.
 const ThreadMemoryTTL = 24 * time.Hour
+
+// VacationMessage is a message saved while toad was in vacation mode.
+type VacationMessage struct {
+	ID          int64
+	Channel     string
+	ChannelName string
+	User        string
+	Text        string
+	ThreadTS    string
+	CreatedAt   time.Time
+}
 
 func scanRun(row *sql.Row) (*Run, error) {
 	var run Run

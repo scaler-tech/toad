@@ -72,3 +72,9 @@ issue_tracker:
 log:
   level: "info"                # debug, info, warn, error
   # file: "~/.toad/toad.log"
+
+# Vacation mode: disable all autonomous behavior (passive monitoring, Toad King,
+# PR watching). Direct interactions get a polite decline and are saved.
+# Toggle from Slack: "@toad go on vacation" / "@toad time to come back!".
+# vacation_mode: false                # force vacation on (locks out the Slack toggle)
+# vacation_admins: []                 # Slack user IDs allowed to toggle; empty = anyone

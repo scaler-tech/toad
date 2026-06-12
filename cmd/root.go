@@ -134,6 +134,8 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("hydrating state: %w", err)
 	}
 
+	vacationState := state.NewVacationState(stateDB, cfg.VacationMode)
+
 	// Initialize personality manager
 	var personalityMgr *personality.Manager
 	if cfg.Personality.Enabled {
@@ -250,7 +252,11 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		digestEngine = digest.New(&cfg.Digest, digest.EngineOpts{
 			AgentProvider: agentProvider,
 			TriageModel:   cfg.Triage.Model,
+			Paused:        vacationState.Active,
 			Spawn: func(ctx context.Context, task tadpole.Task) error {
+				if vacationState.Active() {
+					return fmt.Errorf("vacation mode active")
+				}
 				return tadpolePool.Spawn(ctx, task)
 			},
 			Notify: func(channel, threadTS, text string) {
@@ -379,7 +385,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		messageWg.Add(1)
 		go func() {
 			defer messageWg.Done()
-			handleMessage(ctx, msg, cfg, agentProvider, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, tadpolePool, digestEngine, tracker, resolver, repoPaths)
+			handleMessage(ctx, msg, cfg, agentProvider, triageEngine, ribbitEngine, slackClient, stateManager, vacationState, ribbitSem, tadpolePool, digestEngine, tracker, resolver, repoPaths)
 		}()
 	})
 
@@ -425,6 +431,10 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		"triggers", fmt.Sprintf("emoji=%s keywords=%v", cfg.Slack.Triggers.Emoji, cfg.Slack.Triggers.Keywords),
 	)
 
+	if vacationState.Active() {
+		slog.Warn("vacation mode enabled — passive monitoring, digest, and PR watching are disabled; direct interactions get a decline reply")
+	}
+
 	// Start MCP server if enabled
 	if mcpSrv != nil {
 		mcpSrv.Health().Version = Version
@@ -436,6 +446,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start PR review watcher
+	prWatcher.SetPaused(vacationState.Active)
 	go prWatcher.Run(ctx)
 
 	// Start periodic repo sync if enabled
@@ -453,7 +464,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	if digestEngine != nil {
 		go digestEngine.Run(ctx)
 		// Resume any investigations that were interrupted by a previous crash.
-		if recovery != nil && len(recovery.StaleOpportunities) > 0 {
+		if recovery != nil && len(recovery.StaleOpportunities) > 0 && !vacationState.Active() {
 			staleOpps := recovery.StaleOpportunities
 			go digestEngine.ResumeInvestigations(ctx, staleOpps)
 		}
