@@ -44,6 +44,7 @@ func TestVacationPhrases(t *testing.T) {
 	}
 
 	end := []string{
+		"<@U0TOAD> time to come back!",
 		"<@U0TOAD> welcome back from vacation!",
 		"toad your vacation is over",
 	}

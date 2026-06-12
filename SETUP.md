@@ -656,7 +656,7 @@ When on vacation, toad stays connected to Slack but does nothing on its own: no 
 Vacation can also be toggled at runtime from Slack, no restart needed:
 
 - A mention containing **"go on vacation"** or **"vacation time"** starts the vacation
-- A mention containing **"back from vacation"** or **"vacation is over"** ends it
+- A mention containing **"come back"** (or "back from vacation", "vacation is over") ends it
 
 The runtime state is persisted in the state database and survives restarts. The `vacation_mode` config flag forces vacation on; while set, the Slack toggle cannot end it.
 

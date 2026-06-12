@@ -642,7 +642,7 @@ func isVacationStartPhrase(text string) bool {
 
 func isVacationEndPhrase(text string) bool {
 	t := strings.ToLower(text)
-	return strings.Contains(t, "back from vacation") || strings.Contains(t, "vacation is over")
+	return strings.Contains(t, "come back") || strings.Contains(t, "back from vacation") || strings.Contains(t, "vacation is over")
 }
 
 func canToggleVacation(admins []string, userID string) bool {
