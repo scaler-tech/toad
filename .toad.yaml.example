@@ -72,3 +72,7 @@ issue_tracker:
 log:
   level: "info"                # debug, info, warn, error
   # file: "~/.toad/toad.log"
+
+# Vacation mode: disable all autonomous behavior (passive monitoring, Toad King,
+# PR watching). Direct interactions get a polite decline and are saved.
+# vacation_mode: false

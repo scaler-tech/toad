@@ -2,6 +2,7 @@
 package state
 
 import (
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -92,6 +93,14 @@ func NewPersistentManager(db *DB, historySize int) (*Manager, error) {
 // DB returns the underlying database, or nil if in-memory only.
 func (m *Manager) DB() *DB {
 	return m.db
+}
+
+// SaveVacationMessage persists a message received while in vacation mode.
+func (m *Manager) SaveVacationMessage(channel, channelName, user, text, threadTS string) error {
+	if m.db == nil {
+		return errors.New("no persistent state")
+	}
+	return m.db.SaveVacationMessage(channel, channelName, user, text, threadTS)
 }
 
 // ClaimScoped atomically checks if a thread+scope is already tracked and registers it if not.

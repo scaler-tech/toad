@@ -246,7 +246,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	// Initialize digest engine (Toad King) if enabled
 	var digestEngine *digest.Engine
-	if cfg.Digest.Enabled {
+	if cfg.Digest.Enabled && !cfg.VacationMode {
 		digestEngine = digest.New(&cfg.Digest, digest.EngineOpts{
 			AgentProvider: agentProvider,
 			TriageModel:   cfg.Triage.Model,
@@ -425,6 +425,10 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		"triggers", fmt.Sprintf("emoji=%s keywords=%v", cfg.Slack.Triggers.Emoji, cfg.Slack.Triggers.Keywords),
 	)
 
+	if cfg.VacationMode {
+		slog.Warn("vacation mode enabled — passive monitoring, digest, and PR watching are disabled; direct interactions get a decline reply")
+	}
+
 	// Start MCP server if enabled
 	if mcpSrv != nil {
 		mcpSrv.Health().Version = Version
@@ -436,7 +440,9 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start PR review watcher
-	go prWatcher.Run(ctx)
+	if !cfg.VacationMode {
+		go prWatcher.Run(ctx)
+	}
 
 	// Start periodic repo sync if enabled
 	if cfg.Repos.SyncMinutes > 0 {

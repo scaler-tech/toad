@@ -24,6 +24,7 @@ type Config struct {
 	Log          LogConfig          `yaml:"log"`
 	MCP          MCPConfig          `yaml:"mcp"`
 	Personality  PersonalityConfig  `yaml:"personality"`
+	VacationMode bool               `yaml:"vacation_mode"`
 }
 
 type SlackConfig struct {
@@ -283,6 +284,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("TOAD_LOG_LEVEL"); v != "" {
 		cfg.Log.Level = v
+	}
+	if v := os.Getenv("TOAD_VACATION_MODE"); v == "1" || strings.EqualFold(v, "true") {
+		cfg.VacationMode = true
 	}
 }
 

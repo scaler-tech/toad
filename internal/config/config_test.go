@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -357,5 +358,37 @@ func TestResolvedVCS_FullOverride(t *testing.T) {
 	}
 	if len(got.BotUsernames) != 1 || got.BotUsernames[0] != "renovate" {
 		t.Errorf("expected [renovate], got %v", got.BotUsernames)
+	}
+}
+
+func TestApplyEnv_VacationMode(t *testing.T) {
+	cfg := defaults()
+
+	os.Setenv("TOAD_VACATION_MODE", "true")
+	defer os.Unsetenv("TOAD_VACATION_MODE")
+
+	applyEnv(cfg)
+
+	if !cfg.VacationMode {
+		t.Error("expected vacation mode from env")
+	}
+}
+
+func TestVacationModeYAML(t *testing.T) {
+	cfg := defaults()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("vacation_mode: true\n"), 0o644); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+	if err := loadFile(cfg, path); err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+
+	if !cfg.VacationMode {
+		t.Error("expected vacation_mode true from yaml")
+	}
+	if cfg.Slack.Triggers.Emoji != "frog" {
+		t.Errorf("defaults should be preserved, got emoji %q", cfg.Slack.Triggers.Emoji)
 	}
 }

@@ -37,6 +37,11 @@ func handleMessage(
 	// Resolve channel name for context
 	channelName := slackClient.ResolveChannelName(msg.Channel)
 
+	if cfg.VacationMode {
+		handleVacationMode(msg, slackClient, stateManager, channelName)
+		return
+	}
+
 	// TADPOLE REQUEST: :frog: reaction on a toad reply
 	// Must be checked BEFORE the bot filter — tadpole requests are reactions on
 	// toad's own (bot) messages, so the fetched message will have IsBot=true.
@@ -585,4 +590,30 @@ func handleTadpoleRequest(
 	// Spawn succeeded — Execute will call Track, which overwrites the placeholder.
 	// Don't unclaim on defer.
 	claimed = false
+}
+
+const vacationReply = ":frog: Sorry I am not allowed to do things anymore, because I'm an idiot :(. But I have saved your message! If there is something else you want me to save, e.g. ideas on how to improve me, let me know."
+
+const vacationReplySaveFailed = ":frog: Sorry I am not allowed to do things anymore, because I'm an idiot :(. I tried to save your message but even that failed — please tell a human."
+
+func handleVacationMode(msg *islack.IncomingMessage, slackClient *islack.Client, stateManager *state.Manager, channelName string) {
+	if !isDirectInteraction(msg) {
+		return
+	}
+
+	slog.Info("vacation mode: declining interaction", "channel", channelName, "user", msg.User)
+
+	reply := vacationReply
+	if err := stateManager.SaveVacationMessage(msg.Channel, channelName, msg.User, msg.Text, msg.ThreadTS()); err != nil {
+		slog.Warn("vacation mode: failed to save message", "error", err)
+		reply = vacationReplySaveFailed
+	}
+	slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(), reply)
+}
+
+func isDirectInteraction(msg *islack.IncomingMessage) bool {
+	if msg.IsTadpoleRequest {
+		return true
+	}
+	return (msg.IsMention || msg.IsTriggered) && !msg.IsBot
 }
