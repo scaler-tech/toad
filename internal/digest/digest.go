@@ -142,6 +142,7 @@ type Engine struct {
 	respectAssignees    bool
 	staleDays           int
 	personality         *personality.Manager
+	paused              func() bool
 
 	mu     sync.Mutex
 	buffer []Message
@@ -183,6 +184,7 @@ type EngineOpts struct {
 	RespectAssignees    bool
 	StaleDays           int
 	Personality         *personality.Manager
+	Paused              func() bool
 }
 
 // New creates a digest engine.
@@ -206,6 +208,7 @@ func New(cfg *config.DigestConfig, opts EngineOpts) *Engine {
 		respectAssignees:    opts.RespectAssignees,
 		staleDays:           opts.StaleDays,
 		personality:         opts.Personality,
+		paused:              opts.Paused,
 		spawnHour:           time.Now().Hour(),
 		actedIssues:         make(map[string]time.Time),
 	}
@@ -465,6 +468,13 @@ func (e *Engine) flush(ctx context.Context) {
 	msgs := e.buffer
 	e.buffer = nil
 	e.mu.Unlock()
+
+	if e.paused != nil && e.paused() {
+		if len(msgs) > 0 {
+			slog.Info("digest paused, dropping buffered messages", "count", len(msgs))
+		}
+		return
+	}
 
 	e.lastFlush.Store(time.Now().Unix())
 

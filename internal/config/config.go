@@ -12,19 +12,20 @@ import (
 )
 
 type Config struct {
-	Slack        SlackConfig        `yaml:"slack"`
-	Repos        ReposConfig        `yaml:"repos"`
-	Limits       LimitsConfig       `yaml:"limits"`
-	Triage       TriageConfig       `yaml:"triage"`
-	Claude       ClaudeConfig       `yaml:"claude"` // Deprecated: use Agent.Model and Agent.AppendSystemPrompt
-	Digest       DigestConfig       `yaml:"digest"`
-	IssueTracker IssueTrackerConfig `yaml:"issue_tracker"`
-	VCS          VCSConfig          `yaml:"vcs"`
-	Agent        AgentConfig        `yaml:"agent"`
-	Log          LogConfig          `yaml:"log"`
-	MCP          MCPConfig          `yaml:"mcp"`
-	Personality  PersonalityConfig  `yaml:"personality"`
-	VacationMode bool               `yaml:"vacation_mode"`
+	Slack          SlackConfig        `yaml:"slack"`
+	Repos          ReposConfig        `yaml:"repos"`
+	Limits         LimitsConfig       `yaml:"limits"`
+	Triage         TriageConfig       `yaml:"triage"`
+	Claude         ClaudeConfig       `yaml:"claude"` // Deprecated: use Agent.Model and Agent.AppendSystemPrompt
+	Digest         DigestConfig       `yaml:"digest"`
+	IssueTracker   IssueTrackerConfig `yaml:"issue_tracker"`
+	VCS            VCSConfig          `yaml:"vcs"`
+	Agent          AgentConfig        `yaml:"agent"`
+	Log            LogConfig          `yaml:"log"`
+	MCP            MCPConfig          `yaml:"mcp"`
+	Personality    PersonalityConfig  `yaml:"personality"`
+	VacationMode   bool               `yaml:"vacation_mode"`
+	VacationAdmins []string           `yaml:"vacation_admins"`
 }
 
 type SlackConfig struct {

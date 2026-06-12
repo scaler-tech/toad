@@ -642,14 +642,23 @@ The radar chart in `toad status` and the kiosk view visualize current trait valu
 Turn off all autonomous behavior without uninstalling toad.
 
 ```yaml
-vacation_mode: true
+vacation_mode: false
+vacation_admins: []
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `vacation_mode` | bool | `false` | Disable passive monitoring, digest (Toad King), and PR watching |
+| `vacation_mode` | bool | `false` | Force vacation mode on; it cannot be disabled from Slack while set |
+| `vacation_admins` | list | `[]` | Slack user IDs allowed to toggle vacation from Slack; empty = anyone |
 
-When enabled, toad stays connected to Slack but does nothing on its own: no message triage, no digest analysis, no PR review or CI fix tadpoles. Anyone who directly addresses toad (an @mention, keyword or emoji trigger, or button click) gets a polite decline, and their message is saved to the `vacation_messages` table in the state database for review when toad returns.
+When on vacation, toad stays connected to Slack but does nothing on its own: no message triage, no digest analysis, no PR review or CI fix tadpoles. Anyone who directly addresses toad (an @mention, keyword or emoji trigger, or button click) gets a polite decline, and their message is saved to the `vacation_messages` table in the state database for review when toad returns.
+
+Vacation can also be toggled at runtime from Slack, no restart needed:
+
+- A mention containing **"go on vacation"** or **"vacation time"** starts the vacation
+- A mention containing **"back from vacation"** or **"vacation is over"** ends it
+
+The runtime state is persisted in the state database and survives restarts. The `vacation_mode` config flag forces vacation on; while set, the Slack toggle cannot end it.
 
 ---
 
@@ -1196,6 +1205,8 @@ personality:
   file_path: ~/.toad/personality.yaml     # personality state file
 
 # Vacation mode: disable all autonomous behavior. Direct interactions get a
-# polite decline and the message is saved for later review.
+# polite decline and the message is saved for later review. Toggle from Slack
+# with "@toad go on vacation" / "@toad back from vacation".
 vacation_mode: false
+vacation_admins: []                       # Slack user IDs allowed to toggle; empty = anyone
 ```

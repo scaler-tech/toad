@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const statusDone = "done"
+
 // Run represents an active or completed tadpole run.
 type Run struct {
 	ID            string
@@ -212,7 +214,7 @@ func (m *Manager) Complete(runID string, result *RunResult) {
 		return
 	}
 	if result.Success {
-		run.Status = "done"
+		run.Status = statusDone
 	} else {
 		run.Status = "failed"
 	}

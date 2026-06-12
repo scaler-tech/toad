@@ -40,6 +40,7 @@ type Watcher struct {
 	reviewBots         map[string]bool // bot usernames whose comments can trigger fixes
 	pollTick           uint64
 	personalityOutcome OutcomeCallback
+	paused             func() bool
 }
 
 // NewWatcher creates a PR review watcher.
@@ -74,6 +75,11 @@ func (w *Watcher) OnPersonalityOutcome(cb OutcomeCallback) {
 	w.personalityOutcome = cb
 }
 
+// SetPaused registers a callback that suspends polling while it returns true.
+func (w *Watcher) SetPaused(paused func() bool) {
+	w.paused = paused
+}
+
 // Run starts the polling loop. Blocks until ctx is canceled.
 func (w *Watcher) Run(ctx context.Context) {
 	slog.Info("PR review watcher started", "interval", w.interval)
@@ -83,6 +89,9 @@ func (w *Watcher) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
+			if w.paused != nil && w.paused() {
+				continue
+			}
 			w.poll(ctx)
 		case <-ctx.Done():
 			slog.Info("PR review watcher stopped")

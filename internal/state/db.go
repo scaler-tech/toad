@@ -314,7 +314,7 @@ func (d *DB) UpdateStatus(runID, status string) error {
 
 // CompleteRun marks a run as done or failed with a result.
 func (d *DB) CompleteRun(runID string, result *RunResult) error {
-	status := "done"
+	status := statusDone
 	if !result.Success {
 		status = "failed"
 	}
@@ -589,7 +589,7 @@ func (d *DB) Stats() (*Stats, error) {
 			return nil, fmt.Errorf("scanning run: %w", err)
 		}
 		s.TotalRuns++
-		if status == "done" {
+		if status == statusDone {
 			s.Succeeded++
 		} else {
 			s.Failed++

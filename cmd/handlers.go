@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ func handleMessage(
 	ribbitEngine *ribbit.Engine,
 	slackClient *islack.Client,
 	stateManager *state.Manager,
+	vacationState *state.VacationState,
 	ribbitSem chan struct{},
 	tadpolePool *tadpole.Pool,
 	digestEngine *digest.Engine,
@@ -37,7 +39,18 @@ func handleMessage(
 	// Resolve channel name for context
 	channelName := slackClient.ResolveChannelName(msg.Channel)
 
-	if cfg.VacationMode {
+	if msg.IsMention && !msg.IsBot && canToggleVacation(cfg.VacationAdmins, msg.User) {
+		if vacationState.Active() && isVacationEndPhrase(msg.Text) {
+			handleVacationEnd(msg, slackClient, vacationState, channelName)
+			return
+		}
+		if !vacationState.Active() && isVacationStartPhrase(msg.Text) {
+			handleVacationStart(msg, slackClient, vacationState, channelName)
+			return
+		}
+	}
+
+	if vacationState.Active() {
 		handleVacationMode(msg, slackClient, stateManager, channelName)
 		return
 	}
@@ -595,6 +608,49 @@ func handleTadpoleRequest(
 const vacationReply = ":frog: Sorry I am not allowed to do things anymore, because I'm an idiot :(. But I have saved your message! If there is something else you want me to save, e.g. ideas on how to improve me, let me know."
 
 const vacationReplySaveFailed = ":frog: Sorry I am not allowed to do things anymore, because I'm an idiot :(. I tried to save your message but even that failed — please tell a human."
+
+const vacationStartReply = ":frog: :palm_tree: Thanks! I hop away to rest a spell,\nto come back energized and well,\nand when I leap back to my pond again,\nI'll bless you with my findings then! :sparkles:"
+
+const vacationEndReply = ":frog: I'm back! Rested, energized, and ready to bless you with findings again. :sparkles:"
+
+const vacationLockedReply = ":frog: My vacation is locked on by config (`vacation_mode: true`), so I can't come back until that changes."
+
+func handleVacationStart(msg *islack.IncomingMessage, slackClient *islack.Client, vacationState *state.VacationState, channelName string) {
+	slog.Info("vacation mode enabled via slack", "channel", channelName, "user", msg.User)
+	if err := vacationState.Set(true); err != nil {
+		slog.Warn("failed to persist vacation state", "error", err)
+	}
+	slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(), vacationStartReply)
+}
+
+func handleVacationEnd(msg *islack.IncomingMessage, slackClient *islack.Client, vacationState *state.VacationState, channelName string) {
+	if vacationState.Forced() {
+		slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(), vacationLockedReply)
+		return
+	}
+	slog.Info("vacation mode disabled via slack", "channel", channelName, "user", msg.User)
+	if err := vacationState.Set(false); err != nil {
+		slog.Warn("failed to persist vacation state", "error", err)
+	}
+	slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(), vacationEndReply)
+}
+
+func isVacationStartPhrase(text string) bool {
+	t := strings.ToLower(text)
+	return strings.Contains(t, "go on vacation") || strings.Contains(t, "vacation time")
+}
+
+func isVacationEndPhrase(text string) bool {
+	t := strings.ToLower(text)
+	return strings.Contains(t, "back from vacation") || strings.Contains(t, "vacation is over")
+}
+
+func canToggleVacation(admins []string, userID string) bool {
+	if len(admins) == 0 {
+		return true
+	}
+	return slices.Contains(admins, userID)
+}
 
 func handleVacationMode(msg *islack.IncomingMessage, slackClient *islack.Client, stateManager *state.Manager, channelName string) {
 	if !isDirectInteraction(msg) {
