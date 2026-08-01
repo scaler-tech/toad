@@ -12,7 +12,6 @@ import (
 	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/issuetracker"
-	"github.com/scaler-tech/toad/internal/personality"
 	"github.com/scaler-tech/toad/internal/triage"
 )
 
@@ -32,18 +31,16 @@ type Engine struct {
 	agent          agent.Provider
 	model          string
 	timeoutMinutes int
-	personality    *personality.Manager
 	vcs            config.VCSConfig
 	tracker        issuetracker.Tracker
 }
 
 // New creates a ribbit engine.
-func New(agentProvider agent.Provider, cfg *config.Config, mgr *personality.Manager, tracker issuetracker.Tracker) *Engine {
+func New(agentProvider agent.Provider, cfg *config.Config, tracker issuetracker.Tracker) *Engine {
 	return &Engine{
 		agent:          agentProvider,
 		model:          cfg.Agent.Model,
 		timeoutMinutes: cfg.Limits.TimeoutMinutes,
-		personality:    mgr,
 		vcs:            cfg.VCS,
 		tracker:        tracker,
 	}
@@ -137,16 +134,6 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 	prompt := fmt.Sprintf(ribbitPrompt, messageText, triageCtx)
 
 	maxTurns := 10
-	if e.personality != nil {
-		frags := e.personality.PromptFragments(personality.ModeRibbit)
-		if len(frags) > 0 {
-			prompt += "\n\n## Personality instructions\n\n" + strings.Join(frags, "\n")
-		}
-		ov := e.personality.ConfigOverrides(personality.ModeRibbit)
-		if ov.MaxTurns != nil {
-			maxTurns = *ov.MaxTurns
-		}
-	}
 
 	slog.Debug("running ribbit", "model", e.model, "repo", repoPath)
 

@@ -24,7 +24,7 @@ func TestRespond_RunOptsWiring(t *testing.T) {
 		Agent:  config.AgentConfig{Model: "sonnet"},
 		Limits: config.LimitsConfig{TimeoutMinutes: 10},
 	}
-	e := New(mock, cfg, nil, nil)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{
 		Summary:  "nil pointer",
@@ -83,7 +83,7 @@ func TestRespond_EmptyResult(t *testing.T) {
 		Agent:  config.AgentConfig{Model: "sonnet"},
 		Limits: config.LimitsConfig{TimeoutMinutes: 5},
 	}
-	e := New(mock, cfg, nil, nil)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
 	_, err := e.Respond(context.Background(), "test", tr, nil, "/repo", "main", nil)
@@ -100,7 +100,7 @@ func TestRespond_ProviderError(t *testing.T) {
 		Agent:  config.AgentConfig{Model: "sonnet"},
 		Limits: config.LimitsConfig{TimeoutMinutes: 5},
 	}
-	e := New(mock, cfg, nil, nil)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
 	_, err := e.Respond(context.Background(), "test", tr, nil, "/repo", "main", nil)
@@ -118,7 +118,7 @@ func TestRespond_VCSBashWiring(t *testing.T) {
 		Limits: config.LimitsConfig{TimeoutMinutes: 5},
 		VCS:    config.VCSConfig{Platform: "github"},
 	}
-	e := New(mock, cfg, nil, nil)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
 	_, err := e.Respond(context.Background(), "what is this PR?", tr, nil, "/repo", "main", nil)
@@ -154,7 +154,7 @@ func TestRespond_VCSBashWiring_GitLab(t *testing.T) {
 		Limits: config.LimitsConfig{TimeoutMinutes: 5},
 		VCS:    config.VCSConfig{Platform: "gitlab"},
 	}
-	e := New(mock, cfg, nil, nil)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
 	_, err := e.Respond(context.Background(), "what is this MR?", tr, nil, "/repo", "main", nil)
@@ -184,7 +184,7 @@ func TestRespond_PriorContext(t *testing.T) {
 		Agent:  config.AgentConfig{Model: "sonnet"},
 		Limits: config.LimitsConfig{TimeoutMinutes: 5},
 	}
-	e := New(mock, cfg, nil, nil)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "follow-up"}
 	prior := &PriorContext{
@@ -222,7 +222,7 @@ func TestRespond_IssueTrackerEnrichment(t *testing.T) {
 			},
 		},
 	}
-	e := New(mock, cfg, nil, tracker)
+	e := New(mock, cfg, tracker)
 
 	tr := &triage.Result{Summary: "test"}
 	_, err := e.Respond(context.Background(), "what's going on with PLF-123?", tr, nil, "/repo", "main", nil)
@@ -250,7 +250,7 @@ func TestRespond_NilTracker(t *testing.T) {
 		Agent:  config.AgentConfig{Model: "sonnet"},
 		Limits: config.LimitsConfig{TimeoutMinutes: 5},
 	}
-	e := New(mock, cfg, nil, nil)
+	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
 	_, err := e.Respond(context.Background(), "what about PLF-999?", tr, nil, "/repo", "main", nil)

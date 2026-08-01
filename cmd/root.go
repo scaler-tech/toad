@@ -169,7 +169,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Initialize issue tracker (before ribbit, which uses it for ticket enrichment)
 	tracker := issuetracker.NewTracker(cfg.IssueTracker)
 
-	ribbitEngine := ribbit.New(agentProvider, cfg, personalityMgr, tracker)
+	ribbitEngine := ribbit.New(agentProvider, cfg, tracker)
 
 	// Separate concurrency pools: ribbits are fast (seconds), tadpoles are slow (minutes).
 	// Ribbit pool is generous so Q&A stays responsive even while tadpoles run.
