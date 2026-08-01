@@ -1127,7 +1127,7 @@ func (m wizardModel) viewAdvModels() string {
 	b.WriteString(tui.DimStyle.Render("(3/5)"))
 	b.WriteString("\n\n")
 
-	b.WriteString(m.fieldLabel("Tadpole model", m.advCursor == 0))
+	b.WriteString(m.fieldLabel("Agent model (investigations)", m.advCursor == 0))
 	b.WriteString("  ")
 	for i, model := range agentModels {
 		if i == m.agentModel {

@@ -149,6 +149,13 @@ triage:
   auto_spawn: {{ .Triage.AutoSpawn }}
 
 # ──────────────────────────────────────────────
+# Intake — bot message allowlist
+# ──────────────────────────────────────────────
+# intake:
+#   bot_allowlist:              # Slack Bot IDs allowed into triage (e.g. Sentry, CI bots)
+#     - "B0123456789"
+
+# ──────────────────────────────────────────────
 # Toad King — passive monitoring
 # ──────────────────────────────────────────────
 digest:
@@ -190,6 +197,14 @@ digest:
 #   # stale_days: 7              # Ignore assignments older than this many days
 {{ end }}
 # ──────────────────────────────────────────────
+# Ticket — Linear auto-filing gate
+# ──────────────────────────────────────────────
+# ticket:
+#   auto_file: true              # Auto-file when findings are Sentry-corroborated + confident + feasible
+#   auto_file_confidence: 0.85   # Minimum confidence required to auto-file (else propose via CTA)
+#   triage_state_id: ""          # Optional Linear workflow state ID for newly filed tickets
+
+# ──────────────────────────────────────────────
 # VCS Platform
 # ──────────────────────────────────────────────
 # vcs:
@@ -199,12 +214,17 @@ digest:
 #   #   - "renovate-bot"
 
 # ──────────────────────────────────────────────
-# Agent — code generation
+# Agent — investigation runs
 # ──────────────────────────────────────────────
 agent:
   platform: "claude"
   model: "{{ .Agent.Model }}"
   # append_system_prompt: ""   # Extra instructions for all agent runs
+  # fallback_api_key_env: "ANTHROPIC_API_KEY"  # Env var to retry with when the CLI seat hits a usage/rate limit
+  # mcp_servers:                # MCP servers available during read-only investigations
+  #   sentry:
+  #     url: "https://mcp.sentry.dev/mcp"
+  #     auth_token_env: "SENTRY_API_TOKEN"
 
 # ──────────────────────────────────────────────
 # Logging

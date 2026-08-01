@@ -23,40 +23,39 @@ No external test infrastructure needed — tests use in-memory SQLite (`:memory:
 
 ## Architecture
 
-Toad is a Go daemon that monitors Slack channels, triages messages with Claude Haiku, and either answers questions (ribbit) or spawns autonomous coding agents (tadpoles) that create PRs.
+Toad is a Go daemon that monitors Slack channels, triages messages with Claude Haiku, and either answers questions (ribbit) or investigates bug/feature reports and files (or proposes) a tracking ticket in Linear. Toad no longer writes code, opens PRs, or creates git worktrees — every agent run is read-only.
 
-**Message flow:** Slack event -> triage (Haiku, ~1s) -> route by category:
-- `bug`/`feature` -> auto-spawn tadpole (worktree -> Claude -> validate -> PR)
+**Message flow:** Slack event (including allowlisted bots, e.g. Sentry) -> triage (Haiku, ~1s) -> route by category:
 - `question` -> ribbit reply (Claude + read-only tools)
-- Passive: high-confidence bugs get a ribbit with :frog: CTA
+- `bug`/`feature` -> read-only investigation -> ticket gate: auto-file iff Sentry-corroborated + confident + feasible, else propose via a "Create Linear ticket" CTA button
+- A triage `Escalate` result, or a human clicking the CTA button / reacting with `:frog:`/`:ticket:` on a toad message, files a ticket directly — bypassing the auto-file gate, since that's already an explicit sign-off
+- Passive (Toad King digest): batches untriggered messages, analyzes with Haiku, and applies the same investigate-then-gate flow to auto-file or propose a ticket
 
-**Tadpole lifecycle:** `CreateWorktree` -> `RunClaude` (CLI subprocess) -> `Validate` (test+lint+file count) -> retry loop -> `ship` (push + `gh pr create`) -> `RemoveWorktree`
+**Investigation lifecycle:** thread claim (`state.Manager.Claim`/`ClaimScoped`) -> repo re-sync (best-effort; failure appends a staleness caveat rather than blocking) -> `investigation.Runner.Run` (read-only Claude CLI subprocess, `--add-dir` for every configured repo) -> `ParseFindings` -> `ticket.Engine.Decide` (auto-file vs propose) -> `FileOrUpdate` (idempotent, keyed by Sentry issue or Slack thread) -> claim released. Findings are always persisted to the `investigations` table (even when not fed to the ticket engine) so a later CTA click or MCP `investigations` lookup can reuse them instead of re-investigating.
 
-**Multi-repo routing:** Config supports multiple repos via `repos:` list. At startup, `BuildProfiles` auto-detects each repo's stack/module from manifest files. Triage and digest prompts include repo profiles so Haiku can suggest a `"repo"` name. The `Resolver` verifies with file-existence stat checks (`resolver.go`), falling back to triage hint, then `primary` repo.
-
-**Service-aware validation:** When `repos[].services` is configured, `resolveChecks()` in `validate.go` matches changed files to services by path prefix and runs each service's lint/test commands from its subdirectory. Unmatched files fall back to root-level commands. This ensures tadpole PRs pass per-service CI (e.g. PHP services use `make stan && make cs`, Python services use `make lint`).
+**Multi-repo routing:** Config supports multiple repos via `repos:` list. At startup, `BuildProfiles` auto-detects each repo's stack/module from manifest files. Triage and digest prompts include repo profiles so Haiku can suggest a `"repo"` name. The `Resolver` verifies with file-existence stat checks (`resolver.go`), falling back to triage hint, then `primary` repo. Repos are synced periodically (`repos.sync_minutes`) and are read-only — toad never commits, pushes, or opens PRs against them.
 
 **Key patterns:**
 - **Write-through state**: `state.Manager` caches runs in-memory maps, writes through to SQLite on every mutation. `NewManager()` is in-memory only (tests), `NewPersistentManager(db)` hydrates from DB.
-- **Claim/Unclaim**: Atomic thread reservation prevents duplicate tadpoles from TOCTOU races. `Claim` reserves with empty placeholder, `Track` fills in the run ID, `Unclaim` on error removes placeholder only.
-- **Concurrency**: Separate semaphores for ribbits (`MaxConcurrent*3`) and tadpoles (`MaxConcurrent`). Each runs in its own goroutine.
+- **Claim/Unclaim**: thread-scoped reservation prevents duplicate concurrent investigations or ticket requests on the same Slack thread. `Claim` (empty scope) is exclusive — it fails if any claim, scoped or not, already exists on the thread. `ClaimScoped(threadTS, scope)` lets independent flows (e.g. a digest investigation) coexist on the same thread under different scopes while still blocking a second claim on the same scope. Every investigate-and-file path releases its claim via `defer`, on both success and failure.
+- **Ticket idempotency**: `ticket.Engine` guards `FileOrUpdate` with a per-external-key mutex (keyed on `sentry:<issue-id>` when Sentry-corroborated, else `thread:<channel>:<ts>`) so concurrent deliveries (duplicate Sentry webhooks, a digest and a Slack thread racing the same bug) can't file duplicate tickets. `state.TicketIndexEntry` (table `ticket_index`) maps that key to the filed issue; a repeat observation posts a "already tracked" comment and bumps `last_seen_at` instead of filing again.
+- **Concurrency**: separate semaphores for ribbits (`MaxConcurrent*3`) and investigations (`MaxConcurrent`). Each message is handled in its own goroutine.
 - **Channel access**: Bot auto-joins all public channels on startup. If `channels` config is empty, no filtering — events from all joined channels are processed.
 
 **Packages:**
-- `cmd/` — Cobra commands: `toad` (daemon), `toad run` (CLI one-shot), `toad init` (setup), `toad status`. Daemon logic split into `root.go` (bootstrap), `handlers.go` (message routing), `investigation.go` (prompts/parsing), `helpers.go` (utilities)
+- `cmd/` — Cobra commands: `toad` (daemon), `toad init` (setup), `toad status` (dashboard), `toad restart`, `toad update`, `toad version`. Daemon logic split into `root.go` (bootstrap), `handlers.go` (message routing, bot allowlist), `ticketflow.go` (the investigate-and-file flow: triggered investigations, CTA/escalation ticket requests, digest hooks), `outcomes.go` (hourly Linear status poller), `helpers.go` (utilities)
 - `internal/slack/` — Socket Mode client, event routing, dedup, reply tracking
-- `internal/triage/` — Haiku classification (actionable, category, size, keywords, files)
+- `internal/triage/` — Haiku classification (actionable, category, size, keywords, files, escalate)
 - `internal/ribbit/` — Sonnet with read-only tools, thread memory context, retry on empty result
-- `internal/tadpole/` — Worktree, Claude runner, validation, pre-flight diff check, shipping, pool
-- `internal/state/` — In-memory + SQLite state, crash recovery
-- `internal/reviewer/` — Poll GitHub for PR review comments, spawn fix tadpoles
-- `internal/digest/` — Toad King: batch messages, Haiku analysis, auto-spawn with guardrails. Split into `digest.go` (engine), `analyze.go` (LLM analysis), `chunking.go` (batching), `guardrails.go` (filtering)
+- `internal/investigation/` — read-only investigation runner: builds the prompt, invokes the agent with `PermissionReadOnly`, parses the `Findings` verdict (feasibility, root cause, evidence, scope, acceptance criteria, confidence)
+- `internal/ticket/` — Ticket Engine: auto-file/propose decision gate, idempotent filing via `ticket_index`, Linear ticket body composition
+- `internal/state/` — in-memory + SQLite state, crash recovery, `ticket_index` and `investigations` tables
+- `internal/digest/` — Toad King: batch messages, Haiku analysis, guardrails. Split into `digest.go` (engine), `analyze.go` (LLM analysis), `chunking.go` (batching), `guardrails.go` (filtering). Proposes/files tickets through the same gate as the Slack-thread flow — never spawns anything
 - `internal/config/` — YAML config loading with cascading defaults, multi-repo profiles and resolver
-- `internal/personality/` — 22-trait adaptive behavior system with outcome-based learning, dampening, and drift caps (±0.30)
-- `internal/agent/` — Agent CLI abstraction (Claude Code subprocess), provider interface for swappable backends
-- `internal/vcs/` — VCS provider abstraction (GitHub via `gh`, GitLab via `gitlab`), PR operations, CI status, suggested reviewers
-- `internal/issuetracker/` — Linear integration: issue extraction, detail+comment fetching, assignee gating, crossposting
-- `internal/mcp/` — Model Context Protocol server: `ask`, `logs`, `watches`, `query` tools with token auth
+- `internal/agent/` — Agent CLI abstraction (Claude Code subprocess), MCP config writer, API-key fallback, provider interface for swappable backends
+- `internal/vcs/` — VCS provider abstraction (GitHub via `gh`, GitLab via `gitlab`), PR/CI status lookups used by ribbit's read-only tool access
+- `internal/issuetracker/` — Linear integration: issue creation/lookup, detail+comment fetching, assignee gating, crossposting
+- `internal/mcp/` — Model Context Protocol server: `ask`, `logs`, `investigations`, `query` tools with token auth
 - `internal/tui/` — Shared huh theme for init wizard
 - `internal/update/` — Auto-update mechanism via Homebrew
 - `internal/log/` — Structured logging setup (slog with optional file output)
@@ -65,18 +64,19 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 
 ## Important Details
 
-- Claude is invoked as a CLI subprocess (`claude --print --output-format json`), not via API
-- Tadpoles use `--permission-mode acceptEdits --allowedTools Read,Write,Edit,Glob,Grep,Bash,Agent`, ribbit uses `--allowedTools Read,Glob,Grep`
-- SQLite uses `modernc.org/sqlite` (pure Go, no CGo) with WAL mode; `dbRetry` wrapper retries on SQLITE_BUSY
+- Claude is invoked as a CLI subprocess (`claude --print --output-format json`), not via API. There is no `--max-turns` flag in this version's CLI, and toad does not pass one.
+- Investigations run with `--allowedTools Read,Glob,Grep` plus any per-run `Bash(<cmd>:*)` and `mcp__<server>__*` entries; ribbit uses the same read-only permission mode with a VCS-specific Bash allowlist (`gh pr view/list/diff/checks`, `gh issue view/list`, `gh search` on GitHub; the `glab` equivalents on GitLab)
+- When `agent.mcp_servers` is configured (e.g. a `sentry` entry), toad writes an MCP config JSON and passes `--mcp-config <path> --strict-mcp-config`; HTTP-type servers get a bearer token from `auth_token_env` if set, command-type servers run as a subprocess
+- `agent.fallback_api_key_env` names an env var holding an Anthropic API key: if a run fails because the CLI's subscription seat is throttled (usage/rate limit), toad retries once with `ANTHROPIC_API_KEY` set from that var
+- SQLite uses `modernc.org/sqlite` (pure Go, no CGo) with WAL mode; `dbRetry` wrapper retries on SQLITE_BUSY; current schema is version 10, adding `ticket_index` (external key -> filed issue, dedup/status tracking) and `investigations` (findings by ID, looked up by thread or by ticket)
 - Config loads: defaults -> `~/.toad/config.yaml` -> `.toad.yaml` -> env vars
 - All Slack tokens come from env vars (`TOAD_SLACK_APP_TOKEN`, `TOAD_SLACK_BOT_TOKEN`) or `.toad.yaml`
 - Slack API calls have a 30-second HTTP timeout to prevent hung goroutines
-- State DB at `~/.toad/state.db`, worktrees at `~/.toad/worktrees/`
-- On startup, `RecoverOnStartup` marks stale runs as failed and cleans orphaned worktrees
-- Personality traits have a learned cap of ±0.30 from baseline; balanced positive/negative signals on PR merge/close
-- Tadpoles check diff vs main after validation but before shipping to catch already-fixed issues early
-- Ribbit retries once on empty result (with +5 max_turns if first attempt hit max turns)
-- Digest confidence floor is 0.85 in comment mode (dry-run + comment investigation); personality-driven otherwise
-- CTA "Let Toad fix this" buttons appear on bug/feature ribbits, investigation findings, and failure messages
+- State DB at `~/.toad/state.db`
+- On startup, `RecoverOnStartup` marks runs left in an active state (e.g. `investigating`) by a previous crash as failed, and returns any digest opportunities stuck mid-investigation so the digest engine can resume them
+- Ribbit retries once on empty result
+- Digest confidence floor is 0.85 in comment mode (dry-run + comment investigation); otherwise falls back to `digest.min_confidence` (default 0.95)
+- The "Create Linear ticket" CTA button appears on proposed (non-auto-filed) findings — both from a triggered Slack-thread investigation and from a digest proposal
+- An hourly outcome poller (`cmd/outcomes.go`) checks `ticket_index` entries against Linear for status changes and logs transitions — visibility only, it never changes toad's filing behavior
 - Linear ticket comments (up to 20) are fetched alongside issue details for investigation context
 - GitHub Actions: `tag.yml` (manual version tagging with auto-bump) triggers `release.yml` (GoReleaser + Docker)
