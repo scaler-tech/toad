@@ -19,19 +19,20 @@ import (
 
 // IncomingMessage represents a parsed Slack message ready for processing.
 type IncomingMessage struct {
-	Text             string
-	Channel          string
-	ChannelName      string
-	User             string
-	UserName         string
-	Timestamp        string // message ts
-	ThreadTimestamp  string // parent thread ts (if reply)
-	IsMention        bool
-	IsTriggered      bool
-	IsBot            bool
-	BotID            string
-	IsTadpoleRequest bool // :frog: reaction on a toad reply — means "spawn tadpole"
-	ThreadContext    []string
+	Text            string
+	Channel         string
+	ChannelName     string
+	User            string
+	UserName        string
+	Timestamp       string // message ts
+	ThreadTimestamp string // parent thread ts (if reply)
+	IsMention       bool
+	IsTriggered     bool
+	IsBot           bool
+	BotID           string
+	IsTicketRequest bool // :frog: reaction on a toad reply — means "file a ticket"
+	SentryRefs      []string
+	ThreadContext   []string
 }
 
 // ThreadTS returns the thread timestamp to use for replies.
@@ -438,14 +439,16 @@ func (c *Client) FetchMessage(channel, ts string) (*IncomingMessage, error) {
 		return nil, fmt.Errorf("message not found: %s/%s", channel, ts)
 	}
 	m := msgs[0]
+	fullText := extractFullText(m.Msg)
 	return &IncomingMessage{
-		Text:            extractFullText(m.Msg),
+		Text:            fullText,
 		Channel:         channel,
 		User:            m.User,
 		Timestamp:       m.Timestamp,
 		ThreadTimestamp: m.ThreadTimestamp,
 		IsBot:           m.BotID != "",
 		IsTriggered:     true,
+		SentryRefs:      ExtractSentryRefs(fullText),
 	}, nil
 }
 

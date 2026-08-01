@@ -13,13 +13,13 @@ import (
 	"github.com/slack-go/slack/socketmode"
 )
 
-const actionIDFix = "toad_fix"
+const actionIDTicket = "toad_ticket"
 
-// parseFixAction extracts the "toad_fix" button click from an InteractionCallback.
+// parseTicketAction extracts the "toad_ticket" button click from an InteractionCallback.
 // Returns (found, threadTS, channelID, userID).
-func parseFixAction(cb *slack.InteractionCallback) (bool, string, string, string) {
+func parseTicketAction(cb *slack.InteractionCallback) (bool, string, string, string) {
 	for _, a := range cb.ActionCallback.BlockActions {
-		if a.ActionID == actionIDFix {
+		if a.ActionID == actionIDTicket {
 			return true, a.Value, cb.Channel.ID, cb.User.ID
 		}
 	}
@@ -36,23 +36,23 @@ func handleInteractive(ctx context.Context, c *Client, evt socketmode.Event) {
 		return
 	}
 
-	found, threadTS, channel, userID := parseFixAction(&cb)
+	found, threadTS, channel, userID := parseTicketAction(&cb)
 	if !found {
 		return
 	}
 
-	slog.Info("fix button clicked", "channel", channel, "user", userID, "thread", threadTS)
+	slog.Info("ticket button clicked", "channel", channel, "user", userID, "thread", threadTS)
 
-	c.SetStatus(channel, threadTS, "Spawning tadpole...")
+	c.SetStatus(channel, threadTS, ":ticket: Creating ticket...")
 
 	// Instant feedback: replace button with processing indicator before any API calls.
-	processingBlocks := SpawnedByBlocks(cb.Message.Blocks, "")
+	processingBlocks := TicketedByBlocks(cb.Message.Blocks, "")
 	if err := respondToInteraction(cb.ResponseURL, cb.Message.Text, processingBlocks); err != nil {
 		slog.Warn("failed to update button message", "error", err)
 	}
 
 	// The button's message text is the investigation finding — use it as the
-	// primary text so the tadpole knows exactly what to fix, rather than
+	// primary text so the ticket captures exactly what to fix, rather than
 	// re-triaging from the thread root (which may be a planning doc or unrelated).
 	// However, if the button is on a toad system message (e.g. failure notification),
 	// fall back to the thread root so toad retries the original request.
@@ -63,21 +63,21 @@ func handleInteractive(ctx context.Context, c *Client, evt socketmode.Event) {
 
 	go func() {
 		userName := c.ResolveUserName(userID)
-		finalBlocks := SpawnedByBlocks(cb.Message.Blocks, userName)
+		finalBlocks := TicketedByBlocks(cb.Message.Blocks, userName)
 		if err := respondToInteraction(cb.ResponseURL, cb.Message.Text, finalBlocks); err != nil {
 			slog.Warn("failed to update button message", "error", err)
 		}
 
 		msg, err := c.FetchMessage(channel, threadTS)
 		if err != nil {
-			slog.Error("failed to fetch thread message for fix button", "error", err)
+			slog.Error("failed to fetch thread message for ticket button", "error", err)
 			return
 		}
 		if !isToadSystemMessage {
 			msg.Text = buttonMessageText
 		}
 		msg.IsTriggered = true
-		msg.IsTadpoleRequest = true
+		msg.IsTicketRequest = true
 
 		if c.handler != nil {
 			c.handler(ctx, msg)

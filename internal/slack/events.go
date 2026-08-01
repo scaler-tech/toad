@@ -73,6 +73,7 @@ func handleAppMention(ctx context.Context, c *Client, ev *slackevents.AppMention
 		IsTriggered:     true,
 		IsBot:           ev.BotID != "",
 		BotID:           ev.BotID,
+		SentryRefs:      ExtractSentryRefs(ev.Text),
 	}
 
 	slog.Info("app mention received", "channel", ev.Channel, "user", ev.User)
@@ -144,6 +145,7 @@ func handleMessage(ctx context.Context, c *Client, ev *slackevents.MessageEvent)
 		IsTriggered:     triggered,
 		IsBot:           isBot,
 		BotID:           ev.BotID,
+		SentryRefs:      ExtractSentryRefs(fullText),
 	}
 
 	slog.Debug("dispatching message", "channel", ev.Channel, "triggered", triggered, "bot", isBot)
@@ -176,11 +178,11 @@ func handleReaction(ctx context.Context, c *Client, ev *slackevents.ReactionAdde
 		return
 	}
 
-	// Check if reaction is on a toad reply (tadpole request) or on a user message (triage trigger)
-	isTadpoleRequest := c.IsToadReply(ev.Item.Channel, ev.Item.Timestamp)
+	// Check if reaction is on a toad reply (ticket request) or on a user message (triage trigger)
+	isTicketRequest := c.IsToadReply(ev.Item.Channel, ev.Item.Timestamp)
 
 	slog.Info("trigger reaction received",
-		"emoji", ev.Reaction, "channel", ev.Item.Channel, "tadpole_request", isTadpoleRequest)
+		"emoji", ev.Reaction, "channel", ev.Item.Channel, "ticket_request", isTicketRequest)
 
 	// Fetch the message that was reacted to
 	msg, err := c.FetchMessage(ev.Item.Channel, ev.Item.Timestamp)
@@ -189,9 +191,9 @@ func handleReaction(ctx context.Context, c *Client, ev *slackevents.ReactionAdde
 		return
 	}
 	msg.IsTriggered = true
-	msg.IsTadpoleRequest = isTadpoleRequest
+	msg.IsTicketRequest = isTicketRequest
 
-	slog.Debug("dispatching message", "triggered", true, "tadpole_request", isTadpoleRequest, "bot", msg.IsBot)
+	slog.Debug("dispatching message", "triggered", true, "ticket_request", isTicketRequest, "bot", msg.IsBot)
 	if c.handler != nil {
 		c.handler(ctx, msg)
 	}

@@ -262,7 +262,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 				}
 
 				// Post investigation reply with CTA button
-				blocks := islack.FixThisBlocks(text, notice.ThreadTS)
+				blocks := islack.TicketBlocks(text, notice.ThreadTS)
 				replyTS := ""
 				if ts, err := slackClient.ReplyInThreadWithBlocks(
 					notice.Channel, notice.ThreadTS, text, blocks,

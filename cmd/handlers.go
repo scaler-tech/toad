@@ -35,11 +35,7 @@ func handleMessage(
 	// TICKET REQUEST: :frog: reaction on a toad reply
 	// Must be checked BEFORE the bot filter — ticket requests are reactions on
 	// toad's own (bot) messages, so the fetched message will have IsBot=true.
-	// NOTE: the field is still named IsTadpoleRequest here — Task 10 renames it
-	// (and the Slack-side action/copy) to IsTicketRequest atomically with the
-	// TicketBlocks rename; renaming just the cmd/ side now would desync from
-	// internal/slack ahead of that task.
-	if msg.IsTadpoleRequest {
+	if msg.IsTicketRequest {
 		slog.Info("handler: ticket requested", "channel", channelName, "thread", msg.ThreadTS())
 		handleTicketRequest(ctx, msg, slackClient)
 		return
@@ -244,7 +240,7 @@ func handleTriggered(
 
 	daemonCounters.ribbits.Add(1)
 	if result.Category == "bug" || result.Category == "feature" {
-		blocks := islack.FixThisBlocks(resp.Text, msg.ThreadTS())
+		blocks := islack.TicketBlocks(resp.Text, msg.ThreadTS())
 		if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, msg.ThreadTS(), resp.Text, blocks); err != nil {
 			slog.Warn("ribbit reply failed", "error", err)
 		}
@@ -294,7 +290,7 @@ func handlePassive(
 	}
 
 	daemonCounters.ribbits.Add(1)
-	blocks := islack.FixThisBlocks(resp.Text, msg.ThreadTS())
+	blocks := islack.TicketBlocks(resp.Text, msg.ThreadTS())
 	if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, msg.Timestamp, resp.Text, blocks); err != nil {
 		slog.Warn("passive ribbit reply failed", "error", err)
 	}
