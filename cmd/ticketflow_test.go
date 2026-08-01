@@ -386,7 +386,7 @@ func TestProposeFromDigest_AutoFilesSentryCorroboratedFinding(t *testing.T) {
 		return "999.1", nil
 	}
 
-	if err := proposeFromDigest(context.Background(), ticketEngine, post, f, msg); err != nil {
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg); err != nil {
 		t.Fatalf("proposeFromDigest: %v", err)
 	}
 
@@ -439,7 +439,7 @@ func TestProposeFromDigest_ProposesNonCorroboratedFinding(t *testing.T) {
 		return "999.2", nil
 	}
 
-	if err := proposeFromDigest(context.Background(), ticketEngine, post, f, msg); err != nil {
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg); err != nil {
 		t.Fatalf("proposeFromDigest: %v", err)
 	}
 
@@ -474,7 +474,7 @@ func TestInvestigateFromDigest_UnresolvableRepoReturnsError(t *testing.T) {
 	opp := digest.Opportunity{Summary: "fix it", Category: "bug", Confidence: 0.9}
 	msg := digest.Message{Channel: "C3", ThreadTS: "300.1", Text: "something broke"}
 
-	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, 600, opp, msg, nil)
+	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, nil, 600, opp, msg, nil)
 	if err == nil {
 		t.Fatal("expected an error for an unresolvable repo")
 	}
@@ -483,5 +483,71 @@ func TestInvestigateFromDigest_UnresolvableRepoReturnsError(t *testing.T) {
 	}
 	if len(mockProvider.RunCalls) != 0 {
 		t.Errorf("expected no investigation agent Run call when the repo can't be resolved, got %d", len(mockProvider.RunCalls))
+	}
+}
+
+// Review round 2 finding: a ticket_index row filed from the digest
+// auto-file path previously carried no investigation backlink at all
+// (proposeFromDigest hard-coded investigationID=""), unlike every
+// Slack-thread-originated ticket — silently degrading
+// FindInvestigationByTicket (and the upcoming MCP investigations tool) for
+// the digest path. This exercises investigateFromDigest and
+// proposeFromDigest together, sharing one db and thread, and asserts the
+// filed ticket's investigation_id is non-empty and resolves back to the
+// investigation that produced it.
+func TestDigestFlow_AutoFiledTicketBacklinksInvestigation(t *testing.T) {
+	db := newTestDB(t)
+	tracker := &ticketflowTrackerFake{}
+	ticketEngine := ticket.New(tracker, db, autoFileCfg(), nil)
+	resolver := newTestResolver(t)
+
+	mockProvider := &agent.MockProvider{RunResult: &agent.RunResult{Result: highConfidenceSentryFindings}}
+	investRunner := investigation.NewRunner(mockProvider, "sonnet", "", nil, nil, nil)
+	investigateSem := make(chan struct{}, 1)
+
+	opp := digest.Opportunity{Summary: "fix refunds", Category: "bug", Confidence: 0.99, Repo: "svc"}
+	msg := digest.Message{Channel: "C9", ThreadTS: "900.1", ChannelName: "errors", Text: "users report double refunds"}
+
+	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, db, 600, opp, msg, nil)
+	if err != nil {
+		t.Fatalf("investigateFromDigest: %v", err)
+	}
+
+	var calls []digestPostCall
+	post := func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
+		calls = append(calls, digestPostCall{channel, threadTS, text, blocks})
+		return "999.9", nil
+	}
+
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, *findings, msg); err != nil {
+		t.Fatalf("proposeFromDigest: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 posted notice, got %d", len(calls))
+	}
+	if len(tracker.createCalls) != 1 {
+		t.Fatalf("expected exactly 1 CreateIssue call, got %d", len(tracker.createCalls))
+	}
+
+	entry, err := db.GetTicketIndex("sentry:BILLING-42")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected a ticket_index row for sentry:BILLING-42, got none")
+	}
+	if entry.InvestigationID == "" {
+		t.Fatal("expected ticket_index.investigation_id to be non-empty for a digest-filed ticket")
+	}
+
+	rec, err := db.FindInvestigationByTicket(entry.IssueID)
+	if err != nil {
+		t.Fatalf("FindInvestigationByTicket: %v", err)
+	}
+	if rec == nil {
+		t.Fatal("expected FindInvestigationByTicket to resolve the investigation behind the filed ticket, got nil")
+	}
+	if rec.ThreadTS != msg.ThreadTS {
+		t.Errorf("expected the resolved investigation's ThreadTS = %q, got %q", msg.ThreadTS, rec.ThreadTS)
 	}
 }

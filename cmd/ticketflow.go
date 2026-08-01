@@ -741,14 +741,20 @@ func composeDigestProposalText(f investigation.Findings) string {
 // error on failure — digest.go logs it and does the unclaim + failure
 // notice.
 //
-// investigationID is passed as "" to FileOrUpdate: unlike the Slack-thread
-// flows, digest has no InvestigationRecord to backlink (its own
-// DigestOpportunity DB row already serves that bookkeeping role), and
-// ComposeBody's footer simply omits the "toad:investigation <id>" line when
-// investigationID is blank.
-func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, post digestPostFunc,
+// investigationID is resolved via digestInvestigationID (a best-effort
+// lookup of the InvestigationRecord investigateFromDigest saves for this
+// same thread) rather than threaded straight through from that call —
+// review finding (round 2): a ticket_index row filed from digest previously
+// carried no investigation backlink at all (investigationID was
+// hard-coded ""), unlike every Slack-thread-originated ticket, silently
+// degrading FindInvestigationByTicket/the upcoming MCP investigations tool
+// for the digest path. See digestInvestigationID's doc comment for why this
+// is a lookup rather than a parameter threaded through digest.ProposeFunc's
+// signature.
+func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, db *state.DB, post digestPostFunc,
 	f investigation.Findings, msg digest.Message) error {
-	decision, fileResult, err := fileOrProposeFromFindings(ctx, ticketEngine, f, msg.Channel, msg.ThreadTS, "", ticket.SourceDigest)
+	investigationID := digestInvestigationID(db, msg.ThreadTS)
+	decision, fileResult, err := fileOrProposeFromFindings(ctx, ticketEngine, f, msg.Channel, msg.ThreadTS, investigationID, ticket.SourceDigest)
 	if err != nil {
 		return err
 	}
@@ -762,6 +768,41 @@ func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, post di
 	blocks := islack.TicketBlocks(text, msg.ThreadTS)
 	_, err = post(msg.Channel, msg.ThreadTS, text, blocks)
 	return err
+}
+
+// digestInvestigationID looks up the freshest InvestigationRecord saved for
+// msg's thread — saved by investigateFromDigest right after a successful
+// runInvestigation, keyed on the same (channel, threadTS) — and returns its
+// ID for FileOrUpdate's ticket-body backlink footer. Best-effort: a nil db,
+// a DB error, or no saved record all return "" (ComposeBody's footer simply
+// omits the "toad:investigation <id>" line when blank) rather than failing
+// the propose flow — this is an audit-trail nicety, not a correctness
+// dependency, so it fails open like every other best-effort DB lookup in
+// this package (see preInvestigationTicketCheck's doc comment for the same
+// pattern).
+//
+// This is a lookup rather than a value threaded straight through from
+// investigateFromDigest's return because digest.ProposeFunc's signature
+// (func(ctx, investigation.Findings, digest.Message) error) is shared,
+// exported package API — internal/digest.EngineOpts.Propose — with dozens
+// of existing test fixtures across internal/digest/digest_test.go
+// constructing it inline at that exact 3-arg shape. Widening it to also
+// carry an investigation ID would be a much larger, cross-package
+// signature change purely to plumb one backlink field. Looking the record
+// up fresh here is correct in the common case (one investigated opportunity
+// per thread per flush) and only imprecise in the rare case of multiple
+// distinct opportunities landing on the same thread within one flush,
+// where the most-recently-saved record wins — an acceptable trade-off for
+// a nice-to-have backlink.
+func digestInvestigationID(db *state.DB, threadTS string) string {
+	if db == nil {
+		return ""
+	}
+	rec, err := db.GetInvestigationByThread(threadTS)
+	if err != nil || rec == nil {
+		return ""
+	}
+	return rec.ID
 }
 
 // buildDigestTicketContextBlock formats digest's pre-fetched ticket details
@@ -818,11 +859,21 @@ func buildDigestTicketContextBlock(tickets []digest.TicketContext) string {
 // An unresolvable repo returns an error without ever calling investRunner —
 // mirrors runTicketRequest's identical "could not resolve a repo" guard for
 // the CTA path.
+//
+// On a successful run, this also saves an InvestigationRecord keyed on the
+// digest message's thread (same generateInvestigationID/saveInvestigationRecord
+// helpers the Slack-thread flows use) — review finding (round 2): before
+// this, digest-originated findings never got a saved InvestigationRecord at
+// all, so proposeFromDigest had nothing to backlink a filed ticket to (it
+// hard-coded investigationID=""), unlike every Slack-thread-originated
+// ticket. proposeFromDigest (this file) reads it back via
+// digestInvestigationID.
 func investigateFromDigest(
 	ctx context.Context,
 	resolver *config.Resolver,
 	investRunner *investigation.Runner,
 	investigateSem chan struct{},
+	db *state.DB,
 	timeoutSecs int,
 	opp digest.Opportunity,
 	msg digest.Message,
@@ -855,5 +906,12 @@ func investigateFromDigest(
 		Repo:          repo,
 		Timeout:       timeout,
 	}
-	return runInvestigation(ctx, investRunner, investigateSem, req)
+	findings, err := runInvestigation(ctx, investRunner, investigateSem, req)
+	if err != nil {
+		return nil, err
+	}
+
+	saveInvestigationRecord(db, generateInvestigationID(), msg.ThreadTS, msg.Channel, findings)
+
+	return findings, nil
 }

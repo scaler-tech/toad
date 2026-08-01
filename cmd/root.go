@@ -212,7 +212,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			AgentProvider: agentProvider,
 			TriageModel:   cfg.Triage.Model,
 			Propose: func(ctx context.Context, f investigation.Findings, msg digest.Message) error {
-				return proposeFromDigest(ctx, ticketEngine, func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
+				return proposeFromDigest(ctx, ticketEngine, stateDB, func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
 					if blocks == nil {
 						return slackClient.ReplyInThread(channel, threadTS, text)
 					}
@@ -318,7 +318,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 				}
 			},
 			Investigate: func(ctx context.Context, opp digest.Opportunity, msg digest.Message, tickets []digest.TicketContext) (*investigation.Findings, error) {
-				return investigateFromDigest(ctx, resolver, investRunner, investigateSem, cfg.Digest.InvestigateTimeoutSecs, opp, msg, tickets)
+				return investigateFromDigest(ctx, resolver, investRunner, investigateSem, stateDB, cfg.Digest.InvestigateTimeoutSecs, opp, msg, tickets)
 			},
 			React: func(channel, timestamp, emoji string) {
 				slackClient.React(channel, timestamp, emoji)
