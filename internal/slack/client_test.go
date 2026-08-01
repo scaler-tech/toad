@@ -249,10 +249,10 @@ func TestBuildPathScrubber_MultiplePaths(t *testing.T) {
 	}
 }
 
-func TestFixThisBlocks(t *testing.T) {
+func TestTicketBlocks(t *testing.T) {
 	text := "Found a bug in utils/time.go"
 	threadTS := "1234567890.123456"
-	blocks := FixThisBlocks(text, threadTS)
+	blocks := TicketBlocks(text, threadTS)
 
 	if len(blocks) != 2 {
 		t.Fatalf("expected 2 blocks, got %d", len(blocks))
@@ -277,8 +277,8 @@ func TestFixThisBlocks(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ButtonBlockElement, got %T", actions.Elements.ElementSet[0])
 	}
-	if btn.ActionID != "toad_fix" {
-		t.Errorf("expected action_id 'toad_fix', got %q", btn.ActionID)
+	if btn.ActionID != "toad_ticket" {
+		t.Errorf("expected action_id 'toad_ticket', got %q", btn.ActionID)
 	}
 	if btn.Value != threadTS {
 		t.Errorf("expected value %q, got %q", threadTS, btn.Value)
@@ -288,13 +288,13 @@ func TestFixThisBlocks(t *testing.T) {
 	}
 }
 
-func TestSpawnedByBlocks(t *testing.T) {
+func TestTicketedByBlocks(t *testing.T) {
 	text := "Found a bug in utils/time.go"
-	// Build original blocks as FixThisBlocks would
-	origBlocks := FixThisBlocks(text, "1234567890.123456")
+	// Build original blocks as TicketBlocks would
+	origBlocks := TicketBlocks(text, "1234567890.123456")
 	orig := goslack.Blocks{BlockSet: origBlocks}
 
-	blocks := SpawnedByBlocks(orig, "jamie")
+	blocks := TicketedByBlocks(orig, "jamie")
 
 	if len(blocks) != 2 {
 		t.Fatalf("expected 2 blocks (section + context), got %d", len(blocks))
@@ -321,17 +321,17 @@ func TestSpawnedByBlocks(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected TextBlockObject, got %T", ctx.ContextElements.Elements[0])
 	}
-	if ctxText.Text != ":hatching_chick: Tadpole spawned by jamie" {
+	if ctxText.Text != ":ticket: Ticket requested by jamie" {
 		t.Errorf("unexpected context text: %q", ctxText.Text)
 	}
 }
 
-func TestSpawnedByBlocks_ProcessingState(t *testing.T) {
+func TestTicketedByBlocks_ProcessingState(t *testing.T) {
 	text := "Found a bug in utils/time.go"
-	origBlocks := FixThisBlocks(text, "1234567890.123456")
+	origBlocks := TicketBlocks(text, "1234567890.123456")
 	orig := goslack.Blocks{BlockSet: origBlocks}
 
-	blocks := SpawnedByBlocks(orig, "")
+	blocks := TicketedByBlocks(orig, "")
 
 	if len(blocks) != 2 {
 		t.Fatalf("expected 2 blocks (section + context), got %d", len(blocks))
@@ -345,60 +345,8 @@ func TestSpawnedByBlocks_ProcessingState(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected TextBlockObject, got %T", ctx.ContextElements.Elements[0])
 	}
-	if ctxText.Text != ":hourglass_flowing_sand: Spawning tadpole..." {
+	if ctxText.Text != ":ticket: Creating ticket..." {
 		t.Errorf("unexpected processing text: %q", ctxText.Text)
-	}
-}
-
-func TestParseInteraction_FixButton(t *testing.T) {
-	cb := &goslack.InteractionCallback{
-		Type: goslack.InteractionTypeBlockActions,
-		Channel: goslack.Channel{
-			GroupConversation: goslack.GroupConversation{
-				Conversation: goslack.Conversation{ID: "C123"},
-			},
-		},
-		User:      goslack.User{ID: "U456", Name: "jamie"},
-		MessageTs: "111.222",
-		ActionCallback: goslack.ActionCallbacks{
-			BlockActions: []*goslack.BlockAction{
-				{
-					ActionID: "toad_fix",
-					Value:    "999.888",
-					BlockID:  "toad_fix_actions",
-				},
-			},
-		},
-	}
-
-	action, threadTS, channel, userID := parseFixAction(cb)
-	if !action {
-		t.Fatal("expected action=true")
-	}
-	if threadTS != "999.888" {
-		t.Errorf("expected threadTS '999.888', got %q", threadTS)
-	}
-	if channel != "C123" {
-		t.Errorf("expected channel 'C123', got %q", channel)
-	}
-	if userID != "U456" {
-		t.Errorf("expected userID 'U456', got %q", userID)
-	}
-}
-
-func TestParseInteraction_WrongAction(t *testing.T) {
-	cb := &goslack.InteractionCallback{
-		Type: goslack.InteractionTypeBlockActions,
-		ActionCallback: goslack.ActionCallbacks{
-			BlockActions: []*goslack.BlockAction{
-				{ActionID: "something_else", Value: "999.888"},
-			},
-		},
-	}
-
-	action, _, _, _ := parseFixAction(cb)
-	if action {
-		t.Fatal("expected action=false for non-toad action")
 	}
 }
 

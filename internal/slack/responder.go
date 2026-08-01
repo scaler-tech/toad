@@ -9,24 +9,26 @@ import (
 	"github.com/slack-go/slack"
 )
 
-// FixThisBlocks builds Block Kit blocks for a passive ribbit with a "Fix this" button.
-func FixThisBlocks(text, threadTS string) []slack.Block {
+// TicketBlocks builds Block Kit blocks for a passive ribbit with a
+// "Create Linear ticket" button.
+func TicketBlocks(text, threadTS string) []slack.Block {
 	section := slack.NewSectionBlock(
 		slack.NewTextBlockObject(slack.MarkdownType, text, false, false),
 		nil, nil,
 	)
-	btn := slack.NewButtonBlockElement("toad_fix", threadTS,
-		slack.NewTextBlockObject(slack.PlainTextType, "Let Toad fix this", false, false),
+	btn := slack.NewButtonBlockElement(actionIDTicket, threadTS,
+		slack.NewTextBlockObject(slack.PlainTextType, "Create Linear ticket", false, false),
 	)
 	btn.WithStyle(slack.StylePrimary)
-	actions := slack.NewActionBlock("toad_fix_actions", btn)
+	actions := slack.NewActionBlock("toad_ticket_actions", btn)
 	return []slack.Block{section, actions}
 }
 
-// SpawnedByBlocks builds Block Kit blocks that replace the button after a tadpole is spawned.
-// origBlocks are the original message blocks (with the button); the section text is preserved
-// and the action block is replaced with a context line showing who triggered the fix.
-func SpawnedByBlocks(origBlocks slack.Blocks, userName string) []slack.Block {
+// TicketedByBlocks builds Block Kit blocks that replace the button after a
+// ticket is requested. origBlocks are the original message blocks (with the
+// button); the section text is preserved and the action block is replaced
+// with a context line showing who triggered the ticket request.
+func TicketedByBlocks(origBlocks slack.Blocks, userName string) []slack.Block {
 	var result []slack.Block
 	for _, b := range origBlocks.BlockSet {
 		// Keep all blocks except the action block (the button)
@@ -34,11 +36,11 @@ func SpawnedByBlocks(origBlocks slack.Blocks, userName string) []slack.Block {
 			result = append(result, b)
 		}
 	}
-	statusText := ":hatching_chick: Tadpole spawned by " + userName
+	statusText := ":ticket: Ticket requested by " + userName
 	if userName == "" {
-		statusText = ":hourglass_flowing_sand: Spawning tadpole..."
+		statusText = ":ticket: Creating ticket..."
 	}
-	result = append(result, slack.NewContextBlock("toad_fix_status",
+	result = append(result, slack.NewContextBlock("toad_ticket_status",
 		slack.NewTextBlockObject(slack.MarkdownType, statusText, false, false),
 	))
 	return result
