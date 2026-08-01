@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/scaler-tech/toad/internal/config"
@@ -481,6 +483,298 @@ func TestCreateIssue_WithLabels(t *testing.T) {
 	labels, ok = receivedVars["labelIds"].([]any)
 	if !ok || len(labels) != 1 || labels[0] != "feat-label-id" {
 		t.Errorf("expected feature label, got %v", receivedVars["labelIds"])
+	}
+}
+
+func TestCreateIssue_StateIDOmittedWhenNotSet(t *testing.T) {
+	var receivedVars map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Variables map[string]any `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+		receivedVars = payload.Variables
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issueCreate": map[string]any{
+					"success": true,
+					"issue": map[string]any{
+						"id":         "issue-uuid-1",
+						"identifier": "PLF-1",
+						"url":        "https://linear.app/team/issue/PLF-1",
+						"title":      "test",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lt := &LinearTracker{
+		apiToken:   "token",
+		teamID:     "00000000-0000-0000-0000-000000000001",
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+
+	_, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "test"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := receivedVars["stateId"]; ok {
+		t.Errorf("expected stateId to be omitted, got %v", receivedVars["stateId"])
+	}
+}
+
+func TestCreateIssue_StateIDIncludedWhenSet(t *testing.T) {
+	var receivedVars map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Variables map[string]any `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+		receivedVars = payload.Variables
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issueCreate": map[string]any{
+					"success": true,
+					"issue": map[string]any{
+						"id":         "issue-uuid-2",
+						"identifier": "PLF-2",
+						"url":        "https://linear.app/team/issue/PLF-2",
+						"title":      "test",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lt := &LinearTracker{
+		apiToken:   "token",
+		teamID:     "00000000-0000-0000-0000-000000000001",
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+
+	_, err := lt.CreateIssue(context.Background(), CreateIssueOpts{
+		Title:   "test",
+		StateID: "state-uuid-123",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := receivedVars["stateId"]; got != "state-uuid-123" {
+		t.Errorf("expected stateId 'state-uuid-123', got %v", got)
+	}
+}
+
+func TestCreateIssue_ExtraLabelsMergedWithCategoryLabel(t *testing.T) {
+	var receivedVars map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Variables map[string]any `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+		receivedVars = payload.Variables
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issueCreate": map[string]any{
+					"success": true,
+					"issue": map[string]any{
+						"id":         "issue-uuid-3",
+						"identifier": "PLF-3",
+						"url":        "https://linear.app/team/issue/PLF-3",
+						"title":      "test",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lt := &LinearTracker{
+		apiToken:   "token",
+		teamID:     "00000000-0000-0000-0000-000000000001",
+		bugLabelID: "bug-label-id",
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+
+	_, err := lt.CreateIssue(context.Background(), CreateIssueOpts{
+		Title:    "test",
+		Category: "bug",
+		Labels:   []string{"extra-1", "extra-2"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	labels, ok := receivedVars["labelIds"].([]any)
+	if !ok || len(labels) != 3 {
+		t.Fatalf("expected 3 merged labels, got %v", receivedVars["labelIds"])
+	}
+	want := []string{"bug-label-id", "extra-1", "extra-2"}
+	for i, w := range want {
+		if labels[i] != w {
+			t.Errorf("label[%d] = %v, want %q", i, labels[i], w)
+		}
+	}
+}
+
+func TestCreateIssue_ExtraLabelsWithoutCategory(t *testing.T) {
+	var receivedVars map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Variables map[string]any `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+		receivedVars = payload.Variables
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issueCreate": map[string]any{
+					"success": true,
+					"issue": map[string]any{
+						"id":         "issue-uuid-4",
+						"identifier": "PLF-4",
+						"url":        "https://linear.app/team/issue/PLF-4",
+						"title":      "test",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lt := &LinearTracker{
+		apiToken:   "token",
+		teamID:     "00000000-0000-0000-0000-000000000001",
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+
+	_, err := lt.CreateIssue(context.Background(), CreateIssueOpts{
+		Title:  "test",
+		Labels: []string{"extra-only"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	labels, ok := receivedVars["labelIds"].([]any)
+	if !ok || len(labels) != 1 || labels[0] != "extra-only" {
+		t.Errorf("expected labelIds=[extra-only], got %v", receivedVars["labelIds"])
+	}
+}
+
+func TestCreateIssue_InternalIDPopulated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issueCreate": map[string]any{
+					"success": true,
+					"issue": map[string]any{
+						"id":         "issue-internal-uuid",
+						"identifier": "PLF-5",
+						"url":        "https://linear.app/team/issue/PLF-5",
+						"title":      "test title",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lt := &LinearTracker{
+		apiToken:   "token",
+		teamID:     "00000000-0000-0000-0000-000000000001",
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+
+	ref, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "test"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ref.InternalID != "issue-internal-uuid" {
+		t.Errorf("expected InternalID 'issue-internal-uuid', got %q", ref.InternalID)
+	}
+	if ref.ID != "PLF-5" {
+		t.Errorf("expected ID 'PLF-5', got %q", ref.ID)
+	}
+}
+
+func TestResolveTeamID_ConcurrentSingleFlight(t *testing.T) {
+	var teamsCallCount int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Query string `json:"query"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+
+		if strings.Contains(payload.Query, "teams {") {
+			atomic.AddInt32(&teamsCallCount, 1)
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"teams": map[string]any{
+						"nodes": []map[string]any{
+							{"id": "00000000-0000-0000-0000-000000000abc", "key": "PLF"},
+						},
+					},
+				},
+			})
+			return
+		}
+
+		// issueCreate mutation
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issueCreate": map[string]any{
+					"success": true,
+					"issue": map[string]any{
+						"id":         "issue-uuid",
+						"identifier": "PLF-1",
+						"url":        "https://linear.app/team/issue/PLF-1",
+						"title":      "test",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lt := &LinearTracker{
+		apiToken:   "token",
+		teamID:     "PLF",
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+
+	const n = 10
+	var wg sync.WaitGroup
+	errCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "concurrent"})
+			errCh <- err
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Errorf("unexpected error from concurrent CreateIssue: %v", err)
+		}
+	}
+
+	if got := atomic.LoadInt32(&teamsCallCount); got != 1 {
+		t.Errorf("expected exactly 1 teams resolution query, got %d", got)
 	}
 }
 

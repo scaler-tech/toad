@@ -110,7 +110,9 @@ type Tracker interface {
 type CreateIssueOpts struct {
 	Title       string
 	Description string
-	Category    string // "bug" or "feature"
+	Category    string   // "bug" or "feature"
+	StateID     string   // optional Linear workflow state UUID
+	Labels      []string // extra label IDs beyond bug/feature mapping
 }
 
 // NoopTracker is a no-op implementation that returns nil for everything.
