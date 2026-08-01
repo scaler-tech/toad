@@ -11,10 +11,17 @@ import (
 )
 
 // runOutcomePoller is the lightweight outcome loop: toad files tickets, and
-// this poller watches what happens to them (accepted = promoted/assigned,
-// rejected = cancelled/duplicate) so the team can see whether toad's
-// tickets are landing. Visibility only — it never changes toad's behavior
-// based on what it finds.
+// this poller watches what happens to them so the team can see whether
+// toad's tickets are landing. Visibility only — it never changes toad's
+// behavior based on what it finds.
+//
+// Outcomes are classified by classifyOutcome from the tracker's bare status
+// string: accepted = done; rejected = cancelled/duplicate; everything else
+// (including in-progress and assigned states) = unknown. Enriching this to
+// distinguish real acceptance (e.g. an assignee, or a state-type such as
+// Linear's "started") from an untouched backlog item would need
+// GetIssueStatus's richer data (assignee, state type) persisted beyond the
+// single status string ticket_index stores today — see ledger.
 //
 // It ticks on interval, and each tick delegates to pollOnce.
 func runOutcomePoller(ctx context.Context, db *state.DB, tracker issuetracker.Tracker, interval time.Duration) {
@@ -102,10 +109,11 @@ func outcomeCounts(db *state.DB) (map[string]int, error) {
 //   - "filed": no status has been polled yet (ticket was just created)
 //   - "rejected": a terminal cancelled/duplicate state
 //   - "accepted": completed ("done")
-//   - "unknown": anything else (todo, in progress, backlog, custom
-//     workflow states, ...) — we can't tell from the status string alone
-//     whether it represents real acceptance (e.g. an assignee) without
-//     more provider data
+//   - "unknown": everything else, including in-progress and assigned
+//     states, todo, backlog, and any custom workflow state — the bare
+//     status string alone doesn't carry assignee or state-type data, so
+//     we can't distinguish "actively being worked" from "untouched" here;
+//     see the runOutcomePoller doc comment and ledger
 func classifyOutcome(status string) string {
 	if status == "" {
 		return "filed"

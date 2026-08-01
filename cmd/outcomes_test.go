@@ -161,6 +161,37 @@ func TestPollOnce_CtxCancellationStopsLoop(t *testing.T) {
 	}
 }
 
+// TestRunOutcomePoller_ExitsOnCtxDone exercises the outer ticker/select
+// loop in runOutcomePoller itself (not pollOnce's inner entry loop, which
+// TestPollOnce_CtxCancellationStopsLoop already covers). It uses an empty
+// DB and a NoopTracker so pollOnce is a fast no-op on every tick and there
+// is no shared mutable state for the goroutine to touch after cancellation
+// — the test only ever synchronizes through ctx and the done channel, so
+// it's race-safe by construction.
+func TestRunOutcomePoller_ExitsOnCtxDone(t *testing.T) {
+	db := newTestDB(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runOutcomePoller(ctx, db, issuetracker.NoopTracker{}, 10*time.Millisecond)
+		close(done)
+	}()
+
+	// Let the ticker fire at least once before cancelling, so we know we're
+	// exercising the running loop and not just a goroutine that never
+	// started its select.
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// runOutcomePoller returned promptly after ctx cancellation.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("runOutcomePoller did not return within 500ms of ctx cancellation")
+	}
+}
+
 func TestOutcomeCounts(t *testing.T) {
 	db := newTestDB(t)
 	seedTicket(t, db, "thread:C2:1", "TOAD-10", "", time.Time{})           // filed
