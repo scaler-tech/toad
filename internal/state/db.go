@@ -157,6 +157,28 @@ func migrate(db *sql.DB) error {
 			investigating BOOLEAN NOT NULL DEFAULT FALSE,
 			created_at    DATETIME NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS ticket_index (
+			external_key      TEXT PRIMARY KEY,
+			issue_id          TEXT NOT NULL,
+			issue_url         TEXT,
+			source            TEXT DEFAULT '',
+			investigation_id  TEXT DEFAULT '',
+			created_at        DATETIME NOT NULL,
+			last_seen_at      DATETIME NOT NULL,
+			last_status       TEXT DEFAULT '',
+			status_checked_at DATETIME
+		);
+
+		CREATE TABLE IF NOT EXISTS investigations (
+			id            TEXT PRIMARY KEY,
+			thread_ts     TEXT,
+			channel       TEXT,
+			repo          TEXT,
+			findings_json TEXT NOT NULL,
+			created_at    DATETIME NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_invest_thread ON investigations(thread_ts);
 	`)
 	if err != nil {
 		return err
@@ -218,6 +240,14 @@ func migrate(db *sql.DB) error {
 		{8, `ALTER TABLE pr_watches ADD COLUMN original_summary TEXT DEFAULT '';
 		     ALTER TABLE pr_watches ADD COLUMN original_description TEXT DEFAULT ''`},
 		{9, `ALTER TABLE runs ADD COLUMN claim_scope TEXT DEFAULT ''`},
+		{10, `CREATE TABLE IF NOT EXISTS ticket_index (
+			  external_key TEXT PRIMARY KEY, issue_id TEXT NOT NULL, issue_url TEXT,
+			  source TEXT DEFAULT '', investigation_id TEXT DEFAULT '', created_at DATETIME NOT NULL, last_seen_at DATETIME NOT NULL,
+			  last_status TEXT DEFAULT '', status_checked_at DATETIME);
+			  CREATE TABLE IF NOT EXISTS investigations (
+			  id TEXT PRIMARY KEY, thread_ts TEXT, channel TEXT, repo TEXT,
+			  findings_json TEXT NOT NULL, created_at DATETIME NOT NULL);
+			  CREATE INDEX IF NOT EXISTS idx_invest_thread ON investigations(thread_ts)`},
 	}
 
 	// Read current schema version. If no version is stored, detect whether
@@ -1078,6 +1108,215 @@ func (d *DB) ListGitHubMappings(slackUserID string) ([]string, error) {
 		logins = append(logins, login)
 	}
 	return logins, nil
+}
+
+// TicketIndexEntry maps an external event key (e.g. a Sentry issue or a Slack
+// thread) to the tracking issue filed for it, so toad doesn't re-file
+// duplicate tickets for the same underlying problem.
+type TicketIndexEntry struct {
+	ExternalKey     string // "sentry:BILLING-2291" | "thread:C123:1722500000.000100"
+	IssueID         string // "SCL-1482"
+	IssueURL        string
+	Source          string // "auto" | "cta" | "digest" | "escalation"
+	InvestigationID string
+	CreatedAt       time.Time
+	LastSeenAt      time.Time
+	LastStatus      string
+	StatusCheckedAt time.Time
+}
+
+// nullableTime converts a zero time.Time into a nil driver value so it is
+// stored as SQL NULL rather than the zero-value timestamp.
+func nullableTime(t time.Time) interface{} {
+	if t.IsZero() {
+		return nil
+	}
+	return t
+}
+
+// UpsertTicketIndex inserts a ticket index entry, or on conflict (same
+// external_key) updates the mutable fields and bumps last_seen_at.
+func (d *DB) UpsertTicketIndex(e *TicketIndexEntry) error {
+	return dbRetry(func() error {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		_, err := d.db.ExecContext(ctx, `
+			INSERT INTO ticket_index (external_key, issue_id, issue_url, source, investigation_id, created_at, last_seen_at, last_status, status_checked_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(external_key) DO UPDATE SET
+				issue_id = excluded.issue_id,
+				issue_url = excluded.issue_url,
+				source = excluded.source,
+				investigation_id = excluded.investigation_id,
+				last_seen_at = excluded.last_seen_at,
+				last_status = excluded.last_status,
+				status_checked_at = excluded.status_checked_at`,
+			e.ExternalKey, e.IssueID, e.IssueURL, e.Source, e.InvestigationID,
+			e.CreatedAt, e.LastSeenAt, e.LastStatus, nullableTime(e.StatusCheckedAt),
+		)
+		return err
+	})
+}
+
+// GetTicketIndex looks up a ticket index entry by its external key.
+// Returns nil, nil if no entry exists.
+func (d *DB) GetTicketIndex(externalKey string) (*TicketIndexEntry, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row := d.db.QueryRowContext(ctx,
+		`SELECT external_key, issue_id, COALESCE(issue_url,''), COALESCE(source,''), COALESCE(investigation_id,''),
+		        created_at, last_seen_at, COALESCE(last_status,''), status_checked_at
+		 FROM ticket_index WHERE external_key = ?`,
+		externalKey,
+	)
+	return scanTicketIndex(row)
+}
+
+// RecentTicketIndex returns the most recently seen ticket index entries, newest first.
+func (d *DB) RecentTicketIndex(limit int) ([]*TicketIndexEntry, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := d.db.QueryContext(ctx,
+		`SELECT external_key, issue_id, COALESCE(issue_url,''), COALESCE(source,''), COALESCE(investigation_id,''),
+		        created_at, last_seen_at, COALESCE(last_status,''), status_checked_at
+		 FROM ticket_index ORDER BY last_seen_at DESC LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []*TicketIndexEntry
+	for rows.Next() {
+		e, err := scanTicketIndexRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// UpdateTicketStatus updates the last known status of a tracked ticket.
+func (d *DB) UpdateTicketStatus(externalKey, status string) error {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx,
+		"UPDATE ticket_index SET last_status = ?, status_checked_at = ? WHERE external_key = ?",
+		status, time.Now(), externalKey,
+	)
+	return err
+}
+
+// scanner is the subset of *sql.Row / *sql.Rows needed for scanning.
+type scanner interface {
+	Scan(dest ...interface{}) error
+}
+
+func scanTicketIndex(row *sql.Row) (*TicketIndexEntry, error) {
+	e, err := scanTicketIndexRow(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func scanTicketIndexRow(row scanner) (*TicketIndexEntry, error) {
+	var e TicketIndexEntry
+	var statusCheckedAt sql.NullTime
+	err := row.Scan(
+		&e.ExternalKey, &e.IssueID, &e.IssueURL, &e.Source, &e.InvestigationID,
+		&e.CreatedAt, &e.LastSeenAt, &e.LastStatus, &statusCheckedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if statusCheckedAt.Valid {
+		e.StatusCheckedAt = statusCheckedAt.Time
+	}
+	return &e, nil
+}
+
+// InvestigationRecord holds the findings from an investigation into a bug
+// report, keyed by ID and linkable to the Slack thread and tracking ticket
+// it originated from.
+type InvestigationRecord struct {
+	ID           string
+	ThreadTS     string
+	Channel      string
+	Repo         string
+	FindingsJSON string
+	CreatedAt    time.Time
+}
+
+// SaveInvestigation inserts or replaces an investigation record.
+func (d *DB) SaveInvestigation(rec *InvestigationRecord) error {
+	return dbRetry(func() error {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		_, err := d.db.ExecContext(ctx, `
+			INSERT OR REPLACE INTO investigations (id, thread_ts, channel, repo, findings_json, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			rec.ID, rec.ThreadTS, rec.Channel, rec.Repo, rec.FindingsJSON, rec.CreatedAt,
+		)
+		return err
+	})
+}
+
+// GetInvestigationByThread returns the newest investigation for a Slack
+// thread. Returns nil, nil if none exists.
+func (d *DB) GetInvestigationByThread(threadTS string) (*InvestigationRecord, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row := d.db.QueryRowContext(ctx,
+		"SELECT id, thread_ts, channel, repo, findings_json, created_at FROM investigations WHERE thread_ts = ? ORDER BY created_at DESC LIMIT 1",
+		threadTS,
+	)
+	return scanInvestigation(row)
+}
+
+// GetInvestigation looks up an investigation by its ID. Returns nil, nil if absent.
+func (d *DB) GetInvestigation(id string) (*InvestigationRecord, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row := d.db.QueryRowContext(ctx,
+		"SELECT id, thread_ts, channel, repo, findings_json, created_at FROM investigations WHERE id = ?",
+		id,
+	)
+	return scanInvestigation(row)
+}
+
+// FindInvestigationByTicket resolves the investigation behind a tracking
+// ticket by joining through ticket_index.investigation_id. Returns nil, nil
+// if no ticket_index row references an investigation for this issue.
+func (d *DB) FindInvestigationByTicket(issueID string) (*InvestigationRecord, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row := d.db.QueryRowContext(ctx, `
+		SELECT i.id, i.thread_ts, i.channel, i.repo, i.findings_json, i.created_at
+		FROM investigations i
+		JOIN ticket_index t ON t.investigation_id = i.id
+		WHERE t.issue_id = ?
+		ORDER BY t.last_seen_at DESC LIMIT 1`,
+		issueID,
+	)
+	return scanInvestigation(row)
+}
+
+func scanInvestigation(row *sql.Row) (*InvestigationRecord, error) {
+	var rec InvestigationRecord
+	err := row.Scan(&rec.ID, &rec.ThreadTS, &rec.Channel, &rec.Repo, &rec.FindingsJSON, &rec.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
 }
 
 // ExecContext exposes the underlying DB ExecContext for other packages.

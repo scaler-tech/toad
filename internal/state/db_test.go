@@ -2,6 +2,7 @@ package state
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -1182,5 +1183,351 @@ func TestDB_MergeStats(t *testing.T) {
 	rate := stats.MergeRate()
 	if rate < 49.9 || rate > 50.1 {
 		t.Errorf("expected merge rate ~50%%, got %.1f%%", rate)
+	}
+}
+
+func TestDB_MigratesToSchemaVersion10(t *testing.T) {
+	db := openTestDB(t)
+
+	version, err := db.GetSetting("schema_version")
+	if err != nil {
+		t.Fatalf("GetSetting(schema_version): %v", err)
+	}
+	if version != "10" {
+		t.Errorf("schema_version: got %q, want %q", version, "10")
+	}
+
+	// Tables introduced in migration 10 must exist and be queryable.
+	if _, err := db.db.Exec("SELECT external_key, investigation_id FROM ticket_index"); err != nil {
+		t.Errorf("ticket_index table (with investigation_id column) not usable: %v", err)
+	}
+	if _, err := db.db.Exec("SELECT id, thread_ts, channel, repo, findings_json, created_at FROM investigations"); err != nil {
+		t.Errorf("investigations table not usable: %v", err)
+	}
+}
+
+func TestDB_MigrationIdempotent_ReopenFileBackedDB(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+
+	db1, err := OpenDBAt(dbPath)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if err := db1.UpsertTicketIndex(&TicketIndexEntry{
+		ExternalKey: "thread:C123:1722500000.000100",
+		IssueID:     "SCL-1482",
+		IssueURL:    "https://linear.app/scl/issue/SCL-1482",
+		Source:      "auto",
+		CreatedAt:   time.Now(),
+		LastSeenAt:  time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTicketIndex: %v", err)
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatalf("closing first handle: %v", err)
+	}
+
+	// Reopening the same file-backed DB must not error and must not
+	// re-run migrations destructively — the row inserted above must survive.
+	db2, err := OpenDBAt(dbPath)
+	if err != nil {
+		t.Fatalf("second open (idempotency): %v", err)
+	}
+	defer db2.Close()
+
+	version, err := db2.GetSetting("schema_version")
+	if err != nil {
+		t.Fatalf("GetSetting(schema_version): %v", err)
+	}
+	if version != "10" {
+		t.Errorf("schema_version after reopen: got %q, want %q", version, "10")
+	}
+
+	entry, err := db2.GetTicketIndex("thread:C123:1722500000.000100")
+	if err != nil {
+		t.Fatalf("GetTicketIndex after reopen: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected ticket_index row to survive reopen")
+	}
+	if entry.IssueID != "SCL-1482" {
+		t.Errorf("IssueID after reopen: got %q, want %q", entry.IssueID, "SCL-1482")
+	}
+}
+
+func TestDB_UpsertTicketIndex_UpdatesLastSeenOnConflict(t *testing.T) {
+	db := openTestDB(t)
+
+	created := time.Now().Add(-time.Hour).Truncate(time.Second)
+	firstSeen := created
+	if err := db.UpsertTicketIndex(&TicketIndexEntry{
+		ExternalKey: "sentry:BILLING-2291",
+		IssueID:     "SCL-100",
+		IssueURL:    "https://linear.app/scl/issue/SCL-100",
+		Source:      "auto",
+		CreatedAt:   created,
+		LastSeenAt:  firstSeen,
+	}); err != nil {
+		t.Fatalf("first UpsertTicketIndex: %v", err)
+	}
+
+	secondSeen := time.Now().Add(time.Minute).Truncate(time.Second)
+	if err := db.UpsertTicketIndex(&TicketIndexEntry{
+		ExternalKey: "sentry:BILLING-2291",
+		IssueID:     "SCL-100",
+		IssueURL:    "https://linear.app/scl/issue/SCL-100",
+		Source:      "auto",
+		CreatedAt:   created,
+		LastSeenAt:  secondSeen,
+	}); err != nil {
+		t.Fatalf("second UpsertTicketIndex (conflict): %v", err)
+	}
+
+	// Exactly one row must remain.
+	var count int
+	if err := db.db.QueryRow("SELECT COUNT(*) FROM ticket_index WHERE external_key = ?", "sentry:BILLING-2291").Scan(&count); err != nil {
+		t.Fatalf("counting rows: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 row after upsert conflict, got %d", count)
+	}
+
+	entry, err := db.GetTicketIndex("sentry:BILLING-2291")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected entry to exist")
+	}
+	if !entry.LastSeenAt.Equal(secondSeen) {
+		t.Errorf("LastSeenAt: got %v, want %v (bumped)", entry.LastSeenAt, secondSeen)
+	}
+	if !entry.CreatedAt.Equal(created) {
+		t.Errorf("CreatedAt should be unchanged: got %v, want %v", entry.CreatedAt, created)
+	}
+}
+
+func TestDB_GetTicketIndex_NotFound(t *testing.T) {
+	db := openTestDB(t)
+
+	entry, err := db.GetTicketIndex("nonexistent-key")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if entry != nil {
+		t.Errorf("expected nil, got %v", entry)
+	}
+}
+
+func TestDB_RecentTicketIndex(t *testing.T) {
+	db := openTestDB(t)
+
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		if err := db.UpsertTicketIndex(&TicketIndexEntry{
+			ExternalKey: fmt.Sprintf("sentry:KEY-%d", i),
+			IssueID:     fmt.Sprintf("SCL-%d", i),
+			Source:      "auto",
+			CreatedAt:   now.Add(time.Duration(i) * time.Second),
+			LastSeenAt:  now.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("UpsertTicketIndex %d: %v", i, err)
+		}
+	}
+
+	entries, err := db.RecentTicketIndex(10)
+	if err != nil {
+		t.Fatalf("RecentTicketIndex: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+	// Newest (highest last_seen_at) first.
+	if entries[0].IssueID != "SCL-2" {
+		t.Errorf("expected newest first (SCL-2), got %q", entries[0].IssueID)
+	}
+
+	limited, err := db.RecentTicketIndex(1)
+	if err != nil {
+		t.Fatalf("RecentTicketIndex(1): %v", err)
+	}
+	if len(limited) != 1 {
+		t.Errorf("expected 1 entry with limit=1, got %d", len(limited))
+	}
+}
+
+func TestDB_UpdateTicketStatus(t *testing.T) {
+	db := openTestDB(t)
+
+	if err := db.UpsertTicketIndex(&TicketIndexEntry{
+		ExternalKey: "sentry:BILLING-2291",
+		IssueID:     "SCL-100",
+		Source:      "auto",
+		CreatedAt:   time.Now(),
+		LastSeenAt:  time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTicketIndex: %v", err)
+	}
+
+	if err := db.UpdateTicketStatus("sentry:BILLING-2291", "in_progress"); err != nil {
+		t.Fatalf("UpdateTicketStatus: %v", err)
+	}
+
+	entry, err := db.GetTicketIndex("sentry:BILLING-2291")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected entry")
+	}
+	if entry.LastStatus != "in_progress" {
+		t.Errorf("LastStatus: got %q, want %q", entry.LastStatus, "in_progress")
+	}
+	if entry.StatusCheckedAt.IsZero() {
+		t.Error("expected StatusCheckedAt to be set")
+	}
+}
+
+func TestDB_SaveInvestigation_GetByThread(t *testing.T) {
+	db := openTestDB(t)
+
+	older := &InvestigationRecord{
+		ID:           "inv-1",
+		ThreadTS:     "1722500000.000100",
+		Channel:      "C123",
+		Repo:         "toad",
+		FindingsJSON: `{"summary":"first pass"}`,
+		CreatedAt:    time.Now().Add(-time.Hour),
+	}
+	if err := db.SaveInvestigation(older); err != nil {
+		t.Fatalf("SaveInvestigation (older): %v", err)
+	}
+
+	newer := &InvestigationRecord{
+		ID:           "inv-2",
+		ThreadTS:     "1722500000.000100",
+		Channel:      "C123",
+		Repo:         "toad",
+		FindingsJSON: `{"summary":"second pass"}`,
+		CreatedAt:    time.Now(),
+	}
+	if err := db.SaveInvestigation(newer); err != nil {
+		t.Fatalf("SaveInvestigation (newer): %v", err)
+	}
+
+	got, err := db.GetInvestigationByThread("1722500000.000100")
+	if err != nil {
+		t.Fatalf("GetInvestigationByThread: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected investigation")
+	}
+	if got.ID != "inv-2" {
+		t.Errorf("expected newest investigation (inv-2), got %q", got.ID)
+	}
+	if got.FindingsJSON != `{"summary":"second pass"}` {
+		t.Errorf("FindingsJSON: got %q", got.FindingsJSON)
+	}
+}
+
+func TestDB_GetInvestigationByThread_NotFound(t *testing.T) {
+	db := openTestDB(t)
+
+	got, err := db.GetInvestigationByThread("nonexistent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil, got %v", got)
+	}
+}
+
+func TestDB_GetInvestigation_ByID(t *testing.T) {
+	db := openTestDB(t)
+
+	rec := &InvestigationRecord{
+		ID:           "inv-1",
+		ThreadTS:     "1722500000.000100",
+		Channel:      "C123",
+		Repo:         "toad",
+		FindingsJSON: `{"summary":"details"}`,
+		CreatedAt:    time.Now(),
+	}
+	if err := db.SaveInvestigation(rec); err != nil {
+		t.Fatalf("SaveInvestigation: %v", err)
+	}
+
+	got, err := db.GetInvestigation("inv-1")
+	if err != nil {
+		t.Fatalf("GetInvestigation: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected investigation")
+	}
+	if got.Channel != "C123" || got.Repo != "toad" {
+		t.Errorf("got %+v", got)
+	}
+
+	missing, err := db.GetInvestigation("nonexistent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if missing != nil {
+		t.Errorf("expected nil for unknown id, got %v", missing)
+	}
+}
+
+func TestDB_FindInvestigationByTicket(t *testing.T) {
+	db := openTestDB(t)
+
+	rec := &InvestigationRecord{
+		ID:           "inv-1",
+		ThreadTS:     "1722500000.000100",
+		Channel:      "C123",
+		Repo:         "toad",
+		FindingsJSON: `{"summary":"nil pointer crash"}`,
+		CreatedAt:    time.Now(),
+	}
+	if err := db.SaveInvestigation(rec); err != nil {
+		t.Fatalf("SaveInvestigation: %v", err)
+	}
+
+	if err := db.UpsertTicketIndex(&TicketIndexEntry{
+		ExternalKey:     "thread:C123:1722500000.000100",
+		IssueID:         "SCL-1482",
+		IssueURL:        "https://linear.app/scl/issue/SCL-1482",
+		Source:          "auto",
+		InvestigationID: "inv-1",
+		CreatedAt:       time.Now(),
+		LastSeenAt:      time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTicketIndex: %v", err)
+	}
+
+	got, err := db.FindInvestigationByTicket("SCL-1482")
+	if err != nil {
+		t.Fatalf("FindInvestigationByTicket: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected investigation resolved via ticket_index")
+	}
+	if got.ID != "inv-1" {
+		t.Errorf("ID: got %q, want %q", got.ID, "inv-1")
+	}
+	if got.FindingsJSON != `{"summary":"nil pointer crash"}` {
+		t.Errorf("FindingsJSON: got %q", got.FindingsJSON)
+	}
+}
+
+func TestDB_FindInvestigationByTicket_NotFound(t *testing.T) {
+	db := openTestDB(t)
+
+	got, err := db.FindInvestigationByTicket("SCL-9999")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil, got %v", got)
 	}
 }
