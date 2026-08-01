@@ -2,6 +2,7 @@ package triage
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,4 +63,55 @@ func TestClassify_ProviderError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when provider fails")
 	}
+}
+
+func TestTriagePrompt_ContainsSentryRule(t *testing.T) {
+	if !containsString(triagePrompt, "Sentry") {
+		t.Error("triagePrompt should mention Sentry monitoring bot rule")
+	}
+	if !containsString(triagePrompt, "error/stack trace") {
+		t.Error("triagePrompt should mention error/stack trace for Sentry rule")
+	}
+}
+
+func TestTriagePrompt_ContainsEscalateRule(t *testing.T) {
+	if !containsString(triagePrompt, "escalate") {
+		t.Error("triagePrompt should mention escalate rule")
+	}
+	if !containsString(triagePrompt, "create/file a ticket") {
+		t.Error("triagePrompt should mention creating/filing a ticket in escalate rule")
+	}
+}
+
+func TestTriagePrompt_ContainsEscalateInTemplate(t *testing.T) {
+	if !containsString(triagePrompt, `"escalate":`) {
+		t.Error("triagePrompt JSON template should include escalate field")
+	}
+}
+
+func TestParseResult_RoundTripsEscalateTrue(t *testing.T) {
+	jsonData := []byte(`{"actionable":true,"confidence":0.85,"summary":"test","category":"bug","estimated_size":"small","keywords":["test"],"files_hint":["main.go"],"escalate":true}`)
+	result, err := parseResult(jsonData)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Escalate {
+		t.Error("expected escalate=true, got false")
+	}
+}
+
+func TestParseResult_DefaultsEscalateFalse(t *testing.T) {
+	jsonData := []byte(`{"actionable":false,"confidence":0.5,"summary":"test","category":"other","estimated_size":"small","keywords":[],"files_hint":[]}`)
+	result, err := parseResult(jsonData)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Escalate {
+		t.Error("expected escalate=false by default, got true")
+	}
+}
+
+// Helper function
+func containsString(s, substr string) bool {
+	return strings.Contains(s, substr)
 }

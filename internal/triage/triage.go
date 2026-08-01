@@ -24,6 +24,7 @@ type Result struct {
 	Keywords   []string `json:"keywords"`
 	FilesHint  []string `json:"files_hint"`
 	Repo       string   `json:"repo"`
+	Escalate   bool     `json:"escalate"`
 }
 
 // Engine classifies Slack messages using a fast triage model.
@@ -75,6 +76,10 @@ Category definitions:
 - "question": Questions about code, requests for information/reports/analysis, and conversational requests ("give me X", "show me Y", "list the top Z", "who has the most X"). Anything answerable with a chat reply rather than a PR.
 - "other": General chat, notifications, pleasantries, off-topic.
 
+Special rules:
+- Messages posted by monitoring bots (Sentry) that contain an error/stack trace are category "bug", actionable, with the error signature in keywords.
+- "escalate" is true ONLY when the user explicitly asks to create/file a ticket or issue for something already discussed (e.g. 'make a ticket for this', 'file an issue', 'create a ticket'). Otherwise false.
+
 Key distinction: if the user wants INFORMATION delivered in a reply, that is "question". If they want a CODE CHANGE shipped as a PR, that is "bug" or "feature". When ambiguous, prefer "question" — the user can always escalate.
 
 Thread messages prefixed with "[toad's previous reply]" are toad's own earlier responses. If the user is replying to toad's own analysis, they are most likely continuing a conversation (follow-up question, pushback, clarification) — prefer "question" unless the message explicitly requests a code change (e.g. "fix this", "ship it", "create a PR").
@@ -82,7 +87,7 @@ Thread messages prefixed with "[toad's previous reply]" are toad's own earlier r
 Set confidence based on the combined specifics available (primary message + thread context). Confidence should be LOW (< 0.5) when there are no file paths, no clear behavior to change, no error details, or it's unclear what code should be modified — even after considering thread context.
 
 Your response MUST be ONLY a JSON object — no prose, no markdown fences, no explanation before or after:
-{"actionable": true, "confidence": 0.9, "summary": "...", "category": "bug", "estimated_size": "small", "keywords": ["..."], "files_hint": ["..."]%s}
+{"actionable": true, "confidence": 0.9, "summary": "...", "category": "bug", "estimated_size": "small", "keywords": ["..."], "files_hint": ["..."], "escalate": false%s}
 
 - Do NOT wrap the JSON in markdown code fences
 - Do NOT include any text before or after the JSON object
