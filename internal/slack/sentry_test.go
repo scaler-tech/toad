@@ -70,3 +70,48 @@ func TestExtractSentryRefs_PlainTextNoSentryLink(t *testing.T) {
 		t.Errorf("expected no refs for non-Sentry text, got %#v", got)
 	}
 }
+
+// --- Host-anchoring regression tests ---
+// A lookalike host ("notsentry.io") or a URL that merely contains the string
+// "sentry.io" somewhere in its path (but on a different authority) must never
+// be treated as a real Sentry reference — that would let an attacker-crafted
+// URL spoof a Sentry issue ref that later automation (ticket-linking,
+// auto-file corroboration) trusts.
+
+func TestExtractSentryRefs_RejectsLookalikeHost(t *testing.T) {
+	text := "https://notsentry.io/issues/1234567890"
+
+	got := ExtractSentryRefs(text)
+	if len(got) != 0 {
+		t.Errorf("expected no refs for lookalike host %q, got %#v", text, got)
+	}
+}
+
+func TestExtractSentryRefs_RejectsSentryIOInPathNotHost(t *testing.T) {
+	text := "https://evil.com/sentry.io/issues/999999"
+
+	got := ExtractSentryRefs(text)
+	if len(got) != 0 {
+		t.Errorf("expected no refs when sentry.io only appears in the path, got %#v", got)
+	}
+}
+
+func TestExtractSentryRefs_SubdomainHostStillMatches(t *testing.T) {
+	text := "https://acme.sentry.io/issues/123"
+
+	got := ExtractSentryRefs(text)
+	want := []string{"123"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ExtractSentryRefs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestExtractSentryRefs_BareDomainHostStillMatches(t *testing.T) {
+	text := "https://sentry.io/organizations/acme/issues/123"
+
+	got := ExtractSentryRefs(text)
+	want := []string{"123"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ExtractSentryRefs() = %#v, want %#v", got, want)
+	}
+}

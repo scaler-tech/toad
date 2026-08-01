@@ -31,8 +31,12 @@ type IncomingMessage struct {
 	IsBot           bool
 	BotID           string
 	IsTicketRequest bool // :frog: reaction on a toad reply — means "file a ticket"
-	SentryRefs      []string
-	ThreadContext   []string
+	// SentryRefs holds Sentry issue identifiers found by ExtractSentryRefs over
+	// the message's full text (including Block Kit/attachment content); it
+	// feeds downstream investigation corroboration (e.g. ticket-linking) that
+	// checks whether a reported bug already has a matching Sentry issue.
+	SentryRefs    []string
+	ThreadContext []string
 }
 
 // ThreadTS returns the thread timestamp to use for replies.

@@ -10,13 +10,25 @@ import (
 // group 3. Matching both shapes in one pass keeps results in first-seen
 // (left-to-right) order and avoids re-matching a wrapped URL's inner text as
 // a second, plain match.
+//
+// The host is anchored: (?:[\w-]+\.)?sentry\.io requires the URL authority to
+// BE sentry.io or a single-level subdomain of it, immediately after the
+// scheme. This rejects lookalike hosts like "notsentry.io" (no dot boundary
+// before "sentry") and URLs where "sentry.io" only appears in the path, e.g.
+// "https://evil.com/sentry.io/issues/999999" (the authority there is
+// evil.com, not sentry.io).
 var sentryRefRe = regexp.MustCompile(
-	`<(https?://[^|<>]*sentry\.io[^|<>]*)\|([^<>]+)>|(https?://[^\s<>]*sentry\.io[^\s<>]*)`,
+	`<(https?://(?:[\w-]+\.)?sentry\.io(?:/[^|<>]*)?)\|([^<>]+)>|(https?://(?:[\w-]+\.)?sentry\.io(?:/[^\s<>]*)?)`,
 )
 
-// sentryIssueIDRe matches a Sentry issue URL (org subdomain or
-// sentry.io/organizations/<org>/ form) and captures the trailing issue id.
-var sentryIssueIDRe = regexp.MustCompile(`sentry\.io/(?:organizations/[^/\s]+/)?issues/([A-Za-z0-9]+)`)
+// sentryIssueIDRe matches a full Sentry issue URL (org subdomain or
+// sentry.io/organizations/<org>/ form), host-anchored the same way as
+// sentryRefRe, and captures the trailing issue id. It's applied to URL
+// strings already isolated by sentryRefRe, but keeps its own host anchor so
+// it's safe to use standalone too.
+var sentryIssueIDRe = regexp.MustCompile(
+	`^https?://(?:[\w-]+\.)?sentry\.io/(?:organizations/[^/\s]+/)?issues/([A-Za-z0-9]+)`,
+)
 
 // sentryShortIDRe matches a Sentry short-id label like "BILLING-2291".
 var sentryShortIDRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[0-9A-Z]+$`)
