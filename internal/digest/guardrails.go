@@ -2,25 +2,17 @@ package digest
 
 import (
 	"time"
-
-	"github.com/scaler-tech/toad/internal/personality"
 )
 
 func (e *Engine) passesGuardrails(opp Opportunity) bool {
 	// Confidence check
-	minConf := 0.95
-	if e.cfg != nil && e.cfg.MinConfidence > 0 {
-		minConf = e.cfg.MinConfidence
-	}
-	if e.personality != nil {
-		ov := e.personality.ConfigOverrides(personality.ModeDigest)
-		if ov.MinConfidence != nil {
-			minConf = *ov.MinConfidence
-		}
+	minConf := e.cfg.MinConfidence
+	if minConf <= 0 {
+		minConf = 0.95
 	}
 	// In comment mode (dry-run + comment investigation), lower the floor —
 	// posting investigation findings has no downside so we can be more inclusive.
-	if e.cfg != nil && e.cfg.DryRun && e.cfg.CommentInvestigation && minConf > 0.85 {
+	if e.cfg.DryRun && e.cfg.CommentInvestigation && minConf > 0.85 {
 		minConf = 0.85
 	}
 	if opp.Confidence < minConf {

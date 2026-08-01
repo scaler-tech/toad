@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/scaler-tech/toad/internal/agent"
+	"github.com/scaler-tech/toad/internal/config"
 )
 
 func TestAnalyze_RunOptsWiring(t *testing.T) {
@@ -15,6 +16,7 @@ func TestAnalyze_RunOptsWiring(t *testing.T) {
 	}
 
 	e := &Engine{
+		cfg:   &config.DigestConfig{},
 		agent: mock,
 		model: "haiku",
 	}
@@ -60,6 +62,7 @@ func TestAnalyze_ProviderError(t *testing.T) {
 	}
 
 	e := &Engine{
+		cfg:   &config.DigestConfig{},
 		agent: mock,
 		model: "haiku",
 	}

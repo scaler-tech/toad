@@ -13,10 +13,9 @@ import (
 
 	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/issuetracker"
-	"github.com/scaler-tech/toad/internal/personality"
 	"github.com/scaler-tech/toad/internal/state"
-	"github.com/scaler-tech/toad/internal/tadpole"
 )
 
 // Message represents a collected Slack message for batch analysis.
@@ -58,20 +57,11 @@ type TicketComment struct {
 	Body   string
 }
 
-// InvestigateResult holds the outcome of a ribbit investigation.
-type InvestigateResult struct {
-	Feasible   bool     // whether ribbit thinks this is a clear, small fix
-	TaskSpec   string   // refined task description for the tadpole
-	Reasoning  string   // why feasible/not (for logging)
-	IssueID    string   // ticket ID selected by investigation (e.g. "PLF-3198"), empty if none
-	FilesFound []string // file paths extracted from TaskSpec — more precise than triage FilesHint
-}
+// InvestigateFunc investigates an opportunity against the codebase before proposing.
+type InvestigateFunc func(ctx context.Context, opp Opportunity, msg Message, tickets []TicketContext) (*investigation.Findings, error)
 
-// InvestigateFunc investigates an opportunity against the codebase before spawning.
-type InvestigateFunc func(ctx context.Context, opp Opportunity, msg Message, tickets []TicketContext) (*InvestigateResult, error)
-
-// SpawnFunc spawns a tadpole task.
-type SpawnFunc func(ctx context.Context, task tadpole.Task) error
+// ProposeFunc hands off approved findings for downstream action (e.g. ticket creation).
+type ProposeFunc func(ctx context.Context, f investigation.Findings, msg Message) error
 
 // NotifyFunc sends a Slack message in a thread.
 type NotifyFunc func(channel, threadTS, text string)
@@ -126,7 +116,7 @@ type Engine struct {
 	cfg                 *config.DigestConfig
 	agent               agent.Provider
 	model               string
-	spawn               SpawnFunc
+	propose             ProposeFunc
 	notify              NotifyFunc
 	notifyInvestigation NotifyInvestigationFunc
 	investigate         InvestigateFunc
@@ -141,7 +131,6 @@ type Engine struct {
 	getPermalink        GetPermalinkFunc
 	respectAssignees    bool
 	staleDays           int
-	personality         *personality.Manager
 
 	mu     sync.Mutex
 	buffer []Message
@@ -167,7 +156,7 @@ type Engine struct {
 type EngineOpts struct {
 	AgentProvider       agent.Provider
 	TriageModel         string
-	Spawn               SpawnFunc
+	Propose             ProposeFunc
 	Notify              NotifyFunc
 	NotifyInvestigation NotifyInvestigationFunc
 	Investigate         InvestigateFunc
@@ -182,7 +171,6 @@ type EngineOpts struct {
 	GetPermalink        GetPermalinkFunc
 	RespectAssignees    bool
 	StaleDays           int
-	Personality         *personality.Manager
 }
 
 // New creates a digest engine.
@@ -191,7 +179,7 @@ func New(cfg *config.DigestConfig, opts EngineOpts) *Engine {
 		cfg:                 cfg,
 		agent:               opts.AgentProvider,
 		model:               opts.TriageModel,
-		spawn:               opts.Spawn,
+		propose:             opts.Propose,
 		notify:              opts.Notify,
 		notifyInvestigation: opts.NotifyInvestigation,
 		investigate:         opts.Investigate,
@@ -205,7 +193,6 @@ func New(cfg *config.DigestConfig, opts EngineOpts) *Engine {
 		getPermalink:        opts.GetPermalink,
 		respectAssignees:    opts.RespectAssignees,
 		staleDays:           opts.StaleDays,
-		personality:         opts.Personality,
 		spawnHour:           time.Now().Hour(),
 		actedIssues:         make(map[string]time.Time),
 	}
@@ -314,6 +301,7 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 		reasoning := ""
 		var investigatedFiles []string
 		taskDescription := msg.Text
+		var findings *investigation.Findings
 		if e.investigate != nil {
 			result, err := e.investigate(ctx, opp, msg, nil)
 			if err != nil {
@@ -326,9 +314,10 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 				reasoning = result.Reasoning
 			} else {
 				slog.Info("resumed investigation approved", "summary", opp.Summary)
-				taskDescription = result.TaskSpec
+				taskDescription = result.Reasoning
 				reasoning = result.Reasoning
 				investigatedFiles = result.FilesFound
+				findings = result
 			}
 		}
 
@@ -348,7 +337,7 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 
 		// Dry-run: post findings with CTA button
 		if e.cfg.DryRun {
-			slog.Info("[dry-run] resumed investigation would spawn tadpole", "summary", opp.Summary)
+			slog.Info("[dry-run] resumed investigation would propose fix", "summary", opp.Summary)
 			if e.cfg.CommentInvestigation && e.notifyInvestigation != nil && reasoning != "" {
 				filesHint := investigatedFiles
 				if len(filesHint) == 0 {
@@ -367,19 +356,13 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 			continue
 		}
 
-		// Spawn tadpole
+		// Propose the fix
 		if !e.trySpawn() {
 			slog.Info("resumed investigation hit hourly spawn limit", "summary", opp.Summary)
 			continue
 		}
 
 		threadTS := msg.ThreadTS
-		if e.notify != nil {
-			e.notify(msg.Channel, threadTS,
-				":crown: Spotted this while monitoring the channel — sending a tadpole to investigate and fix.")
-		}
-
-		repo := e.resolveRepo(opp.Repo, opp.FilesHint)
 
 		scope := scopeKey(Opportunity{Summary: opp.Summary}, e.tracker, msg.Text)
 		if e.claim != nil {
@@ -389,32 +372,28 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 			}
 		}
 
-		task := tadpole.Task{
-			Description:   taskDescription,
-			Summary:       opp.Summary,
-			Category:      opp.Category,
-			EstSize:       opp.EstSize,
-			SlackChannel:  msg.Channel,
-			SlackThreadTS: threadTS,
-			Repo:          repo,
-			RepoPaths:     e.repoPaths,
+		if findings == nil {
+			findings = &investigation.Findings{
+				Feasible:   true,
+				Reasoning:  taskDescription,
+				Repo:       opp.Repo,
+				FilesFound: investigatedFiles,
+			}
 		}
-		if err := e.spawn(ctx, task); err != nil {
-			slog.Error("resumed investigation: spawn failed", "error", err, "summary", opp.Summary)
+
+		if err := e.propose(ctx, *findings, msg); err != nil {
+			slog.Error("resumed investigation: propose failed", "error", err, "summary", opp.Summary)
 			if e.unclaim != nil {
 				e.unclaim(threadTS, scope)
 			}
 			if e.notify != nil {
 				e.notify(msg.Channel, threadTS,
-					":x: Toad King failed to spawn tadpole: "+err.Error())
+					":x: Toad King failed to propose fix: "+err.Error())
 			}
 			continue
 		}
 
 		e.totalSpawns.Add(1)
-		if e.react != nil {
-			e.react(msg.Channel, msg.Timestamp, "hatching_chick")
-		}
 	}
 }
 
@@ -610,6 +589,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 		investigatedIssueID := ""
 		var investigatedFiles []string
 		taskDescription := msg.Text
+		var findings *investigation.Findings
 		if e.investigate != nil {
 			result, err := e.investigate(ctx, opp, msg, tickets)
 			if err != nil {
@@ -624,10 +604,11 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			} else {
 				slog.Info("digest investigation approved opportunity",
 					"summary", opp.Summary, "reasoning", result.Reasoning)
-				taskDescription = result.TaskSpec
+				taskDescription = result.Reasoning
 				reasoning = result.Reasoning
 				investigatedIssueID = result.IssueID
 				investigatedFiles = result.FilesFound
+				findings = result
 			}
 		}
 
@@ -664,9 +645,9 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			return false
 		}
 
-		// In dry-run mode: log and skip spawn/notify
+		// In dry-run mode: log and skip propose/notify
 		if e.cfg.DryRun {
-			slog.Info("[dry-run] would spawn tadpole",
+			slog.Info("[dry-run] would propose fix",
 				"summary", opp.Summary,
 				"confidence", opp.Confidence,
 				"channel", msg.ChannelName,
@@ -693,7 +674,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			continue
 		}
 
-		slog.Info("Toad King spawning tadpole",
+		slog.Info("Toad King proposing fix",
 			"summary", opp.Summary,
 			"confidence", opp.Confidence,
 			"channel", msg.ChannelName,
@@ -770,52 +751,31 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			}
 		}
 
-		// Resolve repo for the spawned task
-		var repo *config.RepoConfig
-		if e.resolveRepo != nil {
-			repo = e.resolveRepo(opp.Repo, opp.FilesHint)
-		}
-
-		task := tadpole.Task{
-			Description:   taskDescription,
-			Summary:       opp.Summary,
-			Category:      opp.Category,
-			EstSize:       opp.EstSize,
-			SlackChannel:  msg.Channel,
-			SlackThreadTS: threadTS,
-			IssueRef:      issueRef,
-			Repo:          repo,
-			RepoPaths:     e.repoPaths,
-		}
-
-		// Post a message explaining the autonomous detection before spawning,
-		// so people understand why a tadpole is working on this thread.
-		if e.notify != nil {
-			spawnMsg := ":crown: Spotted this while monitoring the channel — sending a tadpole to investigate and fix."
-			if issueRef != nil {
-				if issueRef.URL != "" {
-					spawnMsg += fmt.Sprintf("\n:ticket: Linked to <%s|%s>", issueRef.URL, issueRef.ID)
-				} else {
-					spawnMsg += fmt.Sprintf("\n:ticket: Linked to %s", issueRef.ID)
-				}
+		if findings == nil {
+			findings = &investigation.Findings{
+				Feasible:   true,
+				Reasoning:  taskDescription,
+				Repo:       opp.Repo,
+				FilesFound: investigatedFiles,
 			}
-			e.notify(msg.Channel, threadTS, spawnMsg)
+		}
+		if issueRef != nil {
+			findings.IssueID = issueRef.ID
 		}
 
-		if err := e.spawn(ctx, task); err != nil {
-			slog.Error("digest spawn failed", "error", err, "summary", opp.Summary)
+		// The :crown: spawn-announcement notice is now sent by the propose
+		// implementation, which owns downstream outreach.
+		if err := e.propose(ctx, *findings, msg); err != nil {
+			slog.Error("digest propose failed", "error", err, "summary", opp.Summary)
 			if e.unclaim != nil {
 				e.unclaim(threadTS, scope)
 			}
 			if e.notify != nil {
 				e.notify(msg.Channel, threadTS,
-					":x: Toad King failed to spawn tadpole: "+err.Error())
+					":x: Toad King failed to propose fix: "+err.Error())
 			}
 		} else {
 			e.totalSpawns.Add(1)
-			if e.react != nil {
-				e.react(msg.Channel, msg.Timestamp, "hatching_chick")
-			}
 		}
 	}
 	return true

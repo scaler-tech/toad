@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/issuetracker"
-	"github.com/scaler-tech/toad/internal/tadpole"
 )
 
 func TestDedupChannel(t *testing.T) {
@@ -482,8 +482,8 @@ func TestProcessOpportunities_SpawnLimitReturnsFalse(t *testing.T) {
 		DryRun:            true,
 	}
 	e := &Engine{
-		cfg:   cfg,
-		spawn: func(ctx context.Context, task tadpole.Task) error { return nil },
+		cfg:     cfg,
+		propose: func(ctx context.Context, f investigation.Findings, msg Message) error { return nil },
 	}
 
 	msgs := []Message{
@@ -558,12 +558,12 @@ func TestProcessOpportunities_TrackerExtractsRef(t *testing.T) {
 	ref := &issuetracker.IssueRef{Provider: "linear", ID: "PLF-42", URL: "https://linear.app/t/issue/PLF-42"}
 	tracker := &fakeTracker{extractRef: ref}
 
-	var spawnedTask tadpole.Task
+	var proposedFindings investigation.Findings
 	e := &Engine{
 		cfg:     cfg,
 		tracker: tracker,
-		spawn: func(ctx context.Context, task tadpole.Task) error {
-			spawnedTask = task
+		propose: func(ctx context.Context, f investigation.Findings, msg Message) error {
+			proposedFindings = f
 			return nil
 		},
 	}
@@ -573,14 +573,14 @@ func TestProcessOpportunities_TrackerExtractsRef(t *testing.T) {
 
 	e.processOpportunities(context.Background(), msgs, opps, map[string]bool{})
 
-	// In dry-run mode the task isn't actually spawned via spawn(), but the
+	// In dry-run mode the fix isn't actually proposed via propose(), but the
 	// issue ref should have been extracted. Verify via totalSpawns counter.
 	if e.totalSpawns.Load() != 1 {
-		t.Errorf("expected 1 spawn (dry-run), got %d", e.totalSpawns.Load())
+		t.Errorf("expected 1 propose (dry-run), got %d", e.totalSpawns.Load())
 	}
-	// spawnedTask won't be set in dry-run mode — that's fine, we just verify
+	// proposedFindings won't be set in dry-run mode — that's fine, we just verify
 	// the tracker was queried (extractRef returned non-nil).
-	_ = spawnedTask
+	_ = proposedFindings
 }
 
 func TestProcessOpportunities_TrackerCreatesIssue(t *testing.T) {
@@ -598,12 +598,12 @@ func TestProcessOpportunities_TrackerCreatesIssue(t *testing.T) {
 		createIssues: true,
 	}
 
-	var spawnedTask tadpole.Task
+	var proposedFindings investigation.Findings
 	e := &Engine{
 		cfg:     cfg,
 		tracker: tracker,
-		spawn: func(ctx context.Context, task tadpole.Task) error {
-			spawnedTask = task
+		propose: func(ctx context.Context, f investigation.Findings, msg Message) error {
+			proposedFindings = f
 			return nil
 		},
 	}
@@ -616,11 +616,11 @@ func TestProcessOpportunities_TrackerCreatesIssue(t *testing.T) {
 	if !tracker.createCalled {
 		t.Error("expected CreateIssue to be called when no ref extracted and createIssues=true")
 	}
-	if spawnedTask.IssueRef == nil {
-		t.Fatal("expected spawned task to have IssueRef")
+	if proposedFindings.IssueID == "" {
+		t.Fatal("expected proposed findings to have IssueID")
 	}
-	if spawnedTask.IssueRef.ID != "PLF-99" {
-		t.Errorf("expected PLF-99, got %q", spawnedTask.IssueRef.ID)
+	if proposedFindings.IssueID != "PLF-99" {
+		t.Errorf("expected PLF-99, got %q", proposedFindings.IssueID)
 	}
 }
 
@@ -640,7 +640,7 @@ func TestProcessOpportunities_TrackerNoCreateWhenDisabled(t *testing.T) {
 	e := &Engine{
 		cfg:     cfg,
 		tracker: tracker,
-		spawn:   func(ctx context.Context, task tadpole.Task) error { return nil },
+		propose: func(ctx context.Context, f investigation.Findings, msg Message) error { return nil },
 	}
 
 	msgs := []Message{{Text: "bug", Channel: "C1", ChannelName: "errors", Timestamp: "1"}}
