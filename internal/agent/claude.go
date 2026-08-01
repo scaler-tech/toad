@@ -141,7 +141,14 @@ func buildArgs(opts RunOpts) []string {
 		for _, cmd := range opts.AllowedBashCommands {
 			tools += ",Bash(" + cmd + ":*)"
 		}
+		for _, t := range opts.AllowedMCPTools {
+			tools += "," + t
+		}
 		args = append(args, "--allowedTools", tools)
+	}
+
+	if opts.MCPConfigPath != "" {
+		args = append(args, "--mcp-config", opts.MCPConfigPath, "--strict-mcp-config")
 	}
 
 	for _, dir := range opts.AdditionalDirs {

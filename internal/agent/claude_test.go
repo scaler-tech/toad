@@ -165,6 +165,69 @@ func TestBuildArgs_PermissionReadOnlyWithBash(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_MCPConfigPath(t *testing.T) {
+	args := buildArgs(RunOpts{
+		Prompt:        "investigate",
+		MCPConfigPath: "/tmp/mcp-config.json",
+	})
+	assertContains(t, args, "--mcp-config")
+	assertContains(t, args, "/tmp/mcp-config.json")
+	assertContains(t, args, "--strict-mcp-config")
+}
+
+func TestBuildArgs_NoMCPConfigPath(t *testing.T) {
+	args := buildArgs(RunOpts{Prompt: "test"})
+	assertNotContains(t, args, "--mcp-config")
+	assertNotContains(t, args, "--strict-mcp-config")
+}
+
+func TestBuildArgs_PermissionReadOnlyWithMCPTools(t *testing.T) {
+	args := buildArgs(RunOpts{
+		Model:           "sonnet",
+		Permissions:     PermissionReadOnly,
+		Prompt:          "investigate",
+		AllowedMCPTools: []string{"mcp__sentry__*"},
+	})
+
+	var tools string
+	for i, a := range args {
+		if a == "--allowedTools" && i+1 < len(args) {
+			tools = args[i+1]
+			break
+		}
+	}
+	if tools == "" {
+		t.Fatal("expected --allowedTools flag")
+	}
+	if !strings.Contains(tools, "mcp__sentry__*") {
+		t.Errorf("expected tools to contain mcp__sentry__*, got %q", tools)
+	}
+	if !strings.Contains(tools, "Read") {
+		t.Errorf("expected tools to contain Read, got %q", tools)
+	}
+}
+
+func TestBuildArgs_PermissionReadOnlyWithBashAndMCPTools(t *testing.T) {
+	args := buildArgs(RunOpts{
+		Permissions:         PermissionReadOnly,
+		Prompt:              "investigate",
+		AllowedBashCommands: []string{"gh pr view"},
+		AllowedMCPTools:     []string{"mcp__sentry__*"},
+	})
+
+	var tools string
+	for i, a := range args {
+		if a == "--allowedTools" && i+1 < len(args) {
+			tools = args[i+1]
+			break
+		}
+	}
+	want := "Read,Glob,Grep,Bash(gh pr view:*),mcp__sentry__*"
+	if tools != want {
+		t.Errorf("tools = %q, want %q", tools, want)
+	}
+}
+
 func assertContains(t *testing.T, args []string, flag string) {
 	t.Helper()
 	for _, a := range args {

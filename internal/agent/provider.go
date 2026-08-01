@@ -31,6 +31,8 @@ type RunOpts struct {
 	AdditionalDirs      []string // extra directories the agent can access
 	AppendSystemPrompt  string   // optional system prompt addition
 	AllowedBashCommands []string // bash command prefixes allowed in read-only mode (e.g. ["gh"])
+	MCPConfigPath       string   // path to an MCP config file; emits --mcp-config <path> --strict-mcp-config
+	AllowedMCPTools     []string // MCP tool names appended to --allowedTools (e.g. "mcp__sentry__*")
 }
 
 // RunResult holds the parsed output of an agent invocation.
