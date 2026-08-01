@@ -1308,6 +1308,114 @@ func TestDB_UpsertTicketIndex_UpdatesLastSeenOnConflict(t *testing.T) {
 	}
 }
 
+// TestDB_UpsertTicketIndex_PreservesStatusAndInvestigationOnReObservation
+// guards against the natural calling pattern — build a fresh
+// TicketIndexEntry per incoming event, call Upsert just to bump
+// last_seen_at — silently wiping out last_status/status_checked_at/
+// investigation_id that were set by an earlier, separate call (e.g. via
+// UpdateTicketStatus or a prior Upsert that linked an investigation).
+func TestDB_UpsertTicketIndex_PreservesStatusAndInvestigationOnReObservation(t *testing.T) {
+	db := openTestDB(t)
+
+	created := time.Now().Add(-time.Hour).Truncate(time.Second)
+	statusCheckedAt := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+
+	// First observation: links an investigation and records a status.
+	if err := db.UpsertTicketIndex(&TicketIndexEntry{
+		ExternalKey:     "sentry:BILLING-2291",
+		IssueID:         "SCL-100",
+		IssueURL:        "https://linear.app/scl/issue/SCL-100",
+		Source:          "auto",
+		InvestigationID: "inv-1",
+		LastStatus:      "in_progress",
+		StatusCheckedAt: statusCheckedAt,
+		CreatedAt:       created,
+		LastSeenAt:      created,
+	}); err != nil {
+		t.Fatalf("first UpsertTicketIndex: %v", err)
+	}
+
+	// Second observation: a duplicate Sentry alert / repeat thread mention.
+	// Callers build a fresh entry per event, so LastStatus, InvestigationID,
+	// and StatusCheckedAt are all zero-valued here — this must NOT erase
+	// what the first call recorded.
+	secondSeen := time.Now().Truncate(time.Second)
+	if err := db.UpsertTicketIndex(&TicketIndexEntry{
+		ExternalKey: "sentry:BILLING-2291",
+		IssueID:     "SCL-100",
+		IssueURL:    "https://linear.app/scl/issue/SCL-100",
+		Source:      "auto",
+		CreatedAt:   created,
+		LastSeenAt:  secondSeen,
+		// LastStatus, StatusCheckedAt, InvestigationID intentionally left zero.
+	}); err != nil {
+		t.Fatalf("second UpsertTicketIndex (re-observation): %v", err)
+	}
+
+	entry, err := db.GetTicketIndex("sentry:BILLING-2291")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected entry to exist")
+	}
+	if !entry.LastSeenAt.Equal(secondSeen) {
+		t.Errorf("LastSeenAt: got %v, want %v (should still bump)", entry.LastSeenAt, secondSeen)
+	}
+	if entry.InvestigationID != "inv-1" {
+		t.Errorf("InvestigationID clobbered by re-observation: got %q, want %q", entry.InvestigationID, "inv-1")
+	}
+	if entry.LastStatus != "in_progress" {
+		t.Errorf("LastStatus clobbered by re-observation: got %q, want %q", entry.LastStatus, "in_progress")
+	}
+	if !entry.StatusCheckedAt.Equal(statusCheckedAt) {
+		t.Errorf("StatusCheckedAt clobbered by re-observation: got %v, want %v", entry.StatusCheckedAt, statusCheckedAt)
+	}
+
+	// Sanity: FindInvestigationByTicket link must also survive.
+	if err := db.SaveInvestigation(&InvestigationRecord{
+		ID:           "inv-1",
+		ThreadTS:     "1722500000.000100",
+		Channel:      "C123",
+		Repo:         "toad",
+		FindingsJSON: `{"summary":"billing crash"}`,
+		CreatedAt:    created,
+	}); err != nil {
+		t.Fatalf("SaveInvestigation: %v", err)
+	}
+	found, err := db.FindInvestigationByTicket("SCL-100")
+	if err != nil {
+		t.Fatalf("FindInvestigationByTicket: %v", err)
+	}
+	if found == nil || found.ID != "inv-1" {
+		t.Errorf("expected investigation link to survive re-observation, got %v", found)
+	}
+
+	// A subsequent Upsert that DOES carry a new, non-empty value must still
+	// be able to update the field — only zero values are "leave alone".
+	if err := db.UpsertTicketIndex(&TicketIndexEntry{
+		ExternalKey: "sentry:BILLING-2291",
+		IssueID:     "SCL-100",
+		IssueURL:    "https://linear.app/scl/issue/SCL-100",
+		Source:      "auto",
+		LastStatus:  "resolved",
+		CreatedAt:   created,
+		LastSeenAt:  time.Now().Truncate(time.Second),
+	}); err != nil {
+		t.Fatalf("third UpsertTicketIndex (explicit status update): %v", err)
+	}
+	entry, err = db.GetTicketIndex("sentry:BILLING-2291")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry.LastStatus != "resolved" {
+		t.Errorf("explicit non-empty LastStatus should still apply: got %q, want %q", entry.LastStatus, "resolved")
+	}
+	if entry.InvestigationID != "inv-1" {
+		t.Errorf("InvestigationID should still survive when not explicitly changed: got %q", entry.InvestigationID)
+	}
+}
+
 func TestDB_GetTicketIndex_NotFound(t *testing.T) {
 	db := openTestDB(t)
 

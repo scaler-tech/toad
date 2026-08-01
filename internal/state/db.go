@@ -1135,7 +1135,17 @@ func nullableTime(t time.Time) interface{} {
 }
 
 // UpsertTicketIndex inserts a ticket index entry, or on conflict (same
-// external_key) updates the mutable fields and bumps last_seen_at.
+// external_key) refreshes the identity fields (issue_id, issue_url, source)
+// and bumps last_seen_at. last_status, status_checked_at, and
+// investigation_id are preserved across re-observation: the natural calling
+// pattern is to build a fresh TicketIndexEntry per incoming event and call
+// Upsert just to record that the ticket was seen again, so those fields
+// will typically be the zero value on the entry passed in. Status is meant
+// to be managed independently via UpdateTicketStatus, and the investigation
+// link (once set) must not be silently severed by a later, unrelated
+// re-observation. Passing a non-zero value for either field on a
+// subsequent call still updates it — only zero values are treated as
+// "unspecified, leave alone".
 func (d *DB) UpsertTicketIndex(e *TicketIndexEntry) error {
 	return dbRetry(func() error {
 		ctx, cancel := dbCtx()
@@ -1147,10 +1157,10 @@ func (d *DB) UpsertTicketIndex(e *TicketIndexEntry) error {
 				issue_id = excluded.issue_id,
 				issue_url = excluded.issue_url,
 				source = excluded.source,
-				investigation_id = excluded.investigation_id,
 				last_seen_at = excluded.last_seen_at,
-				last_status = excluded.last_status,
-				status_checked_at = excluded.status_checked_at`,
+				investigation_id = COALESCE(NULLIF(excluded.investigation_id, ''), ticket_index.investigation_id),
+				last_status = COALESCE(NULLIF(excluded.last_status, ''), ticket_index.last_status),
+				status_checked_at = COALESCE(excluded.status_checked_at, ticket_index.status_checked_at)`,
 			e.ExternalKey, e.IssueID, e.IssueURL, e.Source, e.InvestigationID,
 			e.CreatedAt, e.LastSeenAt, e.LastStatus, nullableTime(e.StatusCheckedAt),
 		)
