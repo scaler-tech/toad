@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/scaler-tech/toad/internal/config"
@@ -54,6 +55,20 @@ type Engine struct {
 	store     Store
 	cfg       config.TicketConfig
 	permalink func(channel, ts string) (string, error)
+
+	// keyLocksMu guards keyLocks itself; keyLocks holds one mutex per
+	// external key, acquired for the full get -> create/comment -> upsert
+	// sequence in FileOrUpdate. toad is a single-process daemon, so this
+	// in-process serialization is sufficient to close the check-then-act
+	// race between two concurrent callers racing to file the same new
+	// key (e.g. duplicate Sentry deliveries, or auto + digest reaching the
+	// same issue at once) — without it, both would see a miss, both would
+	// CreateIssue, and the second Upsert would silently orphan the first
+	// ticket. Entries are never evicted; this is an intentional, bounded
+	// trade-off (one mutex per distinct external key ever seen) rather
+	// than unbounded — acceptable for a long-running daemon's key space.
+	keyLocksMu sync.Mutex
+	keyLocks   map[string]*sync.Mutex
 }
 
 // New constructs an Engine. permalink resolves a Slack message to a
@@ -61,7 +76,44 @@ type Engine struct {
 // in which case permalinks are simply omitted.
 func New(tr issuetracker.Tracker, store Store, cfg config.TicketConfig,
 	permalink func(channel, ts string) (string, error)) *Engine {
-	return &Engine{tracker: tr, store: store, cfg: cfg, permalink: permalink}
+	return &Engine{
+		tracker:   tr,
+		store:     store,
+		cfg:       cfg,
+		permalink: permalink,
+		keyLocks:  map[string]*sync.Mutex{},
+	}
+}
+
+// lockKey acquires the per-external-key mutex, creating it on first use,
+// and returns a func to release it.
+func (e *Engine) lockKey(key string) func() {
+	e.keyLocksMu.Lock()
+	l, ok := e.keyLocks[key]
+	if !ok {
+		l = &sync.Mutex{}
+		e.keyLocks[key] = l
+	}
+	e.keyLocksMu.Unlock()
+
+	l.Lock()
+	return l.Unlock
+}
+
+// nonBlankSentryIDs returns f.SentryIssueIDs with blank/whitespace-only
+// entries removed (trimmed). An investigation agent's LLM-produced list can
+// contain a stray "", which would otherwise make ExternalKey degrade to the
+// bare "sentry:" key and collide unrelated findings onto one index row, and
+// would make Decide's "corroborated by Sentry" check pass on no real
+// corroboration at all.
+func nonBlankSentryIDs(f investigation.Findings) []string {
+	var ids []string
+	for _, id := range f.SentryIssueIDs {
+		if trimmed := strings.TrimSpace(id); trimmed != "" {
+			ids = append(ids, trimmed)
+		}
+	}
+	return ids
 }
 
 // Decide reports whether a Findings verdict should be filed automatically
@@ -69,7 +121,7 @@ func New(tr issuetracker.Tracker, store Store, cfg config.TicketConfig,
 // one corroborating Sentry issue, confidence clearing the configured floor,
 // and a feasible verdict — anything short of all four is proposed instead.
 func (e *Engine) Decide(f investigation.Findings) Decision {
-	if e.cfg.AutoFile && len(f.SentryIssueIDs) > 0 &&
+	if e.cfg.AutoFile && len(nonBlankSentryIDs(f)) > 0 &&
 		f.Confidence >= e.cfg.AutoFileConfidence && f.Feasible {
 		return DecisionAutoFile
 	}
@@ -79,10 +131,11 @@ func (e *Engine) Decide(f investigation.Findings) Decision {
 // ExternalKey derives the de-duplication key for a Findings verdict: the
 // first corroborating Sentry issue when present (the strongest, most
 // stable identity for a recurring problem), otherwise the Slack thread it
-// was raised in.
+// was raised in. Blank/whitespace-only Sentry IDs are ignored (see
+// nonBlankSentryIDs) so they can't produce a degenerate shared key.
 func ExternalKey(f investigation.Findings, channel, threadTS string) string {
-	if len(f.SentryIssueIDs) > 0 {
-		return "sentry:" + f.SentryIssueIDs[0]
+	if ids := nonBlankSentryIDs(f); len(ids) > 0 {
+		return "sentry:" + ids[0]
 	}
 	return "thread:" + channel + ":" + threadTS
 }
@@ -99,6 +152,13 @@ type FileResult struct {
 func (e *Engine) FileOrUpdate(ctx context.Context, f investigation.Findings,
 	channel, threadTS, investigationID string, src Source) (*FileResult, error) {
 	key := ExternalKey(f, channel, threadTS)
+
+	// Serialize the whole get -> create/comment -> upsert sequence per key
+	// so two concurrent callers for the same new key can't both observe a
+	// miss and both file a duplicate ticket. See keyLocks doc comment.
+	unlock := e.lockKey(key)
+	defer unlock()
+
 	permalink := e.resolvePermalink(channel, threadTS)
 
 	existing, err := e.store.GetTicketIndex(key)
@@ -158,7 +218,7 @@ func (e *Engine) file(ctx context.Context, f investigation.Findings, key, invest
 	// a bug for labeling purposes, everything else gets no category label.
 	// Revisit if label fidelity matters more than this task's scope.
 	category := ""
-	if len(f.SentryIssueIDs) > 0 {
+	if len(nonBlankSentryIDs(f)) > 0 {
 		category = "bug"
 	}
 

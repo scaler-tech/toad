@@ -72,13 +72,15 @@ func evidenceBullet(e investigation.Evidence) string {
 
 // composeFooter builds the ticket's provenance footer: the Slack permalink
 // (when available), one "sentry:<id>" line per corroborating Sentry issue,
-// and the "toad:investigation <id>" backlink.
+// and the "toad:investigation <id>" backlink. Blank/whitespace-only Sentry
+// IDs are skipped (see nonBlankSentryIDs) so they never render as a bare,
+// meaningless "sentry:" line.
 func composeFooter(f investigation.Findings, slackPermalink, investigationID string) string {
 	var lines []string
 	if slackPermalink != "" {
 		lines = append(lines, slackPermalink)
 	}
-	for _, id := range f.SentryIssueIDs {
+	for _, id := range nonBlankSentryIDs(f) {
 		lines = append(lines, "sentry:"+id)
 	}
 	if investigationID != "" {

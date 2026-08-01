@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/scaler-tech/toad/internal/config"
@@ -138,6 +139,56 @@ func TestExternalKey(t *testing.T) {
 			t.Errorf("ExternalKey() = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("all blank sentry ids fall back to thread key", func(t *testing.T) {
+		f := investigation.Findings{SentryIssueIDs: []string{"", "   "}}
+		got := ExternalKey(f, "C123", "1722.000100")
+		want := "thread:C123:1722.000100"
+		if got != want {
+			t.Errorf("ExternalKey() = %q, want %q (blank ids must not produce a degenerate \"sentry:\" key)", got, want)
+		}
+	})
+
+	t.Run("mixed blank and real sentry ids use first non-blank", func(t *testing.T) {
+		f := investigation.Findings{SentryIssueIDs: []string{"", "  ", "BILLING-2291"}}
+		got := ExternalKey(f, "C123", "1722.000100")
+		want := "sentry:BILLING-2291"
+		if got != want {
+			t.Errorf("ExternalKey() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestDecide_BlankSentryIDs(t *testing.T) {
+	t.Run("all blank ids do not count as corroboration", func(t *testing.T) {
+		e := New(&fakeTracker{}, newFakeStore(), config.TicketConfig{
+			AutoFile:           true,
+			AutoFileConfidence: 0.85,
+		}, nil)
+		f := investigation.Findings{
+			Feasible:       true,
+			Confidence:     0.9,
+			SentryIssueIDs: []string{"", "   "},
+		}
+		if got := e.Decide(f); got != DecisionPropose {
+			t.Errorf("Decide() = %v, want DecisionPropose (all-blank sentry ids)", got)
+		}
+	})
+
+	t.Run("mixed blank and real ids still auto-files", func(t *testing.T) {
+		e := New(&fakeTracker{}, newFakeStore(), config.TicketConfig{
+			AutoFile:           true,
+			AutoFileConfidence: 0.85,
+		}, nil)
+		f := investigation.Findings{
+			Feasible:       true,
+			Confidence:     0.9,
+			SentryIssueIDs: []string{"", "BILLING-2291"},
+		}
+		if got := e.Decide(f); got != DecisionAutoFile {
+			t.Errorf("Decide() = %v, want DecisionAutoFile", got)
+		}
+	})
 }
 
 func TestFileOrUpdate_CreatesNewTicket(t *testing.T) {
@@ -248,6 +299,82 @@ func TestFileOrUpdate_Idempotent(t *testing.T) {
 	}
 	if entry.IssueID != "TOAD-7" {
 		t.Errorf("entry.IssueID = %q, want TOAD-7 unchanged", entry.IssueID)
+	}
+}
+
+func TestFileOrUpdate_ConcurrentSameKeySerializes(t *testing.T) {
+	tracker := &fakeTracker{nextID: "TOAD-99"}
+	store := newFakeStore()
+	e := New(tracker, store, config.TicketConfig{}, nil)
+
+	f := investigation.Findings{
+		Problem:        "Duplicate Sentry deliveries racing to file the same ticket.",
+		SentryIssueIDs: []string{"RACE-1"},
+	}
+
+	const n = 2
+	results := make([]*FileResult, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = e.FileOrUpdate(context.Background(), f, "C1", "1.0", "inv-1", SourceAuto)
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: FileOrUpdate() error = %v", i, err)
+		}
+	}
+
+	if len(tracker.createCalls) != 1 {
+		t.Fatalf("CreateIssue calls = %d, want exactly 1 (duplicate-filing race must be closed)", len(tracker.createCalls))
+	}
+
+	existedCount := 0
+	for i, r := range results {
+		if r == nil {
+			t.Fatalf("goroutine %d: result is nil", i)
+		}
+		if r.AlreadyExisted {
+			existedCount++
+		}
+	}
+	if existedCount != 1 {
+		t.Errorf("results with AlreadyExisted=true = %d, want exactly 1 (one winner creates, one loser comments)", existedCount)
+	}
+	if len(tracker.commentCalls) != 1 {
+		t.Errorf("PostComment calls = %d, want exactly 1 (the loser's re-observation)", len(tracker.commentCalls))
+	}
+}
+
+func TestFileOrUpdate_EmptyCategoryWhenNoSentryCorroboration(t *testing.T) {
+	tracker := &fakeTracker{nextID: "TOAD-5"}
+	store := newFakeStore()
+	e := New(tracker, store, config.TicketConfig{}, nil)
+
+	// No SentryIssueIDs at all: this is the documented trade-off in file()'s
+	// Category derivation — a proposed, non-Sentry-corroborated finding gets
+	// no bug/feature label rather than a guessed one.
+	f := investigation.Findings{Problem: "A feature request with no Sentry backing."}
+
+	result, err := e.FileOrUpdate(context.Background(), f, "C1", "1.0", "inv-1", SourceCTA)
+	if err != nil {
+		t.Fatalf("FileOrUpdate() error = %v", err)
+	}
+	if result.AlreadyExisted {
+		t.Errorf("AlreadyExisted = true, want false")
+	}
+	if len(tracker.createCalls) != 1 {
+		t.Fatalf("CreateIssue calls = %d, want 1", len(tracker.createCalls))
+	}
+	if got := tracker.createCalls[0].Category; got != "" {
+		t.Errorf("Category = %q, want empty (no Sentry corroboration, no category label)", got)
 	}
 }
 
