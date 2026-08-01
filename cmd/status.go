@@ -125,6 +125,7 @@ type apiResponse struct {
 	Watches            []apiWatch          `json:"watches"`
 	Opportunities      []apiOpportunity    `json:"opportunities"`
 	DigestCounts       *state.DigestCounts `json:"digest_counts,omitempty"`
+	OutcomeCounts      map[string]int      `json:"outcome_counts,omitempty"`
 	Config             *apiConfig          `json:"config,omitempty"`
 	CCUsage            *apiCCUsage         `json:"cc_usage,omitempty"`
 	PRNoun             string              `json:"pr_noun"`
@@ -478,6 +479,10 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 
 		if digestCounts, err := db.DigestOpportunityCounts(); err == nil {
 			resp.DigestCounts = digestCounts
+		}
+
+		if oc, err := outcomeCounts(db); err == nil {
+			resp.OutcomeCounts = oc
 		}
 
 		if ms, err := db.MergeStats(); err == nil {

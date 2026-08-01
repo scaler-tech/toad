@@ -401,6 +401,14 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Outcome poller: watch what happens to tickets toad has filed
+	// (accepted = promoted/assigned, rejected = cancelled/duplicate) so the
+	// team can see whether toad's tickets are landing. Visibility only — no
+	// behavior adaptation. Skipped entirely when no tracker is configured.
+	if _, isNoop := tracker.(issuetracker.NoopTracker); !isNoop {
+		go runOutcomePoller(ctx, stateDB, tracker, time.Hour)
+	}
+
 	// Prune expired thread memories every hour
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
