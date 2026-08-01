@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/term"
+	"github.com/slack-go/slack"
 	"github.com/spf13/cobra"
 
 	"github.com/scaler-tech/toad/internal/agent"
@@ -211,12 +212,12 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			AgentProvider: agentProvider,
 			TriageModel:   cfg.Triage.Model,
 			Propose: func(ctx context.Context, f investigation.Findings, msg digest.Message) error {
-				// TODO(task-15): real ticket flow — Phase 4 replaces this with
-				// investigation.Engine.FileOrUpdate (or equivalent) once the ticket
-				// package lands. For now just log so digest's propose path is exercised.
-				slog.Info("digest propose stub invoked (no-op until phase 4)",
-					"title", f.Title, "channel", msg.Channel, "thread_ts", msg.ThreadTS)
-				return nil
+				return proposeFromDigest(ctx, ticketEngine, func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
+					if blocks == nil {
+						return slackClient.ReplyInThread(channel, threadTS, text)
+					}
+					return slackClient.ReplyInThreadWithBlocks(channel, threadTS, text, blocks)
+				}, f, msg)
 			},
 			Notify: func(channel, threadTS, text string) {
 				slackClient.ReplyInThread(channel, threadTS, text)
@@ -317,12 +318,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 				}
 			},
 			Investigate: func(ctx context.Context, opp digest.Opportunity, msg digest.Message, tickets []digest.TicketContext) (*investigation.Findings, error) {
-				// TODO(task-9/15): real investigation flow. cmd/investigation.go (the
-				// v1 Sonnet-driven investigate prompt) was deleted in Task 6 along with
-				// tadpole/reviewer/personality — digest is config-disabled in production
-				// (dry_run: true) and its tests use mocks, so this stub is acceptable
-				// until Phase 3 wires the real investigate path.
-				return nil, fmt.Errorf("investigation offline until phase 3")
+				return investigateFromDigest(ctx, resolver, investRunner, investigateSem, cfg.Digest.InvestigateTimeoutSecs, opp, msg, tickets)
 			},
 			React: func(channel, timestamp, emoji string) {
 				slackClient.React(channel, timestamp, emoji)

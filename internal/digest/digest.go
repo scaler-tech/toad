@@ -393,6 +393,18 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 			continue
 		}
 
+		// Propose succeeded — its own outreach (ticket filed/proposed +
+		// thread notice) has already served the purpose the scoped claim
+		// existed to protect (no concurrent :frog:/CTA spawn racing the
+		// investigation). Release it here too, not just on failure:
+		// HasRecentOpportunity, actedIssues, and the ticket_index carry
+		// dedup forward from this point on, so holding the claim forever
+		// would only block a legitimate follow-up on the same thread+scope
+		// (carried finding from Task 6/15's review).
+		if e.unclaim != nil {
+			e.unclaim(threadTS, scope)
+		}
+
 		e.totalSpawns.Add(1)
 	}
 }
@@ -481,6 +493,26 @@ func (e *Engine) flush(ctx context.Context) {
 			return // spawn limit reached
 		}
 	}
+}
+
+// composeGateFindingsText renders the text posted to a ticket's assignee-gate
+// comment (issuetracker.GateOpts.Findings). Prefers the richer Problem +
+// Root-cause fields from a completed investigation's Findings when available
+// (f non-nil and either is non-blank) over the flat reasoning string, falling
+// back to reasoning alone otherwise (f nil — no real investigation ran — or
+// an investigation whose Problem/RootCause both came back blank).
+//
+// Fixes a duplication bug: the prior composition was always
+// "taskDescription + \"\\n\\n**Reasoning:** \" + reasoning", but on the path
+// where an investigation actually ran, taskDescription and reasoning are
+// both set to the exact same result.Reasoning string (see the investigate
+// block above) — so the gate comment rendered the same paragraph twice
+// (carried finding from Task 4's review).
+func composeGateFindingsText(f *investigation.Findings, reasoning string) string {
+	if f != nil && (strings.TrimSpace(f.Problem) != "" || strings.TrimSpace(f.RootCause) != "") {
+		return f.Problem + "\n\n**Root cause (hypothesis):** " + f.RootCause
+	}
+	return reasoning
 }
 
 // processOpportunities handles the investigation, persistence, and spawn logic
@@ -733,7 +765,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			gate := issuetracker.CheckAssigneeGate(ctx, e.tracker, issuetracker.GateOpts{
 				IssueRef:       issueRef,
 				StaleDays:      e.staleDays,
-				Findings:       taskDescription + "\n\n**Reasoning:** " + reasoning,
+				Findings:       composeGateFindingsText(findings, reasoning),
 				SlackPermalink: permalink,
 			})
 			if gate.Gated {
@@ -776,6 +808,17 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			}
 		} else {
 			e.totalSpawns.Add(1)
+			// Propose succeeded — release the scoped claim here too, not
+			// just on failure. It has already served its dedup purpose
+			// (no concurrent :frog:/CTA spawn racing the investigation);
+			// HasRecentOpportunity, actedIssues, and the ticket_index carry
+			// dedup forward from this point on. Holding it forever (the
+			// prior behavior) would permanently block any legitimate
+			// follow-up on the same thread+scope (carried finding from
+			// Task 6/15's review).
+			if e.unclaim != nil {
+				e.unclaim(threadTS, scope)
+			}
 		}
 	}
 	return true

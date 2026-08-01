@@ -6,8 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/slack-go/slack"
+
 	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/digest"
 	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/issuetracker"
 	islack "github.com/scaler-tech/toad/internal/slack"
@@ -345,5 +348,140 @@ func TestReuseRecentInvestigation_SkipsInfeasibleFindings(t *testing.T) {
 	f, id := reuseRecentInvestigation(db, "800.1")
 	if f != nil || id != "" {
 		t.Fatalf("expected an infeasible saved finding to be skipped, got findings=%+v id=%q", f, id)
+	}
+}
+
+// digestPostCall records a single invocation of a fake digestPostFunc, so
+// tests can assert on what proposeFromDigest posted without a live Slack
+// client.
+type digestPostCall struct {
+	channel, threadTS, text string
+	blocks                  []slack.Block
+}
+
+// (a) A sentry-corroborated, high-confidence finding must auto-file (via
+// ticketEngine.FileOrUpdate with source digest) and post a plain thread
+// notice containing the filed ticket's URL — no TicketBlocks, since there's
+// no human decision left to make.
+func TestProposeFromDigest_AutoFilesSentryCorroboratedFinding(t *testing.T) {
+	db := newTestDB(t)
+	tracker := &ticketflowTrackerFake{}
+	ticketEngine := ticket.New(tracker, db, autoFileCfg(), nil)
+
+	f := investigation.Findings{
+		Feasible:       true,
+		Title:          "Refund export double-counts partial refunds",
+		Problem:        "p",
+		RootCause:      "rc",
+		Confidence:     0.92,
+		Repo:           "svc",
+		SentryIssueIDs: []string{"BILLING-42"},
+		Reasoning:      "Found the root cause via Sentry stack trace.",
+	}
+	msg := digest.Message{Channel: "C1", ThreadTS: "100.1", Text: "double refunds"}
+
+	var calls []digestPostCall
+	post := func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
+		calls = append(calls, digestPostCall{channel, threadTS, text, blocks})
+		return "999.1", nil
+	}
+
+	if err := proposeFromDigest(context.Background(), ticketEngine, post, f, msg); err != nil {
+		t.Fatalf("proposeFromDigest: %v", err)
+	}
+
+	if len(tracker.createCalls) != 1 {
+		t.Fatalf("expected exactly 1 CreateIssue call, got %d", len(tracker.createCalls))
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 posted notice, got %d", len(calls))
+	}
+	if !strings.Contains(calls[0].text, "https://linear.app/toad/issue/TOAD-1") {
+		t.Errorf("expected posted notice to contain the filed ticket URL, got %q", calls[0].text)
+	}
+	if calls[0].blocks != nil {
+		t.Errorf("expected a plain reply (no TicketBlocks) for an auto-filed notice, got %d blocks", len(calls[0].blocks))
+	}
+
+	entry, err := db.GetTicketIndex("sentry:BILLING-42")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected a ticket_index row for sentry:BILLING-42, got none")
+	}
+}
+
+// (b) A non-corroborated (no Sentry IDs, or below the confidence floor)
+// finding must NOT auto-file: no CreateIssue call, and the posted notice
+// carries TicketBlocks (the CTA button) with digest-appropriate "spotted
+// while monitoring" copy — the v1 ":crown:" spawn-announcement text this
+// replaces described a tadpole being spawned, which no longer happens here.
+func TestProposeFromDigest_ProposesNonCorroboratedFinding(t *testing.T) {
+	db := newTestDB(t)
+	tracker := &ticketflowTrackerFake{}
+	ticketEngine := ticket.New(tracker, db, autoFileCfg(), nil)
+
+	f := investigation.Findings{
+		Feasible:   true,
+		Title:      "Maybe a bug",
+		Problem:    "p",
+		RootCause:  "rc",
+		Confidence: 0.5,
+		Repo:       "svc",
+		Reasoning:  "Not fully confident this is the root cause.",
+	}
+	msg := digest.Message{Channel: "C2", ThreadTS: "200.1", Text: "maybe a bug?"}
+
+	var calls []digestPostCall
+	post := func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
+		calls = append(calls, digestPostCall{channel, threadTS, text, blocks})
+		return "999.2", nil
+	}
+
+	if err := proposeFromDigest(context.Background(), ticketEngine, post, f, msg); err != nil {
+		t.Fatalf("proposeFromDigest: %v", err)
+	}
+
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected no CreateIssue call for a non-corroborated finding, got %d", len(tracker.createCalls))
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 posted notice, got %d", len(calls))
+	}
+	if len(calls[0].blocks) == 0 {
+		t.Error("expected TicketBlocks to be attached to the proposed notice")
+	}
+	if !strings.Contains(calls[0].text, "Spotted while monitoring") {
+		t.Errorf("expected digest-appropriate copy replacing the v1 :crown: spawn announcement, got %q", calls[0].text)
+	}
+	if !strings.Contains(calls[0].text, "Not fully confident this is the root cause.") {
+		t.Errorf("expected the finding's reasoning in the posted text, got %q", calls[0].text)
+	}
+}
+
+// (c) The digest Investigate closure must resolve a repo before ever
+// running the investigation agent — an unresolvable repo (no configured
+// repos) returns an error, with zero agent Run calls, mirroring
+// runTicketRequest's identical "could not resolve a repo" guard for the
+// CTA path.
+func TestInvestigateFromDigest_UnresolvableRepoReturnsError(t *testing.T) {
+	resolver := config.NewResolver(nil, nil) // no repos configured at all
+	mockProvider := &agent.MockProvider{RunResult: &agent.RunResult{Result: highConfidenceSentryFindings}}
+	investRunner := investigation.NewRunner(mockProvider, "sonnet", "", nil, nil, nil)
+	investigateSem := make(chan struct{}, 1)
+
+	opp := digest.Opportunity{Summary: "fix it", Category: "bug", Confidence: 0.9}
+	msg := digest.Message{Channel: "C3", ThreadTS: "300.1", Text: "something broke"}
+
+	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, 600, opp, msg, nil)
+	if err == nil {
+		t.Fatal("expected an error for an unresolvable repo")
+	}
+	if findings != nil {
+		t.Errorf("expected nil findings on error, got %+v", findings)
+	}
+	if len(mockProvider.RunCalls) != 0 {
+		t.Errorf("expected no investigation agent Run call when the repo can't be resolved, got %d", len(mockProvider.RunCalls))
 	}
 }

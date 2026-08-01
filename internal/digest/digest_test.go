@@ -2,11 +2,14 @@ package digest
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/state"
 )
 
 func TestDedupChannel(t *testing.T) {
@@ -650,5 +653,187 @@ func TestProcessOpportunities_TrackerNoCreateWhenDisabled(t *testing.T) {
 
 	if tracker.createCalled {
 		t.Error("CreateIssue should not be called when createIssues=false")
+	}
+}
+
+// claimTracker is a minimal in-memory ClaimFunc/UnclaimFunc pair for
+// asserting claim lifecycle in tests — a stand-in for
+// state.Manager.ClaimScoped/UnclaimScoped that doesn't require a real
+// state.DB.
+type claimTracker struct {
+	claimed map[string]bool
+}
+
+func newClaimTracker() *claimTracker {
+	return &claimTracker{claimed: make(map[string]bool)}
+}
+
+func (c *claimTracker) claim(threadTS, scope string) bool {
+	key := threadTS + "|" + scope
+	if c.claimed[key] {
+		return false
+	}
+	c.claimed[key] = true
+	return true
+}
+
+func (c *claimTracker) unclaim(threadTS, scope string) {
+	delete(c.claimed, threadTS+"|"+scope)
+}
+
+func (c *claimTracker) isClaimed(threadTS, scope string) bool {
+	return c.claimed[threadTS+"|"+scope]
+}
+
+// Task 16 carried finding 1 (from Task 6/15's review): processOpportunities
+// used to unclaim the scoped thread+scope claim ONLY on a propose failure,
+// leaving every successful proposal holding its claim forever. A completed
+// propose (ticket filed or proposed to a human) has already served the
+// claim's dedup purpose — HasRecentOpportunity, actedIssues, and the
+// ticket_index carry dedup forward from there — so the claim must be
+// released on success too.
+func TestProcessOpportunities_ClaimReleasedOnProposeSuccess(t *testing.T) {
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.5,
+		AllowedCategories: []string{"bug"},
+		MaxEstSize:        "small",
+		MaxAutoSpawnHour:  5,
+	}
+	ct := newClaimTracker()
+	e := &Engine{
+		cfg:     cfg,
+		claim:   ct.claim,
+		unclaim: ct.unclaim,
+		propose: func(ctx context.Context, f investigation.Findings, msg Message) error { return nil },
+	}
+
+	msgs := []Message{{Text: "bug", Channel: "C1", ChannelName: "errors", Timestamp: "1"}}
+	opps := []Opportunity{{Summary: "fix", Category: "bug", Confidence: 0.99, EstSize: "small", MessageIdx: 0}}
+
+	e.processOpportunities(context.Background(), msgs, opps, map[string]bool{})
+
+	scope := scopeKey(opps[0], nil, msgs[0].Text)
+	if ct.isClaimed(msgs[0].Timestamp, scope) {
+		t.Error("expected claim released after a successful propose, but it's still held")
+	}
+}
+
+// Regression test for the pre-existing (correct) behavior: a propose failure
+// must still release the claim, so a later retry on the same thread+scope
+// isn't permanently blocked by a transient error.
+func TestProcessOpportunities_ClaimReleasedOnProposeFailure(t *testing.T) {
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.5,
+		AllowedCategories: []string{"bug"},
+		MaxEstSize:        "small",
+		MaxAutoSpawnHour:  5,
+	}
+	ct := newClaimTracker()
+	e := &Engine{
+		cfg:     cfg,
+		claim:   ct.claim,
+		unclaim: ct.unclaim,
+		propose: func(ctx context.Context, f investigation.Findings, msg Message) error {
+			return errors.New("propose failed")
+		},
+	}
+
+	msgs := []Message{{Text: "bug", Channel: "C1", ChannelName: "errors", Timestamp: "1"}}
+	opps := []Opportunity{{Summary: "fix", Category: "bug", Confidence: 0.99, EstSize: "small", MessageIdx: 0}}
+
+	e.processOpportunities(context.Background(), msgs, opps, map[string]bool{})
+
+	scope := scopeKey(opps[0], nil, msgs[0].Text)
+	if ct.isClaimed(msgs[0].Timestamp, scope) {
+		t.Error("expected claim released after a failed propose")
+	}
+}
+
+// Same fix, ResumeInvestigations' propose call site (the crash-recovery
+// path) — must also release the claim on success, not just failure.
+func TestResumeInvestigations_ClaimReleasedOnProposeSuccess(t *testing.T) {
+	cfg := &config.DigestConfig{MaxAutoSpawnHour: 5}
+	ct := newClaimTracker()
+	e := &Engine{
+		cfg:     cfg,
+		claim:   ct.claim,
+		unclaim: ct.unclaim,
+		propose: func(ctx context.Context, f investigation.Findings, msg Message) error { return nil },
+	}
+
+	opps := []*state.DigestOpportunity{
+		{Summary: "fix", ThreadTS: "100.1", ChannelID: "C1", Channel: "errors", Message: "bug"},
+	}
+
+	e.ResumeInvestigations(context.Background(), opps)
+
+	scope := scopeKey(Opportunity{Summary: "fix"}, nil, "bug")
+	if ct.isClaimed("100.1", scope) {
+		t.Error("expected claim released after a successful resumed propose")
+	}
+}
+
+// Regression test: ResumeInvestigations' propose failure path must still
+// release the claim (pre-existing behavior).
+func TestResumeInvestigations_ClaimReleasedOnProposeFailure(t *testing.T) {
+	cfg := &config.DigestConfig{MaxAutoSpawnHour: 5}
+	ct := newClaimTracker()
+	e := &Engine{
+		cfg:     cfg,
+		claim:   ct.claim,
+		unclaim: ct.unclaim,
+		propose: func(ctx context.Context, f investigation.Findings, msg Message) error {
+			return errors.New("propose failed")
+		},
+	}
+
+	opps := []*state.DigestOpportunity{
+		{Summary: "fix", ThreadTS: "200.1", ChannelID: "C1", Channel: "errors", Message: "bug"},
+	}
+
+	e.ResumeInvestigations(context.Background(), opps)
+
+	scope := scopeKey(Opportunity{Summary: "fix"}, nil, "bug")
+	if ct.isClaimed("200.1", scope) {
+		t.Error("expected claim released after a failed resumed propose")
+	}
+}
+
+// Task 16 carried finding 2 (from Task 4's review): the ticket assignee-gate
+// comment used to compose its Findings text as
+// "taskDescription + \"\\n\\n**Reasoning:** \" + reasoning" — but on the
+// path where an investigation actually ran, taskDescription and reasoning
+// are both set to the exact same result.Reasoning string, so the gate
+// comment rendered the same paragraph twice. composeGateFindingsText must
+// prefer the richer Problem/RootCause fields instead.
+func TestComposeGateFindingsText_PrefersProblemAndRootCause(t *testing.T) {
+	f := &investigation.Findings{
+		Problem:   "Refund export double-counts partial refunds.",
+		RootCause: "The aggregator sums both the original and adjusted rows.",
+		Reasoning: "Refund export double-counts partial refunds. The aggregator sums both the original and adjusted rows.",
+	}
+
+	got := composeGateFindingsText(f, f.Reasoning)
+
+	want := "Refund export double-counts partial refunds.\n\n**Root cause (hypothesis):** The aggregator sums both the original and adjusted rows."
+	if got != want {
+		t.Errorf("composeGateFindingsText() = %q, want %q", got, want)
+	}
+	if strings.Count(got, "double-counts partial refunds") != 1 {
+		t.Errorf("expected the problem statement to appear exactly once, got: %q", got)
+	}
+}
+
+// When no investigation ran (f nil) or it came back with both Problem and
+// RootCause blank, composeGateFindingsText must fall back to the flat
+// reasoning string rather than rendering an empty "Root cause" section.
+func TestComposeGateFindingsText_FallsBackToReasoning(t *testing.T) {
+	if got := composeGateFindingsText(nil, "plain reasoning"); got != "plain reasoning" {
+		t.Errorf("composeGateFindingsText(nil, ...) = %q, want %q", got, "plain reasoning")
+	}
+
+	blank := &investigation.Findings{Reasoning: "plain reasoning"}
+	if got := composeGateFindingsText(blank, blank.Reasoning); got != "plain reasoning" {
+		t.Errorf("composeGateFindingsText() with blank Problem/RootCause = %q, want %q", got, "plain reasoning")
 	}
 }

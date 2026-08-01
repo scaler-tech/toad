@@ -24,7 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/slack-go/slack"
+
 	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/digest"
 	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/issuetracker"
 	islack "github.com/scaler-tech/toad/internal/slack"
@@ -699,4 +702,158 @@ func handleBotIntake(
 	if _, err := slackClient.ReplyInThread(msg.Channel, threadTS, outcome.ReplyText); err != nil {
 		slog.Warn("bot intake investigation reply failed", "error", err)
 	}
+}
+
+// digestPostFunc posts a Slack thread reply for the digest propose path,
+// optionally with Block Kit blocks (nil for a plain reply) attached. Kept as
+// an injectable function value — rather than a *islack.Client parameter —
+// so proposeFromDigest's Decide/FileOrUpdate/compose decision logic stays
+// directly unit-testable with a fake, consistent with this file's
+// Slack-client-free design (see the package doc comment at the top). Task
+// 15's root.go wires the real implementation over slackClient.ReplyInThread/
+// ReplyInThreadWithBlocks.
+type digestPostFunc func(channel, threadTS, text string, blocks []slack.Block) (string, error)
+
+// composeDigestProposalText renders the Slack reply text for a digest-
+// sourced finding that didn't clear the auto-file gate (ticket.DecisionPropose).
+// This replaces the v1 ":crown:" tadpole-spawn announcement — nothing is
+// being spawned here, so the copy is rewritten to describe what actually
+// happened: Toad King noticed something worth a look while passively
+// monitoring, and here's the investigation's reasoning.
+func composeDigestProposalText(f investigation.Findings) string {
+	body := f.Reasoning
+	if strings.TrimSpace(body) == "" {
+		body = f.Problem
+	}
+	return ":crown: Spotted while monitoring — here's what I found:\n\n" + body
+}
+
+// proposeFromDigest is digest.ProposeFunc's real implementation (modulo the
+// injected digestPostFunc — see its doc comment): it applies the same
+// Decide-then-file-or-propose gate the Slack-thread flows use
+// (fileOrProposeFromFindings) and posts the corresponding thread reply.
+//
+// No claim bookkeeping happens here — per fileOrProposeFromFindings's
+// contract comment, and per the digest.go fix (Task 16's carried finding 1):
+// the scoped claim is released by the caller (processOpportunities /
+// ResumeInvestigations in internal/digest/digest.go) on BOTH success and
+// failure now, not just failure. This function only needs to return an
+// error on failure — digest.go logs it and does the unclaim + failure
+// notice.
+//
+// investigationID is passed as "" to FileOrUpdate: unlike the Slack-thread
+// flows, digest has no InvestigationRecord to backlink (its own
+// DigestOpportunity DB row already serves that bookkeeping role), and
+// ComposeBody's footer simply omits the "toad:investigation <id>" line when
+// investigationID is blank.
+func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, post digestPostFunc,
+	f investigation.Findings, msg digest.Message) error {
+	decision, fileResult, err := fileOrProposeFromFindings(ctx, ticketEngine, f, msg.Channel, msg.ThreadTS, "", ticket.SourceDigest)
+	if err != nil {
+		return err
+	}
+
+	if decision == ticket.DecisionAutoFile {
+		_, err := post(msg.Channel, msg.ThreadTS, composeFiledReply(f, fileResult), nil)
+		return err
+	}
+
+	text := composeDigestProposalText(f)
+	blocks := islack.TicketBlocks(text, msg.ThreadTS)
+	_, err = post(msg.Channel, msg.ThreadTS, text, blocks)
+	return err
+}
+
+// buildDigestTicketContextBlock formats digest's pre-fetched ticket details
+// (fetched in internal/digest/digest.go's processOpportunities, before the
+// investigation gate runs) into the same "<linked_tickets>" block shape
+// buildTicketContextBlock produces for the Slack-thread flows — including
+// any fetched comments, which buildTicketContextBlock's own tracker-driven
+// fetch doesn't carry. Returns "" when there are no tickets with a
+// non-blank ID.
+func buildDigestTicketContextBlock(tickets []digest.TicketContext) string {
+	if len(tickets) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("<linked_tickets>\n")
+	found := false
+	for _, tc := range tickets {
+		if tc.ID == "" {
+			continue
+		}
+		found = true
+		fmt.Fprintf(&b, "## %s\n", tc.ID)
+		if tc.Title != "" {
+			fmt.Fprintf(&b, "Title: %s\n", tc.Title)
+		}
+		if tc.Description != "" {
+			desc := tc.Description
+			if len(desc) > 2000 {
+				desc = desc[:2000] + "..."
+			}
+			fmt.Fprintf(&b, "Description:\n%s\n", desc)
+		}
+		for _, c := range tc.Comments {
+			fmt.Fprintf(&b, "Comment (%s): %s\n", c.Author, c.Body)
+		}
+		b.WriteString("\n")
+	}
+	if !found {
+		return ""
+	}
+	b.WriteString("</linked_tickets>\n")
+	return b.String()
+}
+
+// investigateFromDigest is digest.InvestigateFunc's real implementation: it
+// resolves the opportunity's repo hint, builds an investigation.Request from
+// the opportunity + message + pre-fetched ticket context, and runs it
+// through the same bounded investigateSem helper (runInvestigation) the
+// Slack-thread flows use — the digest investigate path must respect the
+// same concurrent-investigation limit, not spawn unbounded agent runs of its
+// own.
+//
+// An unresolvable repo returns an error without ever calling investRunner —
+// mirrors runTicketRequest's identical "could not resolve a repo" guard for
+// the CTA path.
+func investigateFromDigest(
+	ctx context.Context,
+	resolver *config.Resolver,
+	investRunner *investigation.Runner,
+	investigateSem chan struct{},
+	timeoutSecs int,
+	opp digest.Opportunity,
+	msg digest.Message,
+	tickets []digest.TicketContext,
+) (*investigation.Findings, error) {
+	repo := resolver.Resolve(opp.Repo, opp.FilesHint)
+	if repo == nil {
+		return nil, errors.New("cannot resolve repo")
+	}
+
+	timeout := time.Duration(timeoutSecs) * time.Second
+	if timeout <= 0 {
+		// Matches config.DigestConfig's documented default (600s / 10m) —
+		// a defensive fallback in case a zero/negative value ever reaches
+		// here (e.g. a test or a future config-loading gap), never the
+		// expected path in production.
+		timeout = 10 * time.Minute
+	}
+
+	req := investigation.Request{
+		Text:          msg.Text,
+		Category:      opp.Category,
+		Confidence:    opp.Confidence,
+		Summary:       opp.Summary,
+		ChannelName:   msg.ChannelName,
+		Keywords:      opp.Keywords,
+		FilesHint:     opp.FilesHint,
+		SentryRefs:    islack.ExtractSentryRefs(msg.Text),
+		TicketContext: buildDigestTicketContextBlock(tickets),
+		Repo:          repo,
+		Timeout:       timeout,
+	}
+	return runInvestigation(ctx, investRunner, investigateSem, req)
 }
