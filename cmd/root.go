@@ -27,6 +27,8 @@ import (
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
+	"github.com/scaler-tech/toad/internal/ticket"
+	"github.com/scaler-tech/toad/internal/toadpath"
 	"github.com/scaler-tech/toad/internal/triage"
 	"github.com/scaler-tech/toad/internal/tui"
 	"github.com/scaler-tech/toad/internal/update"
@@ -144,8 +146,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Separate concurrency pools: ribbits are fast (seconds), investigations are slow (minutes).
 	// Ribbit pool is generous so Q&A stays responsive even while investigations run.
 	ribbitSem := make(chan struct{}, cfg.Limits.MaxConcurrent*3)
-	investigateSem := make(chan struct{}, cfg.Limits.MaxConcurrent) // consumed from task 15
-	_ = investigateSem                                              // placeholder until task 15 wires the investigate gate
+	investigateSem := make(chan struct{}, cfg.Limits.MaxConcurrent)
 
 	// 7. Initialize Slack client
 	slackClient := islack.NewClient(cfg.Slack)
@@ -158,6 +159,28 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	// Wire path scrubber — prevents absolute filesystem paths from leaking to Slack
 	slackClient.SetPathScrubber(repoPaths)
+
+	// Write the MCP config the investigation agent will run with (e.g. a
+	// Sentry MCP server for pulling issue/Seer detail). WriteMCPConfig
+	// requires its dir to already exist — safe here since state.OpenDB()
+	// above already created the toad home directory. Only the sentry
+	// tools are ever allowed through to the investigation agent, and only
+	// when a "sentry" MCP server is actually configured.
+	var mcpPath string
+	if home, err := toadpath.Home(); err != nil {
+		slog.Warn("resolving toad home for mcp config failed, investigations will run without mcp", "error", err)
+	} else if p, err := agent.WriteMCPConfig(home, cfg.Agent.MCPServers); err != nil {
+		slog.Warn("writing mcp config failed, investigations will run without mcp", "error", err)
+	} else {
+		mcpPath = p
+	}
+	var allowedMCP []string
+	if _, ok := cfg.Agent.MCPServers["sentry"]; ok {
+		allowedMCP = []string{"mcp__sentry__*"}
+	}
+
+	investRunner := investigation.NewRunner(agentProvider, cfg.Agent.Model, mcpPath, allowedMCP, wrapSync(cfg), repoPaths)
+	ticketEngine := ticket.New(tracker, stateDB, cfg.Ticket, slackClient.GetPermalink)
 
 	// 9. Initialize MCP server if enabled (started after context is created below)
 	var mcpSrv *toadmcp.Server
@@ -325,7 +348,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		messageWg.Add(1)
 		go func() {
 			defer messageWg.Done()
-			handleMessage(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, digestEngine, tracker, resolver, repoPaths)
+			handleMessage(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, investigateSem, digestEngine, tracker, resolver, repoPaths, investRunner, ticketEngine, cfg.Intake.BotAllowlist)
 		}()
 	})
 
@@ -503,4 +526,28 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 
 	return slackErr
+}
+
+// wrapSync adapts SyncRepoNow into an investigation.RepoSyncer for
+// investRunner. cfg is accepted (rather than a bare func(ctx, repo) error)
+// to match the call site's binding signature and leave room for a future
+// per-repo sync policy read from config; SyncRepoNow itself needs nothing
+// beyond the RepoConfig passed per call, so cfg isn't consulted today.
+//
+// On a sync failure, this also flips the goroutine-local staleness flag
+// threaded through ctx by withStaleTracking (ticketflow.go) so the caller
+// can append a one-line staleness caveat to the findings text it posts to
+// Slack — investigation.Runner itself only slog.Warns on a sync failure
+// and otherwise proceeds silently against a possibly-stale checkout (a
+// carried finding from Task 9's review).
+func wrapSync(cfg *config.Config) investigation.RepoSyncer {
+	return func(ctx context.Context, repo config.RepoConfig) error {
+		err := SyncRepoNow(ctx, repo)
+		if err != nil {
+			if stale, ok := ctx.Value(staleFlagKey{}).(*bool); ok {
+				*stale = true
+			}
+		}
+		return err
+	}
 }

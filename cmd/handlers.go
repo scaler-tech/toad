@@ -4,15 +4,18 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/digest"
+	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/issuetracker"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
+	"github.com/scaler-tech/toad/internal/ticket"
 	"github.com/scaler-tech/toad/internal/triage"
 )
 
@@ -24,10 +27,14 @@ func handleMessage(
 	slackClient *islack.Client,
 	stateManager *state.Manager,
 	ribbitSem chan struct{},
+	investigateSem chan struct{},
 	digestEngine *digest.Engine,
 	tracker issuetracker.Tracker,
 	resolver *config.Resolver,
 	repoPaths map[string]string,
+	investRunner *investigation.Runner,
+	ticketEngine *ticket.Engine,
+	botAllowlist []string,
 ) {
 	// Resolve channel name for context
 	channelName := slackClient.ResolveChannelName(msg.Channel)
@@ -37,7 +44,7 @@ func handleMessage(
 	// toad's own (bot) messages, so the fetched message will have IsBot=true.
 	if msg.IsTicketRequest {
 		slog.Info("handler: ticket requested", "channel", channelName, "thread", msg.ThreadTS())
-		handleTicketRequest(ctx, msg, slackClient)
+		handleTicketRequest(ctx, msg, slackClient, nil, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, ticket.SourceCTA)
 		return
 	}
 
@@ -53,7 +60,7 @@ func handleMessage(
 			return
 		}
 
-		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, channelName, tracker, resolver, repoPaths)
+		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, channelName, tracker, resolver, repoPaths, investRunner, ticketEngine, investigateSem)
 		return
 	}
 
@@ -72,8 +79,27 @@ func handleMessage(
 		})
 	}
 
-	// Skip bot messages from individual triage/passive monitoring
 	if msg.IsBot {
+		// Non-allowlisted bots are dropped from individual triage/passive
+		// monitoring (digest still saw them above). Allowlisted intake bots
+		// (e.g. a Sentry app) are instead routed exactly like an explicit
+		// @toad mention — worth an immediate investigation, not just a wait
+		// for digest's batch analysis or a silent drop.
+		if !slices.Contains(botAllowlist, msg.BotID) {
+			return
+		}
+
+		slog.Info("handler: allowlisted bot message, routing as triggered", "bot_id", msg.BotID, "channel", channelName)
+		msg.IsTriggered = true
+
+		select {
+		case ribbitSem <- struct{}{}:
+			defer func() { <-ribbitSem }()
+		case <-ctx.Done():
+			return
+		}
+
+		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, channelName, tracker, resolver, repoPaths, investRunner, ticketEngine, investigateSem)
 		return
 	}
 
@@ -106,6 +132,9 @@ func handleTriggered(
 	tracker issuetracker.Tracker,
 	resolver *config.Resolver,
 	repoPaths map[string]string,
+	investRunner *investigation.Runner,
+	ticketEngine *ticket.Engine,
+	investigateSem chan struct{},
 ) {
 	// Check if already working on this thread
 	threadTS := msg.ThreadTS()
@@ -191,6 +220,47 @@ func handleTriggered(
 		daemonCounters.triageQuestion.Add(1)
 	default:
 		daemonCounters.triageOther.Add(1)
+	}
+
+	// ESCALATE: triage flagged this as needing a ticket regardless of
+	// category/confidence — route to the same investigate-and-file flow the
+	// CTA button uses, just with a different Source for the ticket index.
+	if result.Escalate {
+		slog.Info("triage escalate flag set, routing to ticket flow", "summary", result.Summary)
+		handleTicketRequest(ctx, msg, slackClient, result, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, ticket.SourceEscalation)
+		return
+	}
+
+	// INVESTIGATE + FILE: bugs and features go through a read-only
+	// investigation gate before a ticket is filed or proposed. An infeasible
+	// (or errored) investigation falls through to the unchanged ribbit path
+	// below — v1 semantics.
+	if (result.Category == "bug" || result.Category == "feature") && result.Confidence >= 0.5 {
+		if !stateManager.Claim(threadTS) {
+			slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
+			return
+		}
+
+		slog.Info("investigating before filing", "summary", result.Summary, "category", result.Category)
+		slackClient.SetStatus(msg.Channel, threadTS, "Investigating the codebase...")
+
+		outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS,
+			stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+
+		if outcome.Kind != outcomeFallThrough {
+			slackClient.ClearStatus(msg.Channel, threadTS)
+			if outcome.Kind == outcomeProposed {
+				blocks := islack.TicketBlocks(outcome.ReplyText, threadTS)
+				if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, threadTS, outcome.ReplyText, blocks); err != nil {
+					slog.Warn("investigation reply failed", "error", err)
+				}
+			} else if _, err := slackClient.ReplyInThread(msg.Channel, threadTS, outcome.ReplyText); err != nil {
+				slog.Warn("investigation reply failed", "error", err)
+			}
+			return
+		}
+		// outcomeFallThrough: claim already released inside
+		// runTriggeredInvestigation — fall through to ribbit below.
 	}
 
 	// Resolve repo for ribbit
@@ -294,17 +364,4 @@ func handlePassive(
 	if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, msg.Timestamp, resp.Text, blocks); err != nil {
 		slog.Warn("passive ribbit reply failed", "error", err)
 	}
-}
-
-// handleTicketRequest is a stub for the :ticket: reaction / CTA button flow.
-// TODO(task-13): replace with the real ticket-filing flow once internal/ticket
-// lands — this currently just acknowledges the request so the reaction path
-// compiles and gives the user a clear "not yet" message instead of silence.
-func handleTicketRequest(_ context.Context, msg *islack.IncomingMessage, slackClient *islack.Client) {
-	// The CTA/reaction path already set a "Spawning tadpole..." thread status
-	// (internal/slack/interactive.go) before dispatching here. ReplyInThread
-	// does not clear it, so without this the thread would be stuck showing
-	// that status forever alongside the phase-4 stub reply.
-	slackClient.ClearStatus(msg.Channel, msg.ThreadTS())
-	slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(), ":ticket: Ticket flow lands in phase 4.")
 }
