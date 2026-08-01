@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/scaler-tech/toad/internal/config"
@@ -41,6 +42,18 @@ type LinearTracker struct {
 	featureLabelID string
 	createIssues   bool
 	httpClient     *http.Client
+
+	// teamIDMu guards team-key-to-UUID resolution. It's held across the
+	// resolution call itself, so concurrent first-callers serialize rather
+	// than each firing their own "teams" query. Only a *successful*
+	// resolution is cached (in resolvedTeamID) — a failed attempt caches
+	// nothing, so the next CreateIssue call retries instead of being
+	// permanently wedged by one transient error. teamID itself is never
+	// mutated after construction (so it's safe to read unsynchronized,
+	// e.g. for the "configured?" check in CreateIssue); resolvedTeamID is
+	// only ever read/written under teamIDMu.
+	teamIDMu       sync.Mutex
+	resolvedTeamID string
 }
 
 // NewLinearTracker creates a Linear tracker from config.
@@ -287,18 +300,38 @@ func (lt *LinearTracker) doGraphQL(ctx context.Context, query string, variables 
 	return gqlResp.Data, nil
 }
 
-// resolveTeamID resolves a team key (e.g. "PLF") to its UUID via the Linear API.
-// If teamID is already a UUID, this is a no-op.
-func (lt *LinearTracker) resolveTeamID(ctx context.Context) error {
+// resolveTeamID resolves a team key (e.g. "PLF") to its UUID via the Linear
+// API and returns the effective team ID to use in subsequent requests. If
+// teamID is already a UUID, it's returned as-is.
+//
+// A successful resolution is cached in resolvedTeamID for the lifetime of
+// the tracker, so it runs at most once across all callers. A failed
+// resolution (network error, bad response, unknown team key) is NOT
+// cached — the error is returned to that caller, but the next call to
+// resolveTeamID retries from scratch, so a single transient failure
+// doesn't permanently disable issue creation for the process's lifetime.
+// The mutex is held across the (network) resolution call itself, so
+// concurrent first-callers serialize instead of each firing their own
+// "teams" query; once resolvedTeamID is set, later callers take a fast
+// path (lock, read, unlock) with no network call.
+func (lt *LinearTracker) resolveTeamID(ctx context.Context) (string, error) {
+	lt.teamIDMu.Lock()
+	defer lt.teamIDMu.Unlock()
+
+	if lt.resolvedTeamID != "" {
+		return lt.resolvedTeamID, nil
+	}
+
 	if uuidRe.MatchString(lt.teamID) {
-		return nil
+		lt.resolvedTeamID = lt.teamID
+		return lt.resolvedTeamID, nil
 	}
 
 	slog.Info("resolving Linear team key to UUID", "key", lt.teamID)
 
 	data, err := lt.doGraphQL(ctx, `{ teams { nodes { id key } } }`, nil)
 	if err != nil {
-		return fmt.Errorf("fetching teams: %w", err)
+		return "", fmt.Errorf("fetching teams: %w", err)
 	}
 
 	var result struct {
@@ -310,18 +343,18 @@ func (lt *LinearTracker) resolveTeamID(ctx context.Context) error {
 		} `json:"teams"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
-		return fmt.Errorf("parsing teams response: %w", err)
+		return "", fmt.Errorf("parsing teams response: %w", err)
 	}
 
 	for _, team := range result.Teams.Nodes {
 		if team.Key == lt.teamID {
 			slog.Info("resolved Linear team", "key", lt.teamID, "uuid", team.ID)
-			lt.teamID = team.ID
-			return nil
+			lt.resolvedTeamID = team.ID
+			return lt.resolvedTeamID, nil
 		}
 	}
 
-	return fmt.Errorf("linear team key %q not found", lt.teamID)
+	return "", fmt.Errorf("linear team key %q not found", lt.teamID)
 }
 
 // CreateIssue creates a new Linear issue via the GraphQL API.
@@ -334,11 +367,12 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 	}
 
 	// Resolve team key to UUID on first call (e.g. "PLF" → "4246aba1-...")
-	if err := lt.resolveTeamID(ctx); err != nil {
+	teamID, err := lt.resolveTeamID(ctx)
+	if err != nil {
 		return nil, fmt.Errorf("resolving team ID: %w", err)
 	}
 
-	// Build label IDs based on category
+	// Build label IDs based on category, then merge in any extra labels.
 	var labelIDs []string
 	switch opts.Category {
 	case "bug":
@@ -350,20 +384,25 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 			labelIDs = append(labelIDs, lt.featureLabelID)
 		}
 	}
+	labelIDs = append(labelIDs, opts.Labels...)
 
 	variables := map[string]any{
 		"title":       opts.Title,
 		"description": opts.Description,
-		"teamId":      lt.teamID,
+		"teamId":      teamID,
 	}
 	if len(labelIDs) > 0 {
 		variables["labelIds"] = labelIDs
 	}
+	if opts.StateID != "" {
+		variables["stateId"] = opts.StateID
+	}
 
-	query := `mutation IssueCreate($title: String!, $description: String, $teamId: String!, $labelIds: [String!]) {
-		issueCreate(input: { title: $title, description: $description, teamId: $teamId, labelIds: $labelIds }) {
+	query := `mutation IssueCreate($title: String!, $description: String, $teamId: String!, $labelIds: [String!], $stateId: String) {
+		issueCreate(input: { title: $title, description: $description, teamId: $teamId, labelIds: $labelIds, stateId: $stateId }) {
 			success
 			issue {
+				id
 				identifier
 				url
 				title
@@ -380,6 +419,7 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 		IssueCreate struct {
 			Success bool `json:"success"`
 			Issue   struct {
+				ID         string `json:"id"`
 				Identifier string `json:"identifier"`
 				URL        string `json:"url"`
 				Title      string `json:"title"`
@@ -396,10 +436,11 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 
 	issue := result.IssueCreate.Issue
 	return &IssueRef{
-		Provider: "linear",
-		ID:       issue.Identifier,
-		URL:      issue.URL,
-		Title:    issue.Title,
+		Provider:   "linear",
+		ID:         issue.Identifier,
+		URL:        issue.URL,
+		Title:      issue.Title,
+		InternalID: issue.ID,
 	}, nil
 }
 
