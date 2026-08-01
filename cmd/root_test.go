@@ -8,25 +8,6 @@ import (
 	"github.com/scaler-tech/toad/internal/issuetracker"
 )
 
-func TestTruncate(t *testing.T) {
-	tests := []struct {
-		input string
-		n     int
-		want  string
-	}{
-		{"short", 10, "short"},
-		{"exactly ten", 11, "exactly ten"},
-		{"this is a long string that needs truncation", 20, "this is a long st..."},
-		{"", 5, ""},
-	}
-	for _, tt := range tests {
-		got := truncate(tt.input, tt.n)
-		if got != tt.want {
-			t.Errorf("truncate(%q, %d) = %q, want %q", tt.input, tt.n, got, tt.want)
-		}
-	}
-}
-
 // mockTracker implements issuetracker.Tracker for testing enrichWithIssueDetails.
 type mockTracker struct {
 	issuetracker.NoopTracker

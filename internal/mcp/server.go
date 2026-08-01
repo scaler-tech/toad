@@ -28,7 +28,6 @@ type HealthInfo struct {
 	mu             sync.RWMutex
 	StartedAt      time.Time
 	Version        string
-	ActiveTadpoles int
 	ActiveRibbits  int
 	SlackConnected bool
 }
@@ -120,7 +119,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":          "ok",
 		"version":         s.health.Version,
 		"uptime_seconds":  int(time.Since(s.health.StartedAt).Seconds()),
-		"active_tadpoles": s.health.ActiveTadpoles,
 		"active_ribbits":  s.health.ActiveRibbits,
 		"slack_connected": s.health.SlackConnected,
 	}

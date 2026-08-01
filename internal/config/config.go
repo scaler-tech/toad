@@ -23,7 +23,6 @@ type Config struct {
 	Agent        AgentConfig        `yaml:"agent"`
 	Log          LogConfig          `yaml:"log"`
 	MCP          MCPConfig          `yaml:"mcp"`
-	Personality  PersonalityConfig  `yaml:"personality"`
 	Intake       IntakeConfig       `yaml:"intake"`
 	Ticket       TicketConfig       `yaml:"ticket"`
 }
@@ -147,12 +146,6 @@ type MCPConfig struct {
 	Message string   `yaml:"message"` // optional message included in the connect DM
 }
 
-type PersonalityConfig struct {
-	Enabled         bool   `yaml:"enabled"`          // default: false (opt-in)
-	LearningEnabled bool   `yaml:"learning_enabled"` // default: true
-	FilePath        string `yaml:"file_path"`        // default: ~/.toad/personality.yaml
-}
-
 type IntakeConfig struct {
 	BotAllowlist []string `yaml:"bot_allowlist"` // Slack BotIDs allowed into triage
 }
@@ -230,10 +223,6 @@ func defaults() *Config {
 			Enabled: false,
 			Host:    "localhost",
 			Port:    8099,
-		},
-		Personality: PersonalityConfig{
-			Enabled:         false,
-			LearningEnabled: true,
 		},
 		Ticket: TicketConfig{
 			AutoFile:           true,

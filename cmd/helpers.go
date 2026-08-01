@@ -65,18 +65,6 @@ func enrichWithIssueDetails(ctx context.Context, tracker issuetracker.Tracker, t
 	return append(threadContext, enriched...)
 }
 
-// truncate returns the first n runes of s, appending "..." if truncated.
-func truncate(s string, n int) string {
-	if n <= 3 {
-		return "..."
-	}
-	runes := []rune(s)
-	if len(runes) <= n {
-		return s
-	}
-	return string(runes[:n-3]) + "..."
-}
-
 // syncRepos periodically fetches and fast-forward pulls all configured repos.
 // This keeps the local checkout fresh for ribbit (read-only Q&A) and digest
 // investigations, which operate on the working tree without fetching.

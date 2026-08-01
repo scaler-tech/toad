@@ -476,30 +476,6 @@ func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slack
 	return err
 }
 
-// OpenPRWatches returns all PRs being monitored (not closed, under any fix limit).
-func (d *DB) OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*PRWatch, error) {
-	ctx, cancel := dbCtx()
-	defer cancel()
-	rows, err := d.db.QueryContext(ctx,
-		"SELECT pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count, conflict_fix_count, repo_path, ci_exhausted_notified, COALESCE(original_summary, ''), COALESCE(original_description, ''), created_at FROM pr_watches WHERE closed = FALSE AND (fix_count < ? OR ci_fix_count < ? OR conflict_fix_count < ?)",
-		maxReviewRounds, maxCIFixRounds, maxReviewRounds,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var watches []*PRWatch
-	for rows.Next() {
-		var w PRWatch
-		if err := rows.Scan(&w.PRNumber, &w.PRURL, &w.Branch, &w.RunID, &w.SlackChannel, &w.SlackThread, &w.LastCommentID, &w.FixCount, &w.CIFixCount, &w.ConflictFixCount, &w.RepoPath, &w.CIExhaustedNotified, &w.OriginalSummary, &w.OriginalDescription, &w.CreatedAt); err != nil {
-			return nil, err
-		}
-		watches = append(watches, &w)
-	}
-	return watches, rows.Err()
-}
-
 // UpdatePRWatchLastComment updates the last seen comment ID.
 func (d *DB) UpdatePRWatchLastComment(prNumber, lastCommentID int) error {
 	ctx, cancel := dbCtx()

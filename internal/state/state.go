@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Run represents an active or completed tadpole run.
+// Run represents an active or completed investigation run.
 type Run struct {
 	ID            string
 	Status        string // "starting", "investigating", "done", "failed"
@@ -31,7 +31,7 @@ type RunResult struct {
 	Cost         float64
 }
 
-// Manager tracks tadpole runs and maps Slack threads to runs.
+// Manager tracks investigation runs and maps Slack threads to runs.
 type Manager struct {
 	mu          sync.RWMutex
 	db          *DB // nil for in-memory only (tests, CLI)
@@ -249,7 +249,7 @@ func (m *Manager) GetByThread(threadTS string) []*Run {
 	return runs
 }
 
-// Active returns all currently running tadpoles.
+// Active returns all currently running investigations.
 func (m *Manager) Active() []*Run {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

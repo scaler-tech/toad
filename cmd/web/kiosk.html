@@ -117,15 +117,6 @@
     overflow: hidden;
   }
 
-  /* ── Personality radar ── */
-  .personality-tile {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 16px 12px 8px;
-    border-bottom: 1px solid var(--border);
-  }
-
   /* Panels */
   .panel {
     display: flex;
@@ -298,42 +289,6 @@
     background: var(--green);
   }
 
-  /* ── Watch cards ── */
-  .watch-card {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 10px 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .watch-card:last-child { border-bottom: none; }
-  .watch-num {
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 16px;
-    font-weight: 600;
-    flex-shrink: 0;
-    width: 50px;
-  }
-  .watch-info { flex: 1; min-width: 0; }
-  .watch-branch {
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 13px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .watch-progress {
-    display: flex;
-    gap: 4px;
-    flex-shrink: 0;
-  }
-  .watch-pip {
-    width: 10px; height: 10px;
-    border-radius: 50%;
-    background: var(--border);
-  }
-  .watch-pip.filled { background: var(--green); }
-
   /* ── Section dividers ── */
   .section-sep {
     font-size: 10px;
@@ -383,9 +338,6 @@
 
 <div class="main">
   <div class="panel">
-    <div class="personality-tile" id="personality-tile" style="display:none">
-      <canvas id="personality-radar" width="280" height="280"></canvas>
-    </div>
     <div class="panel-head">
       <span class="panel-title" id="left-title">Active</span>
       <span class="panel-count" id="left-count"></span>
@@ -466,7 +418,6 @@ async function refresh() {
     const st = d.stats || {};
     const ms = d.merge_stats || {};
     const dc = d.digest_counts || {};
-    const prNoun = d.pr_noun || 'PR';
 
     // ── Status pill ──
     const pill = document.getElementById('status-pill');
@@ -521,11 +472,6 @@ async function refresh() {
     if (dm.digest_enabled) {
       const mode = dm.digest_dry_run ? (dm.digest_comment_mode ? 'comment' : 'dry-run') : 'live';
       tiles.push({val: dm.digest_opportunities || 0, label: 'Opportunities', sub: dm.digest_processed + ' processed (' + mode + ')', cls: dm.digest_opportunities > 0 ? 'c-amber' : 'c-dim'});
-    }
-    // Watches
-    const watches = d.watches || [];
-    if (watches.length > 0) {
-      tiles.push({val: watches.length, label: prNoun + ' Watches', cls: 'c-blue'});
     }
     // Ribbits
     tiles.push({val: dm.ribbits || 0, label: 'Ribbits', sub: (st.ThreadCount || 0) + ' threads', cls: dm.ribbits > 0 ? 'c-green' : 'c-dim'});
@@ -603,7 +549,7 @@ async function refresh() {
     if (!lhtml) lhtml = '<div class="empty-msg">No runs yet</div>';
     lbody.innerHTML = lhtml;
 
-    // ── Right panel: Opportunities + Watches ──
+    // ── Right panel: Opportunities ──
     const opps = d.opportunities || [];
     const rbody = document.getElementById('right-body');
     const rtitle = document.getElementById('right-title');
@@ -643,30 +589,8 @@ async function refresh() {
       }
     }
 
-    // Watches
-    if (watches.length > 0) {
-      if (opps.length > 0) {
-        rhtml += '<div class="section-sep">' + prNoun + ' Watches</div>';
-      } else {
-        rtitle.textContent = prNoun + ' Watches';
-        rcount.textContent = watches.length + ' watching';
-      }
-      for (const w of watches) {
-        let pips = '';
-        const max = 3;
-        for (let i = 0; i < max; i++) {
-          pips += '<span class="watch-pip' + (i < w.fix_count ? ' filled' : '') + '"></span>';
-        }
-        rhtml += '<div class="watch-card">'
-          + '<span class="watch-num">#' + w.pr_number + '</span>'
-          + '<div class="watch-info"><div class="watch-branch">' + esc(w.branch) + '</div></div>'
-          + '<span class="watch-progress">' + pips + '</span>'
-          + '</div>';
-      }
-    }
-
     if (!rhtml) {
-      rhtml = '<div class="empty-msg">No opportunities or watches</div>';
+      rhtml = '<div class="empty-msg">No opportunities</div>';
       rtitle.textContent = 'Opportunities';
       rcount.textContent = '';
     }
@@ -680,87 +604,6 @@ async function refresh() {
 
 refresh();
 setInterval(refresh, 3000);
-
-// ── Personality radar ──
-let pChart = null;
-const traitLabels = [
-  'thoroughness','context_hunger','confidence_threshold','pattern_recognition',
-  'risk_tolerance','scope_appetite','test_affinity','creativity','retry_persistence',
-  'strictness','pattern_conformity','documentation_drive','speed_vs_polish',
-  'verbosity','explanation_depth','notification_eagerness','defensiveness','tone',
-  'autonomy','collaboration','initiative','scope_sensitivity'
-];
-const shortLabels = [
-  'Thorough','Context','Confidence','Patterns',
-  'Risk','Scope','Tests','Creative','Retry',
-  'Strict','Conform','Docs','Polish',
-  'Verbose','Explain','Notify','Defend','Tone',
-  'Autonomy','Collab','Initiative','Scope Sens'
-];
-
-async function loadPersonality() {
-  try {
-    const resp = await fetch('/api/personality');
-    if (!resp.ok) return;
-    const d = await resp.json();
-    const eff = d.effective;
-    if (!eff) return;
-
-    document.getElementById('personality-tile').style.display = '';
-    const base = d.base;
-    const values = traitLabels.map(k => eff[k] || 0);
-    const baseValues = base ? traitLabels.map(k => base[k] || 0) : values;
-
-    if (pChart) {
-      pChart.data.datasets[0].data = values;
-      pChart.data.datasets[1].data = baseValues;
-      pChart.update('none');
-      return;
-    }
-
-    const ctx = document.getElementById('personality-radar').getContext('2d');
-    pChart = new Chart(ctx, {
-      type: 'radar',
-      data: {
-        labels: shortLabels,
-        datasets: [{
-          data: values,
-          backgroundColor: 'rgba(88,166,255,0.15)',
-          borderColor: 'rgba(88,166,255,0.7)',
-          borderWidth: 1.5,
-          pointRadius: 1,
-          pointBackgroundColor: 'rgba(88,166,255,0.9)',
-        }, {
-          data: baseValues,
-          backgroundColor: 'rgba(163,113,247,0.08)',
-          borderColor: 'rgba(163,113,247,0.4)',
-          borderWidth: 1,
-          pointRadius: 0,
-          borderDash: [3, 3],
-        }]
-      },
-      options: {
-        responsive: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          r: {
-            min: 0, max: 1,
-            ticks: { display: false, stepSize: 0.25 },
-            grid: { color: 'rgba(48,54,61,0.5)' },
-            angleLines: { color: 'rgba(48,54,61,0.3)' },
-            pointLabels: {
-              color: '#7d8590',
-              font: { size: 8 }
-            }
-          }
-        }
-      }
-    });
-  } catch {}
-}
-
-loadPersonality();
-setInterval(loadPersonality, 30000);
 </script>
 </body>
 </html>

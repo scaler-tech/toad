@@ -458,6 +458,36 @@ agent:
 	}
 }
 
+// TestYAMLOverlay_LegacyPersonalitySectionIgnored verifies that old v1 config
+// files containing a `personality:` section (now removed from Config) still
+// load without error — yaml.v3 silently ignores unknown keys during
+// unmarshal, so this is a backward-compat guarantee for operators upgrading
+// from v1 without editing their .toad.yaml.
+func TestYAMLOverlay_LegacyPersonalitySectionIgnored(t *testing.T) {
+	yamlContent := `
+slack:
+  app_token: xapp-test
+  bot_token: xoxb-test
+personality:
+  enabled: true
+  learning_enabled: true
+  file_path: /home/user/.toad/personality.yaml
+`
+	dir := t.TempDir()
+	yamlPath := dir + "/test.yaml"
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write test YAML: %v", err)
+	}
+
+	cfg := defaults()
+	if err := loadFile(cfg, yamlPath); err != nil {
+		t.Fatalf("expected legacy personality section to be silently ignored, got error: %v", err)
+	}
+	if cfg.Slack.AppToken != "xapp-test" {
+		t.Errorf("expected slack.app_token to still load, got %q", cfg.Slack.AppToken)
+	}
+}
+
 func TestDefaults_TicketConfig(t *testing.T) {
 	cfg := defaults()
 

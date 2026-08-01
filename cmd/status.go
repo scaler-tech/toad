@@ -122,7 +122,6 @@ type apiResponse struct {
 	MergeStats         *apiMergeStats      `json:"merge_stats,omitempty"`
 	Active             []apiRun            `json:"active"`
 	History            []apiRun            `json:"history"`
-	Watches            []apiWatch          `json:"watches"`
 	Opportunities      []apiOpportunity    `json:"opportunities"`
 	DigestCounts       *state.DigestCounts `json:"digest_counts,omitempty"`
 	OutcomeCounts      map[string]int      `json:"outcome_counts,omitempty"`
@@ -206,13 +205,6 @@ type apiRun struct {
 	Error        string  `json:"error,omitempty"`
 }
 
-type apiWatch struct {
-	PRNumber int    `json:"pr_number"`
-	PRURL    string `json:"pr_url"`
-	Branch   string `json:"branch"`
-	FixCount int    `json:"fix_count"`
-}
-
 type apiConfigRepo struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
@@ -276,12 +268,6 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 		}
 
 		historyRuns, err := db.History(20)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-
-		watches, err := db.OpenPRWatches(100, 100)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -404,22 +390,6 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 		}
 		integrations = append(integrations, mcpInt)
 
-		// VCS Reviewer
-		reviewerInt := apiIntegration{Name: resp.PRNoun + " Reviewer"}
-		if daemon.Running {
-			reviewerInt.Status = pillEnabled
-			watchCount := len(watches)
-			if watchCount > 0 {
-				reviewerInt.Detail = fmt.Sprintf("Active (%d watching)", watchCount)
-			} else {
-				reviewerInt.Detail = "Active"
-			}
-		} else {
-			reviewerInt.Status = pillDisabled
-			reviewerInt.Detail = "Inactive"
-		}
-		integrations = append(integrations, reviewerInt)
-
 		resp.Integrations = integrations
 
 		for _, r := range activeRuns {
@@ -449,15 +419,6 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 				hr.Error = r.Result.Error
 			}
 			resp.History = append(resp.History, hr)
-		}
-
-		for _, pw := range watches {
-			resp.Watches = append(resp.Watches, apiWatch{
-				PRNumber: pw.PRNumber,
-				PRURL:    pw.PRURL,
-				Branch:   pw.Branch,
-				FixCount: pw.FixCount,
-			})
 		}
 
 		for _, o := range opportunities {
