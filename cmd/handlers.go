@@ -7,28 +7,23 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/digest"
 	"github.com/scaler-tech/toad/internal/issuetracker"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
-	"github.com/scaler-tech/toad/internal/tadpole"
 	"github.com/scaler-tech/toad/internal/triage"
 )
 
 func handleMessage(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
-	cfg *config.Config,
-	agentProvider agent.Provider,
 	triageEngine *triage.Engine,
 	ribbitEngine *ribbit.Engine,
 	slackClient *islack.Client,
 	stateManager *state.Manager,
 	ribbitSem chan struct{},
-	tadpolePool *tadpole.Pool,
 	digestEngine *digest.Engine,
 	tracker issuetracker.Tracker,
 	resolver *config.Resolver,
@@ -37,12 +32,16 @@ func handleMessage(
 	// Resolve channel name for context
 	channelName := slackClient.ResolveChannelName(msg.Channel)
 
-	// TADPOLE REQUEST: :frog: reaction on a toad reply
-	// Must be checked BEFORE the bot filter — tadpole requests are reactions on
+	// TICKET REQUEST: :frog: reaction on a toad reply
+	// Must be checked BEFORE the bot filter — ticket requests are reactions on
 	// toad's own (bot) messages, so the fetched message will have IsBot=true.
+	// NOTE: the field is still named IsTadpoleRequest here — Task 10 renames it
+	// (and the Slack-side action/copy) to IsTicketRequest atomically with the
+	// TicketBlocks rename; renaming just the cmd/ side now would desync from
+	// internal/slack ahead of that task.
 	if msg.IsTadpoleRequest {
-		slog.Info("handler: tadpole requested", "channel", channelName, "thread", msg.ThreadTS())
-		handleTadpoleRequest(ctx, msg, triageEngine, slackClient, stateManager, tadpolePool, channelName, tracker, resolver, repoPaths)
+		slog.Info("handler: ticket requested", "channel", channelName, "thread", msg.ThreadTS())
+		handleTicketRequest(ctx, msg, slackClient)
 		return
 	}
 
@@ -58,7 +57,7 @@ func handleMessage(
 			return
 		}
 
-		handleTriggered(ctx, msg, cfg, agentProvider, triageEngine, ribbitEngine, slackClient, stateManager, tadpolePool, channelName, tracker, resolver, repoPaths)
+		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, channelName, tracker, resolver, repoPaths)
 		return
 	}
 
@@ -103,13 +102,10 @@ func handleMessage(
 func handleTriggered(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
-	cfg *config.Config,
-	agentProvider agent.Provider,
 	triageEngine *triage.Engine,
 	ribbitEngine *ribbit.Engine,
 	slackClient *islack.Client,
 	stateManager *state.Manager,
-	tadpolePool *tadpole.Pool,
 	channelName string,
 	tracker issuetracker.Tracker,
 	resolver *config.Resolver,
@@ -161,57 +157,7 @@ func handleTriggered(
 	// into full issue descriptions so triage and ribbit have real context.
 	msg.ThreadContext = enrichWithIssueDetails(ctx, tracker, msg.Text, msg.ThreadContext)
 
-	// Retry detection: if user says "try again" / "retry" in a thread with a previous
-	// toad failure, skip triage and re-spawn directly.
-	if isRetryIntent(msg.Text) && hasFailedTadpole(msg.ThreadContext) {
-		slog.Info("retry intent detected", "channel", channelName, "thread", threadTS)
-
-		if !stateManager.Claim(threadTS) {
-			slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
-			return
-		}
-		claimed := true
-		defer func() {
-			if claimed {
-				stateManager.Unclaim(threadTS)
-			}
-		}()
-
-		taskDescription := buildTaskDescription(msg.Text, msg.ThreadContext)
-		repo := resolver.Resolve("", nil)
-		if repo == nil {
-			slackClient.ClearStatus(msg.Channel, threadTS)
-			slackClient.ReplyInThread(msg.Channel, threadTS,
-				":frog: I'm not sure which repo this is about — could you mention a file or project name?")
-			return
-		}
-
-		task := tadpole.Task{
-			Description:   taskDescription,
-			Summary:       "retry: " + truncate(taskDescription, 60),
-			Category:      "bug",
-			EstSize:       "small",
-			SlackChannel:  msg.Channel,
-			SlackThreadTS: threadTS,
-			Repo:          repo,
-			RepoPaths:     repoPaths,
-		}
-
-		slackClient.SetStatus(msg.Channel, threadTS, "Spawning tadpole...")
-
-		if err := tadpolePool.Spawn(ctx, task); err != nil {
-			slog.Error("retry spawn failed", "error", err)
-			slackClient.ClearStatus(msg.Channel, threadTS)
-			slackClient.React(msg.Channel, msg.Timestamp, "warning")
-			slackClient.ReplyInThread(msg.Channel, threadTS,
-				":x: Failed to spawn tadpole: "+err.Error())
-			return
-		}
-		claimed = false
-		return
-	}
-
-	// Triage — fast Haiku classification (~1s) to decide: ribbit or tadpole?
+	// Triage — fast Haiku classification (~1s) to decide category for ribbit.
 	result, err := triageEngine.Classify(ctx, msg, channelName)
 	if err != nil {
 		slog.Warn("triage failed, proceeding with defaults", "error", err)
@@ -249,121 +195,6 @@ func handleTriggered(
 		daemonCounters.triageQuestion.Add(1)
 	default:
 		daemonCounters.triageOther.Add(1)
-	}
-
-	// INVESTIGATE + SPAWN: bugs and features go through an investigation gate before spawning.
-	// Sonnet verifies the request is a real code change with enough context. If not, we fall
-	// through to ribbit — the user gets a helpful reply instead of a wasted PR.
-	if (result.Category == "bug" || result.Category == "feature") && result.Confidence >= 0.5 {
-		slog.Info("investigating before spawn", "summary", result.Summary, "category", result.Category)
-
-		taskText := buildTaskDescription(msg.Text, msg.ThreadContext)
-
-		slackClient.SetStatus(msg.Channel, threadTS, "Investigating the codebase...")
-
-		investigation, err := investigateTriggered(ctx, cfg, agentProvider, result, taskText, channelName, resolver)
-		if err != nil {
-			slog.Warn("triggered investigation failed, falling through to ribbit",
-				"error", err, "summary", result.Summary)
-			// Fall through to ribbit below
-		} else if !investigation.Feasible {
-			slog.Info("investigation says not feasible, falling through to ribbit",
-				"reasoning", investigation.Reasoning, "summary", result.Summary)
-			// Fall through to ribbit below
-		} else {
-			slog.Info("investigation approved, spawning tadpole",
-				"summary", result.Summary, "reasoning", investigation.Reasoning)
-
-			if !stateManager.Claim(threadTS) {
-				slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
-				return
-			}
-			claimed := true
-			defer func() {
-				if claimed {
-					stateManager.Unclaim(threadTS)
-				}
-			}()
-
-			// Use the refined task_spec from investigation — more precise than raw message
-			taskDescription := investigation.TaskSpec
-
-			issueRef := tracker.ExtractIssueRef(taskDescription)
-			if issueRef == nil {
-				issueRef = tracker.ExtractIssueRef(msg.Text)
-			}
-			if issueRef == nil && tracker.ShouldCreateIssues() {
-				ref, err := tracker.CreateIssue(ctx, issuetracker.CreateIssueOpts{
-					Title:       result.Summary,
-					Description: taskDescription,
-					Category:    result.Category,
-				})
-				if err != nil {
-					slog.Warn("failed to create issue", "error", err, "summary", result.Summary)
-				} else {
-					issueRef = ref
-				}
-			}
-
-			// Ticket assignee gate: if the ticket is actively assigned,
-			// post findings to the ticket instead of spawning a tadpole.
-			if cfg.IssueTracker.RespectAssignees && issueRef != nil {
-				permalink, _ := slackClient.GetPermalink(msg.Channel, threadTS)
-				gate := issuetracker.CheckAssigneeGate(ctx, tracker, issuetracker.GateOpts{
-					IssueRef:       issueRef,
-					StaleDays:      cfg.IssueTracker.StaleDays,
-					Findings:       taskDescription + "\n\n**Reasoning:** " + investigation.Reasoning,
-					SlackPermalink: permalink,
-				})
-				if gate.Gated {
-					slackClient.ClearStatus(msg.Channel, threadTS)
-					if gate.Done {
-						slog.Info("ticket is done, skipping silently",
-							"issue", issueRef.ID, "state", gate.Status.State)
-					} else {
-						slackClient.ReplyInThread(msg.Channel, threadTS,
-							fmt.Sprintf(":clipboard: %s is assigned to %s — I posted my findings as a comment on the ticket. "+
-								"Say `@toad fix this` if you'd like me to open a PR anyway.",
-								issueRef.ID, gate.Status.AssigneeName))
-					}
-					return
-				}
-			}
-
-			repo := resolver.Resolve(result.Repo, result.FilesHint)
-			if repo == nil {
-				slackClient.ClearStatus(msg.Channel, threadTS)
-				slackClient.ReplyInThread(msg.Channel, threadTS,
-					":frog: I'm not sure which repo this is about — could you mention a file or project name?")
-				return
-			}
-
-			task := tadpole.Task{
-				Description:   taskDescription,
-				Summary:       result.Summary,
-				Category:      result.Category,
-				EstSize:       result.EstSize,
-				SlackChannel:  msg.Channel,
-				SlackThreadTS: threadTS,
-				TriageResult:  result,
-				IssueRef:      issueRef,
-				Repo:          repo,
-				RepoPaths:     repoPaths,
-			}
-
-			slackClient.SetStatus(msg.Channel, threadTS, "Spawning tadpole...")
-
-			if err := tadpolePool.Spawn(ctx, task); err != nil {
-				slog.Error("auto-spawn failed", "error", err)
-				slackClient.ClearStatus(msg.Channel, threadTS)
-				slackClient.React(msg.Channel, msg.Timestamp, "warning")
-				slackClient.ReplyInThread(msg.Channel, threadTS,
-					":x: Failed to spawn tadpole: "+err.Error())
-				return
-			}
-			claimed = false
-			return
-		}
 	}
 
 	// Resolve repo for ribbit
@@ -469,120 +300,10 @@ func handlePassive(
 	}
 }
 
-func handleTadpoleRequest(
-	ctx context.Context,
-	msg *islack.IncomingMessage,
-	triageEngine *triage.Engine,
-	slackClient *islack.Client,
-	stateManager *state.Manager,
-	tadpolePool *tadpole.Pool,
-	channelName string,
-	tracker issuetracker.Tracker,
-	resolver *config.Resolver,
-	repoPaths map[string]string,
-) {
-	threadTS := msg.ThreadTS()
-	slackClient.SetStatus(msg.Channel, threadTS, "Triaging message...")
-
-	// Atomically claim this thread — prevents duplicate tadpoles from racing
-	// between the check and the eventual Track call inside Execute.
-	if !stateManager.Claim(threadTS) {
-		slackClient.ReplyInThread(msg.Channel, threadTS,
-			":frog: Already working on this thread")
-		return
-	}
-	// Unclaim on error so the thread can be retried
-	claimed := true
-	defer func() {
-		if claimed {
-			stateManager.Unclaim(threadTS)
-		}
-	}()
-
-	// Fetch thread context to understand the full conversation
-	threadMsgs, err := slackClient.FetchThreadMessages(msg.Channel, threadTS)
-	if err != nil {
-		slog.Warn("failed to fetch thread context for tadpole, retrying", "error", err)
-		time.Sleep(1 * time.Second)
-		threadMsgs, err = slackClient.FetchThreadMessages(msg.Channel, threadTS)
-	}
-	if err != nil {
-		slog.Warn("failed to fetch thread context for tadpole after retry", "error", err)
-		slackClient.ClearStatus(msg.Channel, threadTS)
-		slackClient.ReplyInThread(msg.Channel, threadTS,
-			":x: Couldn't fetch thread context")
-		return
-	}
-
-	// Use the incoming message text as the primary context. For CTA button clicks
-	// this is the investigation finding (not the thread root), so the tadpole knows
-	// exactly what to fix.
-	threadText := msg.Text
-	if threadText == "" && len(threadMsgs) > 0 {
-		threadText = threadMsgs[0]
-	}
-
-	// Enrich thread context by resolving any Linear ticket URLs/references
-	threadMsgs = enrichWithIssueDetails(ctx, tracker, threadText, threadMsgs)
-
-	triageMsg := &islack.IncomingMessage{
-		Text:          threadText,
-		Channel:       msg.Channel,
-		ThreadContext: threadMsgs,
-	}
-
-	triageResult, err := triageEngine.Classify(ctx, triageMsg, channelName)
-	if err != nil {
-		slog.Warn("tadpole triage failed, using defaults", "error", err)
-		triageResult = &triage.Result{
-			Actionable: true,
-			Category:   "bug",
-			Summary:    threadText,
-			EstSize:    "small",
-		}
-	}
-
-	// Detect issue tracker reference (no creation for explicit requests)
-	taskDesc := buildTaskDescription(threadText, threadMsgs)
-	issueRef := tracker.ExtractIssueRef(taskDesc)
-
-	// Resolve repo from triage
-	repo := resolver.Resolve(triageResult.Repo, triageResult.FilesHint)
-	if repo == nil {
-		slackClient.ClearStatus(msg.Channel, threadTS)
-		slackClient.ReplyInThread(msg.Channel, threadTS,
-			":frog: I'm not sure which repo this is about — could you mention a file or project name?")
-		return
-	}
-
-	task := tadpole.Task{
-		Description:   taskDesc,
-		Summary:       triageResult.Summary,
-		Category:      triageResult.Category,
-		EstSize:       triageResult.EstSize,
-		SlackChannel:  msg.Channel,
-		SlackThreadTS: threadTS,
-		TriageResult:  triageResult,
-		IssueRef:      issueRef,
-		Repo:          repo,
-		RepoPaths:     repoPaths,
-	}
-
-	slog.Info("spawning tadpole",
-		"summary", task.Summary,
-		"category", task.Category,
-		"channel", channelName,
-	)
-	slackClient.SetStatus(msg.Channel, threadTS, "Spawning tadpole...")
-
-	if err := tadpolePool.Spawn(ctx, task); err != nil {
-		slog.Error("failed to spawn tadpole", "error", err)
-		slackClient.ClearStatus(msg.Channel, threadTS)
-		slackClient.ReplyInThread(msg.Channel, threadTS,
-			":x: Failed to spawn tadpole: "+err.Error())
-		return
-	}
-	// Spawn succeeded — Execute will call Track, which overwrites the placeholder.
-	// Don't unclaim on defer.
-	claimed = false
+// handleTicketRequest is a stub for the :ticket: reaction / CTA button flow.
+// TODO(task-13): replace with the real ticket-filing flow once internal/ticket
+// lands — this currently just acknowledges the request so the reaction path
+// compiles and gives the user a clear "not yet" message instead of silence.
+func handleTicketRequest(_ context.Context, msg *islack.IncomingMessage, slackClient *islack.Client) {
+	slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(), ":ticket: Ticket flow lands in phase 4.")
 }

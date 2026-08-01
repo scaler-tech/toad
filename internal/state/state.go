@@ -10,7 +10,7 @@ import (
 // Run represents an active or completed tadpole run.
 type Run struct {
 	ID            string
-	Status        string // "starting", "running", "validating", "shipping", "done", "failed"
+	Status        string // "starting", "investigating", "done", "failed"
 	SlackChannel  string
 	SlackThreadTS string
 	Branch        string

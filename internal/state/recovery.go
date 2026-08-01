@@ -2,26 +2,22 @@ package state
 
 import (
 	"log/slog"
-	"os"
-	"path/filepath"
-
-	"github.com/scaler-tech/toad/internal/toadpath"
 )
 
 // RecoverResult summarizes what was cleaned up on startup.
 type RecoverResult struct {
 	StaleRuns           int
-	OrphanWorktrees     int
 	StaleInvestigations int
 	StaleOpportunities  []*DigestOpportunity
 }
 
-// RecoverOnStartup finds runs left in active states from a previous crash,
-// marks them failed, and cleans up any orphaned worktrees.
+// RecoverOnStartup finds runs left in active states from a previous crash and
+// marks them failed, and finds any investigations stuck mid-flight so callers
+// can resume them.
 func RecoverOnStartup(db *DB) (*RecoverResult, error) {
 	result := &RecoverResult{}
 
-	// 1. Find active runs (starting/running/validating/shipping) and mark them failed
+	// 1. Find active runs (starting/investigating) and mark them failed
 	active, err := db.ActiveRuns()
 	if err != nil {
 		return nil, err
@@ -32,7 +28,6 @@ func RecoverOnStartup(db *DB) (*RecoverResult, error) {
 			"id", run.ID,
 			"status", run.Status,
 			"branch", run.Branch,
-			"worktree", run.WorktreePath,
 		)
 
 		if err := db.CompleteRun(run.ID, &RunResult{
@@ -43,45 +38,9 @@ func RecoverOnStartup(db *DB) (*RecoverResult, error) {
 			continue
 		}
 		result.StaleRuns++
-
-		// Clean up the worktree if it still exists
-		if run.WorktreePath != "" {
-			removeWorktreeDir(run.WorktreePath)
-		}
 	}
 
-	// 2. Scan for orphaned worktree directories not tracked in the DB
-	home, err := toadpath.Home()
-	if err != nil {
-		slog.Warn("cannot check for orphan worktrees", "error", err)
-		return result, nil
-	}
-
-	wtDir := filepath.Join(home, "worktrees")
-	entries, err := os.ReadDir(wtDir)
-	if err != nil {
-		// No worktrees dir is fine — nothing to clean
-		if os.IsNotExist(err) {
-			return result, nil
-		}
-		slog.Warn("cannot read worktrees directory", "error", err)
-		return result, nil
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		wtPath := filepath.Join(wtDir, entry.Name())
-		if db.HasWorktree(wtPath) {
-			continue // tracked by an active run (shouldn't happen after step 1, but be safe)
-		}
-		slog.Warn("removing orphaned worktree", "path", wtPath)
-		removeWorktreeDir(wtPath)
-		result.OrphanWorktrees++
-	}
-
-	// 3. Find stuck investigations (rows stay in DB until resume completes)
+	// 2. Find stuck investigations (rows stay in DB until resume completes)
 	staleOpps, err := db.StaleInvestigations()
 	if err != nil {
 		slog.Warn("failed to query stale investigations", "error", err)
@@ -90,19 +49,12 @@ func RecoverOnStartup(db *DB) (*RecoverResult, error) {
 		result.StaleOpportunities = staleOpps
 	}
 
-	if result.StaleRuns > 0 || result.OrphanWorktrees > 0 || result.StaleInvestigations > 0 {
+	if result.StaleRuns > 0 || result.StaleInvestigations > 0 {
 		slog.Info("recovery complete",
 			"stale_runs", result.StaleRuns,
-			"orphan_worktrees", result.OrphanWorktrees,
 			"stale_investigations", result.StaleInvestigations,
 		)
 	}
 
 	return result, nil
-}
-
-func removeWorktreeDir(path string) {
-	if err := os.RemoveAll(path); err != nil {
-		slog.Warn("failed to remove worktree directory", "path", path, "error", err)
-	}
 }

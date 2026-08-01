@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,17 +19,14 @@ import (
 	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/digest"
+	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/issuetracker"
 	toadlog "github.com/scaler-tech/toad/internal/log"
 	toadmcp "github.com/scaler-tech/toad/internal/mcp"
-	"github.com/scaler-tech/toad/internal/personality"
 	"github.com/scaler-tech/toad/internal/preflight"
-	"github.com/scaler-tech/toad/internal/reviewer"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
-	"github.com/scaler-tech/toad/internal/tadpole"
-	"github.com/scaler-tech/toad/internal/toadpath"
 	"github.com/scaler-tech/toad/internal/triage"
 	"github.com/scaler-tech/toad/internal/tui"
 	"github.com/scaler-tech/toad/internal/update"
@@ -123,7 +119,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 	defer stateDB.Close()
 
-	// Recover any stale runs and orphaned worktrees from a previous crash
+	// Recover any stale runs from a previous crash
 	recovery, err := state.RecoverOnStartup(stateDB)
 	if err != nil {
 		slog.Warn("startup recovery failed", "error", err)
@@ -132,32 +128,6 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	stateManager, err := state.NewPersistentManager(stateDB, cfg.Limits.HistorySize)
 	if err != nil {
 		return fmt.Errorf("hydrating state: %w", err)
-	}
-
-	// Initialize personality manager
-	var personalityMgr *personality.Manager
-	if cfg.Personality.Enabled {
-		pfPath := cfg.Personality.FilePath
-		if pfPath == "" {
-			home, err := toadpath.Home()
-			if err != nil {
-				return fmt.Errorf("resolving toad home: %w", err)
-			}
-			pfPath = filepath.Join(home, "personality.yaml")
-		}
-		pf, err := personality.LoadFile(pfPath)
-		if err != nil {
-			return fmt.Errorf("loading personality: %w", err)
-		}
-		personalityMgr, err = personality.NewPersistentManager(stateDB, pf.Traits)
-		if err != nil {
-			return fmt.Errorf("initializing personality: %w", err)
-		}
-		personalityMgr.SetLearning(cfg.Personality.LearningEnabled)
-		slog.Info("personality loaded", "name", pf.Name, "learning", cfg.Personality.LearningEnabled)
-	} else {
-		personalityMgr = personality.NewManager(personality.DefaultTraits())
-		personalityMgr.SetLearning(false)
 	}
 
 	// Build repo profiles and resolver for multi-repo routing
@@ -171,47 +141,14 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 
 	ribbitEngine := ribbit.New(agentProvider, cfg, tracker)
 
-	// Separate concurrency pools: ribbits are fast (seconds), tadpoles are slow (minutes).
-	// Ribbit pool is generous so Q&A stays responsive even while tadpoles run.
+	// Separate concurrency pools: ribbits are fast (seconds), investigations are slow (minutes).
+	// Ribbit pool is generous so Q&A stays responsive even while investigations run.
 	ribbitSem := make(chan struct{}, cfg.Limits.MaxConcurrent*3)
-	tadpoleSem := make(chan struct{}, cfg.Limits.MaxConcurrent)
+	investigateSem := make(chan struct{}, cfg.Limits.MaxConcurrent) // consumed from task 15
+	_ = investigateSem                                              // placeholder until task 15 wires the investigate gate
 
 	// 7. Initialize Slack client
 	slackClient := islack.NewClient(cfg.Slack)
-
-	// Initialize tadpole runner and pool (with Slack client for status updates)
-	tadpoleRunner := tadpole.NewRunner(cfg, agentProvider, slackClient, stateManager, vcsResolver, personalityMgr)
-	tadpolePool := tadpole.NewPool(tadpoleSem, tadpoleRunner)
-
-	// 8. Initialize PR review watcher
-	prWatcher := reviewer.NewWatcher(stateDB, cfg.Repos.List, func(ctx context.Context, task tadpole.Task) error {
-		return tadpolePool.Spawn(ctx, task)
-	}, slackClient, agentProvider, cfg.Limits.MaxReviewRounds, cfg.Limits.MaxCIFixRounds, cfg.Triage.Model, vcsResolver, cfg.Limits.ReviewBots)
-
-	// Wire PR review tracking — after a successful ship, register the PR for review watching
-	tadpoleRunner.OnShip(func(prURL, branch, runID string, task tadpole.Task) {
-		repoPath := ""
-		if task.Repo != nil {
-			repoPath = task.Repo.Path
-		} else if len(cfg.Repos.List) > 0 {
-			repoPath = cfg.Repos.List[0].Path
-		}
-		prNum, err := vcsResolver(repoPath).ExtractPRNumber(prURL)
-		if err != nil {
-			slog.Warn("could not extract PR number for review tracking", "url", prURL, "error", err)
-			return
-		}
-		prWatcher.TrackPR(prNum, prURL, branch, runID, task.SlackChannel, task.SlackThreadTS, repoPath, task.Summary, task.Description)
-	})
-
-	// Wire personality outcome callback for PR terminal state signals
-	if cfg.Personality.Enabled {
-		prWatcher.OnPersonalityOutcome(func(signal personality.OutcomeSignal) {
-			if err := personalityMgr.ProcessOutcome(signal); err != nil {
-				slog.Warn("personality outcome processing failed", "error", err)
-			}
-		})
-	}
 
 	// Build path → name map for cross-repo prompts and path scrubbing
 	repoPaths := make(map[string]string, len(cfg.Repos.List))
@@ -250,8 +187,13 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		digestEngine = digest.New(&cfg.Digest, digest.EngineOpts{
 			AgentProvider: agentProvider,
 			TriageModel:   cfg.Triage.Model,
-			Spawn: func(ctx context.Context, task tadpole.Task) error {
-				return tadpolePool.Spawn(ctx, task)
+			Propose: func(ctx context.Context, f investigation.Findings, msg digest.Message) error {
+				// TODO(task-15): real ticket flow — Phase 4 replaces this with
+				// investigation.Engine.FileOrUpdate (or equivalent) once the ticket
+				// package lands. For now just log so digest's propose path is exercised.
+				slog.Info("digest propose stub invoked (no-op until phase 4)",
+					"title", f.Title, "channel", msg.Channel, "thread_ts", msg.ThreadTS)
+				return nil
 			},
 			Notify: func(channel, threadTS, text string) {
 				slackClient.ReplyInThread(channel, threadTS, text)
@@ -351,8 +293,13 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 					}
 				}
 			},
-			Investigate: func(ctx context.Context, opp digest.Opportunity, msg digest.Message, tickets []digest.TicketContext) (*digest.InvestigateResult, error) {
-				return investigateOpportunity(ctx, cfg, agentProvider, opp, msg, resolver, tickets)
+			Investigate: func(ctx context.Context, opp digest.Opportunity, msg digest.Message, tickets []digest.TicketContext) (*investigation.Findings, error) {
+				// TODO(task-9/15): real investigation flow. cmd/investigation.go (the
+				// v1 Sonnet-driven investigate prompt) was deleted in Task 6 along with
+				// tadpole/reviewer/personality — digest is config-disabled in production
+				// (dry_run: true) and its tests use mocks, so this stub is acceptable
+				// until Phase 3 wires the real investigate path.
+				return nil, fmt.Errorf("investigation offline until phase 3")
 			},
 			React: func(channel, timestamp, emoji string) {
 				slackClient.React(channel, timestamp, emoji)
@@ -369,7 +316,6 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			},
 			RespectAssignees: cfg.IssueTracker.RespectAssignees,
 			StaleDays:        cfg.IssueTracker.StaleDays,
-			Personality:      personalityMgr,
 		})
 	}
 
@@ -379,24 +325,9 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		messageWg.Add(1)
 		go func() {
 			defer messageWg.Done()
-			handleMessage(ctx, msg, cfg, agentProvider, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, tadpolePool, digestEngine, tracker, resolver, repoPaths)
+			handleMessage(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, digestEngine, tracker, resolver, repoPaths)
 		}()
 	})
-
-	if cfg.Personality.Enabled && personalityMgr.LearningEnabled() {
-		personalityMgr.SetInterpreter(personality.NewInterpreter(agentProvider))
-		slackClient.OnPersonalityReaction(func(ctx context.Context, emoji, channel, ts string) {
-			if err := personalityMgr.ProcessEmoji(emoji, fmt.Sprintf("channel:%s ts:%s", channel, ts)); err != nil {
-				slog.Debug("personality emoji feedback failed", "emoji", emoji, "error", err)
-			}
-		})
-		slackClient.OnPersonalityText(func(ctx context.Context, text, channel, threadTS string) {
-			threadKey := fmt.Sprintf("channel:%s ts:%s", channel, threadTS)
-			if err := personalityMgr.ProcessText(ctx, text, threadKey); err != nil {
-				slog.Debug("personality text processing failed", "error", err)
-			}
-		})
-	}
 
 	// 11. Handle graceful shutdown (SIGINT/SIGTERM exit, SIGUSR1 restart)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -435,18 +366,10 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
-	// Start PR review watcher
-	go prWatcher.Run(ctx)
-
 	// Start periodic repo sync if enabled
 	if cfg.Repos.SyncMinutes > 0 {
 		interval := time.Duration(cfg.Repos.SyncMinutes) * time.Minute
 		go syncRepos(ctx, cfg.Repos.List, interval)
-	}
-
-	// Start worktree TTL cleanup if configured
-	if cfg.Limits.WorktreeTTLHours > 0 {
-		go tadpole.CleanupStaleWorktrees(ctx, time.Duration(cfg.Limits.WorktreeTTLHours)*time.Hour)
 	}
 
 	// Start digest engine (Toad King) if enabled
@@ -477,18 +400,12 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// Pool shutdown goroutine — drains messages and waits for tadpoles
+	// Shutdown goroutine — drains in-flight message handlers before we close the DB.
 	poolDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down...")
 		messageWg.Wait()
-		grace := 30 * time.Second
-		if restartRequested.Load() {
-			grace = 30 * time.Minute
-			slog.Info("restart mode: waiting up to 30m for tadpoles to finish")
-		}
-		tadpolePool.Shutdown(grace)
 		close(poolDone)
 	}()
 

@@ -17,7 +17,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/scaler-tech/toad/internal/config"
-	"github.com/scaler-tech/toad/internal/personality"
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/toadpath"
 	"github.com/scaler-tech/toad/internal/update"
@@ -47,30 +46,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	defer db.Close()
 
 	cfg, _ := config.Load() // non-fatal
-
-	// Initialize personality manager for API endpoints
-	var personalityMgr *personality.Manager
-	if cfg != nil && cfg.Personality.Enabled {
-		pfPath := cfg.Personality.FilePath
-		if pfPath == "" {
-			home, herr := toadpath.Home()
-			if herr == nil {
-				pfPath = filepath.Join(home, "personality.yaml")
-			}
-		}
-		if pfPath != "" {
-			if pf, perr := personality.LoadFile(pfPath); perr == nil {
-				if mgr, merr := personality.NewPersistentManager(db, pf.Traits); merr == nil {
-					mgr.SetLearning(cfg.Personality.LearningEnabled)
-					personalityMgr = mgr
-				}
-			}
-		}
-	}
-	if personalityMgr == nil {
-		personalityMgr = personality.NewManager(personality.DefaultTraits())
-		personalityMgr.SetLearning(false)
-	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -111,59 +86,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/api/update", apiUpdateHandler())
 	mux.HandleFunc("/api/restart", apiRestartHandler(db))
 	mux.HandleFunc("/api/auto-update", apiAutoUpdateHandler(db))
-	mux.HandleFunc("/api/personality", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case "GET":
-			_ = personalityMgr.Reload() // re-read from DB (daemon writes via WAL)
-			eff := personalityMgr.Effective()
-			base := personalityMgr.Base()
-			recent, _ := personalityMgr.RecentAdjustments(20)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"effective":   eff,
-				"base":        base,
-				"adjustments": recent,
-				"learning":    personalityMgr.LearningEnabled(),
-			})
-		case "POST":
-			var req struct {
-				Trait string  `json:"trait"`
-				Value float64 `json:"value"`
-				Note  string  `json:"note"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				http.Error(w, "invalid request body", 400)
-				return
-			}
-			if req.Value < 0.0 || req.Value > 1.0 {
-				http.Error(w, "value must be between 0.0 and 1.0", 400)
-				return
-			}
-			if req.Trait == "" {
-				http.Error(w, "trait is required", 400)
-				return
-			}
-			if err := personalityMgr.ManualAdjust(req.Trait, req.Value, req.Note); err != nil {
-				http.Error(w, err.Error(), 400)
-				return
-			}
-			w.WriteHeader(200)
-		}
-	})
-	mux.HandleFunc("/api/personality/export", func(w http.ResponseWriter, r *http.Request) {
-		pf, err := personalityMgr.Export("exported", "Exported from dashboard")
-		if err != nil {
-			http.Error(w, "export failed", 500)
-			return
-		}
-		data, err := pf.Marshal()
-		if err != nil {
-			http.Error(w, "marshal failed", 500)
-			return
-		}
-		w.Header().Set("Content-Type", "application/x-yaml")
-		w.Header().Set("Content-Disposition", "attachment; filename=personality.yaml")
-		w.Write(data)
-	})
 	mux.HandleFunc("/api/dev/info", apiDevInfoHandler(cfg))
 	mux.HandleFunc("/api/dev/download-log", apiDevDownloadLogHandler(cfg))
 	mux.HandleFunc("/api/dev/download-db", apiDevDownloadDBHandler())

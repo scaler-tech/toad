@@ -65,36 +65,6 @@ func enrichWithIssueDetails(ctx context.Context, tracker issuetracker.Tracker, t
 	return append(threadContext, enriched...)
 }
 
-// isRetryIntent checks if a message text indicates the user wants to retry a previous attempt.
-func isRetryIntent(text string) bool {
-	lower := strings.ToLower(text)
-	retryPhrases := []string{
-		"try again",
-		"retry",
-		"redo",
-		"re-do",
-		"one more time",
-		"rerun",
-		"re-run",
-	}
-	for _, phrase := range retryPhrases {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-// hasFailedTadpole checks thread context for evidence of a previous toad failure.
-func hasFailedTadpole(threadContext []string) bool {
-	for _, msg := range threadContext {
-		if strings.Contains(msg, ":x: Tadpole failed") {
-			return true
-		}
-	}
-	return false
-}
-
 // truncate returns the first n runes of s, appending "..." if truncated.
 func truncate(s string, n int) string {
 	if n <= 3 {
@@ -107,62 +77,6 @@ func truncate(s string, n int) string {
 	return string(runes[:n-3]) + "..."
 }
 
-// stripCodeFences removes markdown code fences (```json ... ``` or ``` ... ```)
-// from text, returning the inner content. If no fences are found, returns the
-// original text unchanged.
-func stripCodeFences(text string) string {
-	// Find opening fence
-	fenceStart := strings.Index(text, "```")
-	if fenceStart < 0 {
-		return text
-	}
-	// Skip past the opening fence line (```json, ```, etc.)
-	inner := text[fenceStart+3:]
-	if nl := strings.Index(inner, "\n"); nl >= 0 {
-		inner = inner[nl+1:]
-	}
-	// Find closing fence
-	if fenceEnd := strings.Index(inner, "```"); fenceEnd >= 0 {
-		inner = inner[:fenceEnd]
-	}
-	return inner
-}
-
-// findMatchingBrace finds the index of the '}' that matches the '{' at pos,
-// accounting for nested braces and JSON strings.
-func findMatchingBrace(s string, pos int) int {
-	depth := 0
-	inString := false
-	escaped := false
-	for i := pos; i < len(s); i++ {
-		if escaped {
-			escaped = false
-			continue
-		}
-		ch := s[i]
-		if inString {
-			if ch == '\\' {
-				escaped = true
-			} else if ch == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch ch {
-		case '"':
-			inString = true
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return i
-			}
-		}
-	}
-	return -1
-}
-
 // syncRepos periodically fetches and fast-forward pulls all configured repos.
 // This keeps the local checkout fresh for ribbit (read-only Q&A) and digest
 // investigations, which operate on the working tree without fetching.
@@ -170,56 +84,66 @@ func syncRepos(ctx context.Context, repos []config.RepoConfig, interval time.Dur
 	slog.Info("repo sync started", "interval", interval, "repos", len(repos))
 
 	// Run immediately on startup, then on ticker.
-	syncAll(repos)
+	syncAll(ctx, repos)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			syncAll(repos)
+			syncAll(ctx, repos)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func syncAll(repos []config.RepoConfig) {
+func syncAll(ctx context.Context, repos []config.RepoConfig) {
 	for _, repo := range repos {
-		fetchCmd := exec.Command("git", "fetch", "origin")
-		fetchCmd.Dir = repo.Path
-		if out, err := fetchCmd.CombinedOutput(); err != nil {
-			slog.Warn("repo sync fetch failed", "repo", repo.Name, "error", err, "output", strings.TrimSpace(string(out)))
-			continue
+		if err := SyncRepoNow(ctx, repo); err != nil {
+			slog.Warn("repo sync failed", "repo", repo.Name, "error", err)
 		}
-
-		// Fast-forward pull if on the default branch (no-op if detached or on another branch).
-		// Falls back to hard reset when branches have diverged — these are toad's
-		// working copies with no local changes to preserve.
-		branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-		branchCmd.Dir = repo.Path
-		branchOut, err := branchCmd.Output()
-		if err != nil {
-			continue
-		}
-		currentBranch := strings.TrimSpace(string(branchOut))
-		if currentBranch == repo.DefaultBranch {
-			pullCmd := exec.Command("git", "pull", "--ff-only")
-			pullCmd.Dir = repo.Path
-			if _, err := pullCmd.CombinedOutput(); err != nil {
-				// Diverged branch — reset to match origin (no local work to lose).
-				resetCmd := exec.Command("git", "reset", "--hard", "origin/"+repo.DefaultBranch)
-				resetCmd.Dir = repo.Path
-				if out, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
-					slog.Warn("repo sync reset failed", "repo", repo.Name, "error", resetErr, "output", strings.TrimSpace(string(out)))
-				} else {
-					slog.Info("repo sync reset to origin", "repo", repo.Name, "branch", repo.DefaultBranch)
-				}
-			}
-		}
-
-		slog.Debug("repo synced", "repo", repo.Name, "branch", currentBranch)
 	}
+}
+
+// SyncRepoNow fetches and fast-forward pulls a single repo's working copy.
+// It is the single-repo primitive behind the periodic syncRepos loop above;
+// other callers (e.g. an on-demand investigation gate) can invoke it directly
+// to make sure a repo is current before reading from it.
+func SyncRepoNow(ctx context.Context, repo config.RepoConfig) error {
+	fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin")
+	fetchCmd.Dir = repo.Path
+	if out, err := fetchCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("fetch failed: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+
+	// Fast-forward pull if on the default branch (no-op if detached or on another branch).
+	// Falls back to hard reset when branches have diverged — these are toad's
+	// working copies with no local changes to preserve.
+	branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	branchCmd.Dir = repo.Path
+	branchOut, err := branchCmd.Output()
+	if err != nil {
+		// Detached HEAD or unreadable — nothing more we can safely do.
+		return nil
+	}
+	currentBranch := strings.TrimSpace(string(branchOut))
+	if currentBranch == repo.DefaultBranch {
+		pullCmd := exec.CommandContext(ctx, "git", "pull", "--ff-only")
+		pullCmd.Dir = repo.Path
+		if _, err := pullCmd.CombinedOutput(); err != nil {
+			// Diverged branch — reset to match origin (no local work to lose).
+			resetCmd := exec.CommandContext(ctx, "git", "reset", "--hard", "origin/"+repo.DefaultBranch)
+			resetCmd.Dir = repo.Path
+			if out, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
+				return fmt.Errorf("reset failed: %w (output: %s)", resetErr, strings.TrimSpace(string(out)))
+			}
+			slog.Info("repo sync reset to origin", "repo", repo.Name, "branch", repo.DefaultBranch)
+		}
+	}
+
+	slog.Debug("repo synced", "repo", repo.Name, "branch", currentBranch)
+	return nil
 }
 
 // buildVCSResolver constructs a VCS Resolver from config, merging per-repo
