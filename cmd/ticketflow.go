@@ -223,14 +223,14 @@ func fileOrProposeFromFindings(ctx context.Context, ticketEngine *ticket.Engine,
 	return decision, res, err
 }
 
-// composeTicketReply renders the Slack reply text for a ticket-engine
-// decision — shared by the triggered bug/feature flow and the CTA/escalation
-// flow so both produce identical wording for the same outcome.
-func composeTicketReply(decision ticket.Decision, findings investigation.Findings, fileResult *ticket.FileResult) string {
-	if decision != ticket.DecisionAutoFile {
-		return findings.Reasoning
-	}
-
+// composeFiledReply renders the Slack reply text for a successful
+// ticketEngine.FileOrUpdate call — shared by the triggered auto-file path
+// and the CTA/escalation direct-file path so both produce identical wording
+// for the same outcome. FileResult.AlreadyExisted distinguishes a brand new
+// filing from a re-observation of a ticket that already tracked this exact
+// problem — wording it as "Filed" in the latter case would be misleading
+// (review finding: this must say linked-existing, not "Filed").
+func composeFiledReply(findings investigation.Findings, fileResult *ticket.FileResult) string {
 	title := findings.Title
 	url := ""
 	if fileResult != nil && fileResult.Ref != nil {
@@ -241,6 +241,9 @@ func composeTicketReply(decision ticket.Decision, findings investigation.Finding
 	}
 	if title == "" {
 		title = "(untitled)"
+	}
+	if fileResult != nil && fileResult.AlreadyExisted {
+		return fmt.Sprintf(":ticket: Already tracked as %s — *%s*\n\n%s", url, title, findings.Reasoning)
 	}
 	return fmt.Sprintf(":ticket: Filed %s — *%s*\n\n%s", url, title, findings.Reasoning)
 }
@@ -355,13 +358,16 @@ func runTriggeredInvestigation(
 		}
 	}
 
-	kind := outcomeProposed
 	if decision == ticket.DecisionAutoFile {
-		kind = outcomeFiled
+		return triggeredOutcome{
+			Kind:      outcomeFiled,
+			ReplyText: composeFiledReply(*findings, fileResult),
+			Findings:  findings,
+		}
 	}
 	return triggeredOutcome{
-		Kind:      kind,
-		ReplyText: composeTicketReply(decision, *findings, fileResult),
+		Kind:      outcomeProposed,
+		ReplyText: findings.Reasoning,
 		Findings:  findings,
 	}
 }
@@ -398,19 +404,34 @@ const investigationReuseWindow = 24 * time.Hour
 // ticketRequestOutcome is what runTicketRequest decided — see triggeredOutcome's
 // doc comment for why this stays Slack-client-free.
 type ticketRequestOutcome struct {
-	Decision  ticket.Decision
+	// Conflict is true when the thread was already claimed (a concurrent
+	// escalation/CTA/investigation in flight) — the caller should reply
+	// with a conflict message and do nothing else; ReplyText/Err are unset.
+	Conflict  bool
 	ReplyText string
 	Err       error
 }
 
 // runTicketRequest is the shared core of the CTA (:frog: reaction / ticket
-// button) and triage-escalation entry points: reuse a recent investigation
-// for this thread if one exists, otherwise run a fresh one, then gate it
-// through the ticket engine. Unlike runTriggeredInvestigation this never
-// falls through to ribbit on an infeasible verdict — an infeasible finding
-// simply fails Decide's AutoFile conditions and gets proposed to a human
-// instead, which is the right outcome for an explicit "please file a
-// ticket" request.
+// button) and triage-escalation entry points: claim the thread, reuse a
+// recent investigation for it if one exists, otherwise run a fresh one, and
+// file it directly.
+//
+// This deliberately does NOT gate through ticketEngine.Decide — Decide is
+// the AUTO-file confidence/corroboration gate for *unattended* filing
+// (runTriggeredInvestigation); an explicit human request (a CTA click, or
+// triage's Escalate flag) already IS the sign-off. Routing this path through
+// Decide as well made the CTA button a permanent no-op for any non-Sentry-
+// corroborated or lower-confidence finding: Decide is pure over the same
+// reused Findings, so a click always re-produced DecisionPropose — the very
+// state the button was meant to resolve (review Critical finding). Calling
+// FileOrUpdate directly here — for both a fresh finding and a reused one —
+// is what actually files (or, if a ticket already exists for the derived
+// external key, re-observes) it.
+//
+// Claim/Unclaim bookkeeping mirrors runTriggeredInvestigation: a claim
+// conflict short-circuits before any work (Conflict: true, no investigation
+// run), and a successful claim is released via defer regardless of outcome.
 func runTicketRequest(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
@@ -424,6 +445,11 @@ func runTicketRequest(
 	channelName, threadTS string,
 	src ticket.Source,
 ) ticketRequestOutcome {
+	if !stateManager.Claim(threadTS) {
+		return ticketRequestOutcome{Conflict: true}
+	}
+	defer stateManager.Unclaim(threadTS)
+
 	db := stateManager.DB()
 
 	findings, recordID := reuseRecentInvestigation(db, threadTS)
@@ -464,22 +490,27 @@ func runTicketRequest(
 		saveInvestigationRecord(db, recordID, threadTS, msg.Channel, findings)
 	}
 
-	decision, fileResult, err := fileOrProposeFromFindings(ctx, ticketEngine, *findings, msg.Channel, threadTS, recordID, src)
+	fileResult, err := ticketEngine.FileOrUpdate(ctx, *findings, msg.Channel, threadTS, recordID, src)
 	if err != nil {
 		return ticketRequestOutcome{Err: fmt.Errorf("filing ticket: %w", err)}
 	}
-	return ticketRequestOutcome{
-		Decision:  decision,
-		ReplyText: composeTicketReply(decision, *findings, fileResult),
-	}
+	return ticketRequestOutcome{ReplyText: composeFiledReply(*findings, fileResult)}
 }
 
 // reuseRecentInvestigation returns a previously-saved investigation's
-// findings and ID when one exists for threadTS and is younger than
-// investigationReuseWindow. Returns nil, "" (never an error) on any miss —
-// a DB error, no saved investigation, an unparseable record, or one that's
-// gone stale all just mean "run a fresh investigation instead", logged for
-// visibility but never blocking the caller.
+// findings and ID when one exists for threadTS, is younger than
+// investigationReuseWindow, AND was feasible. Returns nil, "" (never an
+// error) on any miss — a DB error, no saved investigation, an unparseable
+// record, one that's gone stale, or one that was infeasible all just mean
+// "run a fresh investigation instead", logged for visibility but never
+// blocking the caller.
+//
+// The infeasible check matters: saveInvestigationRecord persists a finding
+// regardless of Feasible (runTriggeredInvestigation saves before checking
+// it, for audit visibility), so an infeasible record can be sitting in the
+// DB when a human clicks the CTA button afterward. Reusing it as-is would
+// file a ticket from a finding that explicitly said "no real fix found here"
+// — this forces a fresh investigation instead (review Critical finding).
 func reuseRecentInvestigation(db *state.DB, threadTS string) (*investigation.Findings, string) {
 	if db == nil {
 		return nil, ""
@@ -495,6 +526,10 @@ func reuseRecentInvestigation(db *state.DB, threadTS string) (*investigation.Fin
 	var f investigation.Findings
 	if err := json.Unmarshal([]byte(rec.FindingsJSON), &f); err != nil {
 		slog.Warn("failed to parse saved investigation, running a fresh one", "error", err, "thread", threadTS)
+		return nil, ""
+	}
+	if !f.Feasible {
+		slog.Debug("saved investigation was infeasible, running a fresh one instead", "thread", threadTS)
 		return nil, ""
 	}
 	return &f, rec.ID
@@ -526,33 +561,142 @@ func handleTicketRequest(
 	defer slackClient.ClearStatus(msg.Channel, threadTS)
 	slackClient.SetStatus(msg.Channel, threadTS, "Filing a ticket...")
 
-	// Reuse already-fetched thread context when the caller already has it
-	// (the escalation branch reuses msg from handleTriggered, which already
-	// populated and enriched ThreadContext); a bare CTA click has none yet.
-	if len(msg.ThreadContext) == 0 && msg.ThreadTimestamp != "" {
+	// Reuse already-fetched, already-enriched thread context when the caller
+	// already has it (the escalation branch reuses msg from handleTriggered,
+	// which already populated AND enriched ThreadContext via
+	// enrichWithIssueDetails) — the guard covers both the fetch and the
+	// enrich call, so a bare CTA click (no context yet) does both exactly
+	// once, and the escalation path does neither again (review minor: this
+	// guard previously covered only the fetch, so escalation threads got
+	// enriched twice).
+	if len(msg.ThreadContext) == 0 {
+		if msg.ThreadTimestamp != "" {
+			if tc, err := slackClient.FetchThreadMessages(msg.Channel, msg.ThreadTimestamp); err != nil {
+				slog.Warn("failed to fetch thread context for ticket request", "error", err, "thread", threadTS)
+			} else {
+				msg.ThreadContext = tc
+			}
+		}
+		msg.ThreadContext = enrichWithIssueDetails(ctx, tracker, msg.Text, msg.ThreadContext)
+	}
+
+	outcome := runTicketRequest(ctx, msg, result, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, threadTS, src)
+	if outcome.Conflict {
+		slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
+		return
+	}
+	if outcome.Err != nil {
+		slog.Error("ticket request failed", "error", outcome.Err, "thread", threadTS)
+		slackClient.ReplyInThread(msg.Channel, threadTS, ":x: Sorry, I couldn't file a ticket: "+outcome.Err.Error())
+		return
+	}
+	if _, err := slackClient.ReplyInThread(msg.Channel, threadTS, outcome.ReplyText); err != nil {
+		slog.Warn("ticket request reply failed", "error", err)
+	}
+}
+
+// runBotIntake is the pure decision core of the allowlisted-bot intake path
+// (controller ruling from Task 15's review: bot messages feed intake, never
+// conversation). It triages the message directly — no ribbitSem, no
+// "ask for clarification" reply, no ribbit fallback — and proceeds into the
+// same investigate-and-file flow as handleTriggered's bug/feature branch
+// (bounded by investigateSem as always) ONLY for an actionable bug/feature.
+// Everything else (question/other, non-actionable, low confidence, a claim
+// conflict, an infeasible/errored investigation) is silently dropped: this
+// returns nil and the caller posts no reply. Never touches ribbit or
+// *islack.Client, so the "drop a question" behavior is directly testable.
+func runBotIntake(
+	ctx context.Context,
+	msg *islack.IncomingMessage,
+	triageEngine *triage.Engine,
+	channelName string,
+	stateManager *state.Manager,
+	tracker issuetracker.Tracker,
+	resolver *config.Resolver,
+	investRunner *investigation.Runner,
+	ticketEngine *ticket.Engine,
+	investigateSem chan struct{},
+) *triggeredOutcome {
+	result, err := triageEngine.Classify(ctx, msg, channelName)
+	if err != nil {
+		slog.Debug("bot intake: triage failed, dropping", "error", err, "bot_id", msg.BotID)
+		return nil
+	}
+
+	daemonCounters.triages.Add(1)
+	switch result.Category {
+	case "bug":
+		daemonCounters.triageBug.Add(1)
+	case "feature":
+		daemonCounters.triageFeature.Add(1)
+	case "question":
+		daemonCounters.triageQuestion.Add(1)
+	default:
+		daemonCounters.triageOther.Add(1)
+	}
+
+	if !result.Actionable || result.Confidence < 0.5 || (result.Category != "bug" && result.Category != "feature") {
+		slog.Debug("bot intake: not an actionable bug/feature, dropping",
+			"actionable", result.Actionable, "category", result.Category, "confidence", result.Confidence, "bot_id", msg.BotID)
+		return nil
+	}
+
+	threadTS := msg.ThreadTS()
+	if !stateManager.Claim(threadTS) {
+		slog.Debug("bot intake: thread already claimed, dropping", "thread", threadTS, "bot_id", msg.BotID)
+		return nil
+	}
+
+	slog.Info("bot intake investigating", "summary", result.Summary, "category", result.Category, "bot_id", msg.BotID)
+	outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS,
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+
+	if outcome.Kind == outcomeFallThrough {
+		slog.Debug("bot intake: investigation fell through (infeasible or errored), dropping", "bot_id", msg.BotID)
+		return nil
+	}
+	return &outcome
+}
+
+// handleBotIntake is the thin Slack-touching wrapper around runBotIntake:
+// it fetches thread context (for investigation quality) and posts a reply
+// only when runBotIntake actually decided to file or propose a ticket.
+func handleBotIntake(
+	ctx context.Context,
+	msg *islack.IncomingMessage,
+	triageEngine *triage.Engine,
+	slackClient *islack.Client,
+	stateManager *state.Manager,
+	channelName string,
+	tracker issuetracker.Tracker,
+	resolver *config.Resolver,
+	investRunner *investigation.Runner,
+	ticketEngine *ticket.Engine,
+	investigateSem chan struct{},
+) {
+	if msg.ThreadTimestamp != "" {
 		if tc, err := slackClient.FetchThreadMessages(msg.Channel, msg.ThreadTimestamp); err != nil {
-			slog.Warn("failed to fetch thread context for ticket request", "error", err, "thread", threadTS)
+			slog.Debug("bot intake: failed to fetch thread context", "error", err)
 		} else {
 			msg.ThreadContext = tc
 		}
 	}
 	msg.ThreadContext = enrichWithIssueDetails(ctx, tracker, msg.Text, msg.ThreadContext)
 
-	outcome := runTicketRequest(ctx, msg, result, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, threadTS, src)
-	if outcome.Err != nil {
-		slog.Error("ticket request failed", "error", outcome.Err, "thread", threadTS)
-		slackClient.ReplyInThread(msg.Channel, threadTS, ":x: Sorry, I couldn't file a ticket: "+outcome.Err.Error())
+	outcome := runBotIntake(ctx, msg, triageEngine, channelName, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+	if outcome == nil {
 		return
 	}
 
-	if outcome.Decision == ticket.DecisionPropose {
+	threadTS := msg.ThreadTS()
+	if outcome.Kind == outcomeProposed {
 		blocks := islack.TicketBlocks(outcome.ReplyText, threadTS)
 		if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, threadTS, outcome.ReplyText, blocks); err != nil {
-			slog.Warn("ticket request reply failed", "error", err)
+			slog.Warn("bot intake investigation reply failed", "error", err)
 		}
 		return
 	}
 	if _, err := slackClient.ReplyInThread(msg.Channel, threadTS, outcome.ReplyText); err != nil {
-		slog.Warn("ticket request reply failed", "error", err)
+		slog.Warn("bot intake investigation reply failed", "error", err)
 	}
 }

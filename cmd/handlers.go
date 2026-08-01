@@ -82,24 +82,19 @@ func handleMessage(
 	if msg.IsBot {
 		// Non-allowlisted bots are dropped from individual triage/passive
 		// monitoring (digest still saw them above). Allowlisted intake bots
-		// (e.g. a Sentry app) are instead routed exactly like an explicit
-		// @toad mention — worth an immediate investigation, not just a wait
-		// for digest's batch analysis or a silent drop.
+		// (e.g. a Sentry app) feed intake, never conversation (controller
+		// ruling): no ribbitSem (a bot alert storm must never starve human
+		// @toad mentions of a ribbit slot), no conversational replies
+		// ("ask for clarification", ribbit fallback) — just triage, and only
+		// an actionable bug/feature proceeds into the investigate-and-file
+		// flow, bounded by investigateSem. handleBotIntake silently drops
+		// everything else.
 		if !slices.Contains(botAllowlist, msg.BotID) {
 			return
 		}
 
-		slog.Info("handler: allowlisted bot message, routing as triggered", "bot_id", msg.BotID, "channel", channelName)
-		msg.IsTriggered = true
-
-		select {
-		case ribbitSem <- struct{}{}:
-			defer func() { <-ribbitSem }()
-		case <-ctx.Done():
-			return
-		}
-
-		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, channelName, tracker, resolver, repoPaths, investRunner, ticketEngine, investigateSem)
+		slog.Debug("handler: allowlisted bot message, routing to intake", "bot_id", msg.BotID, "channel", channelName)
+		handleBotIntake(ctx, msg, triageEngine, slackClient, stateManager, channelName, tracker, resolver, investRunner, ticketEngine, investigateSem)
 		return
 	}
 

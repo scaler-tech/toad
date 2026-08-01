@@ -158,10 +158,11 @@ func TestRunTriggeredInvestigation_ProposesLowConfidenceFinding(t *testing.T) {
 	if len(tracker.createCalls) != 0 {
 		t.Errorf("expected no CreateIssue call on a proposed outcome, got %d", len(tracker.createCalls))
 	}
-
-	blocks := islack.TicketBlocks(outcome.ReplyText, msg.ThreadTS())
-	if len(blocks) == 0 {
-		t.Error("expected TicketBlocks to produce at least one Slack block for the proposed reply")
+	// TicketBlocks always renders a fixed 2-block layout regardless of input,
+	// so asserting len(blocks) != 0 on it is vacuous — assert the actual
+	// reply text (what the propose path is responsible for composing).
+	if outcome.ReplyText != "Not fully confident this is the root cause." {
+		t.Errorf("expected reply text to be the finding's Reasoning, got %q", outcome.ReplyText)
 	}
 }
 
@@ -237,20 +238,112 @@ func TestRunInvestigation_AppendsStalenessCaveatOnSyncFailure(t *testing.T) {
 	}
 }
 
-// The claim-conflict path (already claimed) is handled by the caller
-// (handleTriggered), not runTriggeredInvestigation itself — this asserts
-// that contract directly: Claim fails while another claim is outstanding.
-func TestClaim_ConflictsWhileHeld(t *testing.T) {
-	stateManager := state.NewManager()
-	threadTS := "400.1"
-	if !stateManager.Claim(threadTS) {
-		t.Fatal("expected first claim to succeed")
+// (a) A CTA click that reuses a previously-saved, non-corroborated finding
+// (one that would have been DecisionPropose under the auto-file gate) must
+// still file a ticket directly — the click itself is the human sign-off, so
+// runTicketRequest must NOT re-run Decide (review Critical finding: routing
+// this through Decide made the button a permanent no-op for any finding
+// that wasn't already Sentry-corroborated and high-confidence).
+func TestRunTicketRequest_FilesDirectlyForPreviouslyProposedFinding(t *testing.T) {
+	db, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, "", autoFileCfg())
+	resolver := newTestResolver(t)
+
+	findings := &investigation.Findings{
+		Feasible: true, Title: "Some bug", Problem: "p", RootCause: "rc",
+		Confidence: 0.5, Repo: "svc", Reasoning: "root cause found, no Sentry corroboration",
 	}
-	if stateManager.Claim(threadTS) {
-		t.Error("expected second claim on the same thread to fail while the first is held")
+	msg := &islack.IncomingMessage{Channel: "C5", Timestamp: "500.1", Text: "please file a ticket for this"}
+	saveInvestigationRecord(db, "invest-test-1", msg.ThreadTS(), msg.Channel, findings)
+
+	outcome := runTicketRequest(context.Background(), msg, nil, stateManager, tracker, resolver,
+		investRunner, ticketEngine, investigateSem, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA)
+
+	if outcome.Err != nil {
+		t.Fatalf("unexpected error: %v", outcome.Err)
 	}
-	stateManager.Unclaim(threadTS)
+	if outcome.Conflict {
+		t.Fatal("did not expect a claim conflict on a fresh thread")
+	}
+	if len(tracker.createCalls) != 1 {
+		t.Fatalf("expected exactly 1 CreateIssue call, got %d", len(tracker.createCalls))
+	}
+	if !strings.Contains(outcome.ReplyText, "https://linear.app/toad/issue/TOAD-1") {
+		t.Errorf("expected reply to contain the filed ticket URL, got %q", outcome.ReplyText)
+	}
+	// The saved (reused) finding was used directly — no fresh investigation
+	// agent run.
+	if len(mockProvider.RunCalls) != 0 {
+		t.Errorf("expected no investigation agent Run call when reusing a saved finding, got %d", len(mockProvider.RunCalls))
+	}
+}
+
+// (b) An escalation (or CTA) request on a thread that's already claimed
+// (a concurrent investigation/ticket-request in flight) must conflict
+// immediately — no investigation run, no ticket filed.
+func TestRunTicketRequest_ConflictWhenThreadAlreadyClaimed(t *testing.T) {
+	_, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+	resolver := newTestResolver(t)
+
+	msg := &islack.IncomingMessage{Channel: "C6", Timestamp: "600.1", Text: "escalate this"}
+	threadTS := msg.ThreadTS()
 	if !stateManager.Claim(threadTS) {
-		t.Error("expected claim to succeed again after unclaim")
+		t.Fatal("expected initial claim to succeed")
+	}
+	// Deliberately not unclaiming, to simulate a concurrent flow already
+	// holding this thread's claim.
+
+	outcome := runTicketRequest(context.Background(), msg, nil, stateManager, tracker, resolver,
+		investRunner, ticketEngine, investigateSem, "eng-alerts", threadTS, ticket.SourceEscalation)
+
+	if !outcome.Conflict {
+		t.Fatalf("expected Conflict outcome, got %+v", outcome)
+	}
+	if len(mockProvider.RunCalls) != 0 {
+		t.Errorf("expected no investigation agent Run call on a claim conflict, got %d", len(mockProvider.RunCalls))
+	}
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected no CreateIssue call on a claim conflict, got %d", len(tracker.createCalls))
+	}
+}
+
+// (c) An allowlisted bot message that triages as "question" (not bug/
+// feature) must be silently dropped: no investigation run.
+func TestRunBotIntake_DropsQuestionCategoryNoInvestigation(t *testing.T) {
+	_, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+	resolver := newTestResolver(t)
+
+	triageProvider := &agent.MockProvider{RunResult: &agent.RunResult{
+		Result: `{"actionable":true,"confidence":0.9,"summary":"just curious","category":"question","estimated_size":"small"}`,
+	}}
+	triageEngine := triage.New(triageProvider, "haiku", nil)
+
+	msg := &islack.IncomingMessage{Channel: "C7", Timestamp: "700.1", BotID: "B123", IsBot: true, Text: "what's the deploy status?"}
+
+	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts",
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+
+	if outcome != nil {
+		t.Fatalf("expected nil outcome (dropped) for a question-triaged bot message, got %+v", outcome)
+	}
+	if len(mockProvider.RunCalls) != 0 {
+		t.Errorf("expected no investigation agent Run call for a dropped bot message, got %d", len(mockProvider.RunCalls))
+	}
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected no CreateIssue call for a dropped bot message, got %d", len(tracker.createCalls))
+	}
+}
+
+// reuseRecentInvestigation must not resurrect an infeasible saved finding —
+// a CTA click after an infeasible fallthrough must trigger a fresh
+// investigation instead of filing a ticket from a "no real fix found here"
+// verdict (review Critical finding, second half).
+func TestReuseRecentInvestigation_SkipsInfeasibleFindings(t *testing.T) {
+	db := newTestDB(t)
+	findings := &investigation.Findings{Feasible: false, Reasoning: "could not find a root cause"}
+	saveInvestigationRecord(db, "invest-infeasible-1", "800.1", "C8", findings)
+
+	f, id := reuseRecentInvestigation(db, "800.1")
+	if f != nil || id != "" {
+		t.Fatalf("expected an infeasible saved finding to be skipped, got findings=%+v id=%q", f, id)
 	}
 }
