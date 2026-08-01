@@ -30,6 +30,10 @@ type ticketflowTrackerFake struct {
 	nextID       string
 }
 
+// ShouldCreateIssues overrides the embedded NoopTracker's false — every test
+// in this file exercises a tracker meant to be capable of filing.
+func (f *ticketflowTrackerFake) ShouldCreateIssues() bool { return true }
+
 func (f *ticketflowTrackerFake) CreateIssue(_ context.Context, opts issuetracker.CreateIssueOpts) (*issuetracker.IssueRef, error) {
 	f.createCalls = append(f.createCalls, opts)
 	id := f.nextID
@@ -96,13 +100,17 @@ func autoFileCfg() config.TicketConfig {
 	return config.TicketConfig{AutoFile: true, AutoFileConfidence: 0.85}
 }
 
-// (a) sentry-corroborated, high-confidence finding -> auto-file, ticket_index
-// row created, and the composed Slack reply text contains the ticket URL.
+// (a) sentry-corroborated (allowlisted-bot-sourced), high-confidence finding
+// -> auto-file, ticket_index row created, and the composed Slack reply text
+// contains the ticket URL. Fix 2 (security): corroboration requires the
+// report to have arrived from an allowlisted monitoring bot — msg carries
+// IsBot/BotID and sentryCorroborated=true reflects that a caller already
+// checked BotID against cfg.Intake.BotAllowlist.
 func TestRunTriggeredInvestigation_AutoFilesHighConfidenceSentryFinding(t *testing.T) {
 	db, stateManager, tracker, _, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
 	resolver := newTestResolver(t)
 
-	msg := &islack.IncomingMessage{Channel: "C1", Timestamp: "100.1", SentryRefs: []string{"BILLING-42"}, Text: "users report double refunds"}
+	msg := &islack.IncomingMessage{Channel: "C1", Timestamp: "100.1", SentryRefs: []string{"BILLING-42"}, Text: "users report double refunds", IsBot: true, BotID: "B_SENTRY"}
 	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "double refunds", Actionable: true}
 
 	if !stateManager.Claim(msg.ThreadTS()) {
@@ -110,7 +118,7 @@ func TestRunTriggeredInvestigation_AutoFilesHighConfidenceSentryFinding(t *testi
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeFiled {
 		t.Fatalf("expected outcomeFiled, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -153,7 +161,7 @@ func TestRunTriggeredInvestigation_ProposesLowConfidenceFinding(t *testing.T) {
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, false /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeProposed {
 		t.Fatalf("expected outcomeProposed, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -172,7 +180,10 @@ func TestRunTriggeredInvestigation_ProposesLowConfidenceFinding(t *testing.T) {
 // (c) a duplicate sentry key already tracked in the ticket index short-
 // circuits before any investigation runs: no second (or first) agent Run
 // call, a re-observation comment is posted, and the reply links the
-// existing ticket.
+// existing ticket. Requires bot corroboration (Fix 2): the sentry-key
+// idempotency pre-check is only trusted for an allowlisted-bot-sourced
+// report — see TestRunTriggeredInvestigation_HumanPastedSentryIDSkipsIdempotencyPreCheck
+// for the non-corroborated case.
 func TestRunTriggeredInvestigation_DuplicateSentryKeySkipsInvestigation(t *testing.T) {
 	db, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
 	resolver := newTestResolver(t)
@@ -188,7 +199,7 @@ func TestRunTriggeredInvestigation_DuplicateSentryKeySkipsInvestigation(t *testi
 		t.Fatalf("seeding ticket index: %v", err)
 	}
 
-	msg := &islack.IncomingMessage{Channel: "C3", Timestamp: "300.1", SentryRefs: []string{"BILLING-42"}, Text: "same issue again"}
+	msg := &islack.IncomingMessage{Channel: "C3", Timestamp: "300.1", SentryRefs: []string{"BILLING-42"}, Text: "same issue again", IsBot: true, BotID: "B_SENTRY"}
 	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "same issue again", Actionable: true}
 
 	if !stateManager.Claim(msg.ThreadTS()) {
@@ -196,7 +207,7 @@ func TestRunTriggeredInvestigation_DuplicateSentryKeySkipsInvestigation(t *testi
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeIdempotentHit {
 		t.Fatalf("expected outcomeIdempotentHit, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -216,6 +227,60 @@ func TestRunTriggeredInvestigation_DuplicateSentryKeySkipsInvestigation(t *testi
 
 	if !stateManager.Claim(msg.ThreadTS()) {
 		t.Error("expected claim to be released after an idempotent-hit outcome")
+	}
+}
+
+// Fix 2 (security) regression: a plain human message that happens to
+// mention/paste a Sentry-looking reference — with an investigation whose
+// Findings.SentryIssueIDs the model populated the same way a genuinely
+// corroborated run would — must NOT be treated as externally corroborated.
+// A human user must not be able to use toad as a ticket-existence oracle by
+// guessing/pasting a Sentry key (the idempotency pre-check must skip the
+// sentry-key path entirely), and a subsequent explicit human filing (CTA)
+// of the resulting proposal must dedup-key on the Slack thread, never on
+// the unverified Sentry ID.
+func TestRunTriggeredInvestigation_HumanPastedSentryIDDoesNotAutoFile(t *testing.T) {
+	db, stateManager, tracker, _, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+	resolver := newTestResolver(t)
+
+	msg := &islack.IncomingMessage{Channel: "C10", Timestamp: "1000.1", SentryRefs: []string{"BILLING-42"}, Text: "hey saw BILLING-42 again, users report double refunds"}
+	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "double refunds", Actionable: true}
+
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Fatal("expected claim to succeed on a fresh thread")
+	}
+
+	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, false /* sentryCorroborated */)
+
+	if outcome.Kind != outcomeProposed {
+		t.Fatalf("expected outcomeProposed for a non-corroborated Sentry ID, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
+	}
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected no CreateIssue call for a non-corroborated finding, got %d", len(tracker.createCalls))
+	}
+
+	// A human later explicitly files it via the CTA, reusing the saved
+	// finding — must dedup-key on the thread, not the unverified sentry ID.
+	outcome2 := runTicketRequest(context.Background(), msg, nil, stateManager, tracker, resolver,
+		investRunner, ticketEngine, investigateSem, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
+	if outcome2.Err != nil {
+		t.Fatalf("unexpected error filing via CTA: %v", outcome2.Err)
+	}
+
+	if entry, err := db.GetTicketIndex("sentry:BILLING-42"); err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	} else if entry != nil {
+		t.Errorf("expected no ticket_index row keyed by the unverified sentry ID, got %+v", entry)
+	}
+
+	threadKey := "thread:" + msg.Channel + ":" + msg.ThreadTS()
+	entry, err := db.GetTicketIndex(threadKey)
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatalf("expected a ticket_index row keyed by thread %q, got none", threadKey)
 	}
 }
 
@@ -259,7 +324,7 @@ func TestRunTicketRequest_FilesDirectlyForPreviouslyProposedFinding(t *testing.T
 	saveInvestigationRecord(db, "invest-test-1", msg.ThreadTS(), msg.Channel, findings)
 
 	outcome := runTicketRequest(context.Background(), msg, nil, stateManager, tracker, resolver,
-		investRunner, ticketEngine, investigateSem, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA)
+		investRunner, ticketEngine, investigateSem, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
 
 	if outcome.Err != nil {
 		t.Fatalf("unexpected error: %v", outcome.Err)
@@ -296,7 +361,7 @@ func TestRunTicketRequest_ConflictWhenThreadAlreadyClaimed(t *testing.T) {
 	// holding this thread's claim.
 
 	outcome := runTicketRequest(context.Background(), msg, nil, stateManager, tracker, resolver,
-		investRunner, ticketEngine, investigateSem, "eng-alerts", threadTS, ticket.SourceEscalation)
+		investRunner, ticketEngine, investigateSem, "eng-alerts", threadTS, ticket.SourceEscalation, false /* sentryCorroborated */)
 
 	if !outcome.Conflict {
 		t.Fatalf("expected Conflict outcome, got %+v", outcome)
@@ -323,7 +388,7 @@ func TestRunBotIntake_DropsQuestionCategoryNoInvestigation(t *testing.T) {
 	msg := &islack.IncomingMessage{Channel: "C7", Timestamp: "700.1", BotID: "B123", IsBot: true, Text: "what's the deploy status?"}
 
 	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts",
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
 
 	if outcome != nil {
 		t.Fatalf("expected nil outcome (dropped) for a question-triaged bot message, got %+v", outcome)
@@ -362,7 +427,9 @@ type digestPostCall struct {
 // (a) A sentry-corroborated, high-confidence finding must auto-file (via
 // ticketEngine.FileOrUpdate with source digest) and post a plain thread
 // notice containing the filed ticket's URL — no TicketBlocks, since there's
-// no human decision left to make.
+// no human decision left to make. Fix 2 (security): corroboration requires
+// msg.BotID to be an allowlisted monitoring bot — the caller (root.go)
+// computes sentryCorroborated from that, passed here as true.
 func TestProposeFromDigest_AutoFilesSentryCorroboratedFinding(t *testing.T) {
 	db := newTestDB(t)
 	tracker := &ticketflowTrackerFake{}
@@ -378,7 +445,7 @@ func TestProposeFromDigest_AutoFilesSentryCorroboratedFinding(t *testing.T) {
 		SentryIssueIDs: []string{"BILLING-42"},
 		Reasoning:      "Found the root cause via Sentry stack trace.",
 	}
-	msg := digest.Message{Channel: "C1", ThreadTS: "100.1", Text: "double refunds"}
+	msg := digest.Message{Channel: "C1", ThreadTS: "100.1", Text: "double refunds", BotID: "B_SENTRY"}
 
 	var calls []digestPostCall
 	post := func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
@@ -386,7 +453,7 @@ func TestProposeFromDigest_AutoFilesSentryCorroboratedFinding(t *testing.T) {
 		return "999.1", nil
 	}
 
-	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg); err != nil {
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg, true /* sentryCorroborated */); err != nil {
 		t.Fatalf("proposeFromDigest: %v", err)
 	}
 
@@ -439,7 +506,7 @@ func TestProposeFromDigest_ProposesNonCorroboratedFinding(t *testing.T) {
 		return "999.2", nil
 	}
 
-	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg); err != nil {
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg, false /* sentryCorroborated */); err != nil {
 		t.Fatalf("proposeFromDigest: %v", err)
 	}
 
@@ -506,7 +573,7 @@ func TestDigestFlow_AutoFiledTicketBacklinksInvestigation(t *testing.T) {
 	investigateSem := make(chan struct{}, 1)
 
 	opp := digest.Opportunity{Summary: "fix refunds", Category: "bug", Confidence: 0.99, Repo: "svc"}
-	msg := digest.Message{Channel: "C9", ThreadTS: "900.1", ChannelName: "errors", Text: "users report double refunds"}
+	msg := digest.Message{Channel: "C9", ThreadTS: "900.1", ChannelName: "errors", Text: "users report double refunds", BotID: "B_SENTRY"}
 
 	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, db, 600, opp, msg, nil)
 	if err != nil {
@@ -519,7 +586,9 @@ func TestDigestFlow_AutoFiledTicketBacklinksInvestigation(t *testing.T) {
 		return "999.9", nil
 	}
 
-	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, *findings, msg); err != nil {
+	// sentryCorroborated=true: msg.BotID is the allowlisted monitoring bot
+	// that produced this report (Fix 2).
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, *findings, msg, true /* sentryCorroborated */); err != nil {
 		t.Fatalf("proposeFromDigest: %v", err)
 	}
 	if len(calls) != 1 {

@@ -7,6 +7,7 @@ package ticket
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -83,6 +84,15 @@ func New(tr issuetracker.Tracker, store Store, cfg config.TicketConfig,
 		permalink: permalink,
 		keyLocks:  map[string]*sync.Mutex{},
 	}
+}
+
+// ShouldCreateIssues reports whether the underlying tracker is configured to
+// create issues. Callers (cmd/handlers.go, cmd/ticketflow.go) use this to
+// suppress the "Create ticket" CTA button when it would be a dead end —
+// e.g. the default, tracker-less install — posting findings as plain text
+// instead of an attachment that always errors when clicked.
+func (e *Engine) ShouldCreateIssues() bool {
+	return e.tracker.ShouldCreateIssues()
 }
 
 // lockKey acquires the per-external-key mutex, creating it on first use,
@@ -205,8 +215,20 @@ func (e *Engine) reobserve(ctx context.Context, existing *state.TicketIndexEntry
 
 // file handles the miss path: no ticket has been filed for this external
 // key yet, so toad creates one and records it in the index.
+//
+// Both guards below exist because issuetracker.NewTracker returns a
+// NoopTracker (CreateIssue -> (nil, nil), ShouldCreateIssues -> false)
+// whenever issue_tracker.enabled is false — the DEFAULT for a stock install.
+// Without the ShouldCreateIssues guard, a stock install would sail past this
+// point and dereference a nil ref.ID below; the ref == nil check is
+// belt-and-suspenders for any future Tracker implementation that returns a
+// nil ref without an error.
 func (e *Engine) file(ctx context.Context, f investigation.Findings, key, investigationID,
 	permalink string, src Source) (*FileResult, error) {
+	if !e.tracker.ShouldCreateIssues() {
+		return nil, errors.New("issue tracker is not configured for ticket creation")
+	}
+
 	title := f.Title
 	if strings.TrimSpace(title) == "" {
 		title = firstSentence(f.Problem)
@@ -230,6 +252,9 @@ func (e *Engine) file(ctx context.Context, f investigation.Findings, key, invest
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating issue for %s: %w", key, err)
+	}
+	if ref == nil {
+		return nil, fmt.Errorf("tracker returned no issue ref for %s", key)
 	}
 
 	now := time.Now()

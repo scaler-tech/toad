@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,7 +269,33 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// ticket.auto_file defaults to true, but issuetracker.NewTracker returns
+	// a NoopTracker (which can never create issues) whenever the tracker
+	// isn't enabled/configured to create issues — also the default. Left
+	// alone, the first CTA click / :frog: react / escalation on a stock
+	// install would reach ticket.Engine.file() with a tracker that can't file
+	// anything (mitigated there too, but that's belt-and-suspenders — this is
+	// the config-level fix). We can't tell an explicit `auto_file: true` from
+	// the untouched default, so a hard validation error would break every
+	// tracker-less install at boot; downgrading with a warning is the safe
+	// choice for both cases.
+	if cfg.Ticket.AutoFile && !trackerCanCreateIssues(cfg.IssueTracker) {
+		slog.Warn("ticket.auto_file is enabled but the issue tracker cannot create issues " +
+			"(issue_tracker.enabled and issue_tracker.create_issues must both be true) — " +
+			"downgrading ticket.auto_file to false")
+		cfg.Ticket.AutoFile = false
+	}
+
 	return cfg, nil
+}
+
+// trackerCanCreateIssues reports whether the issue tracker NewTracker would
+// build from cfg is capable of creating issues — mirrors
+// issuetracker.NewTracker/LinearTracker.ShouldCreateIssues' logic without an
+// import (internal/issuetracker already imports internal/config, so the
+// reverse import would cycle).
+func trackerCanCreateIssues(cfg IssueTrackerConfig) bool {
+	return cfg.Enabled && cfg.Provider == "linear" && cfg.CreateIssues
 }
 
 func loadFile(cfg *Config, path string) error {

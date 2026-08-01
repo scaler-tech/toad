@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -212,12 +213,18 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			AgentProvider: agentProvider,
 			TriageModel:   cfg.Triage.Model,
 			Propose: func(ctx context.Context, f investigation.Findings, msg digest.Message) error {
+				// External corroboration requires the message to have
+				// arrived from an allowlisted monitoring bot (see
+				// runTriggeredInvestigation's doc comment for the full
+				// rule) — never merely because the digest batched a
+				// message with a Sentry reference in its text.
+				sentryCorroborated := msg.BotID != "" && slices.Contains(cfg.Intake.BotAllowlist, msg.BotID)
 				return proposeFromDigest(ctx, ticketEngine, stateDB, func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
 					if blocks == nil {
 						return slackClient.ReplyInThread(channel, threadTS, text)
 					}
 					return slackClient.ReplyInThreadWithBlocks(channel, threadTS, text, blocks)
-				}, f, msg)
+				}, f, msg, sentryCorroborated)
 			},
 			Notify: func(channel, threadTS, text string) {
 				slackClient.ReplyInThread(channel, threadTS, text)
@@ -285,12 +292,20 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 					text += "\n\n_Tag a relevant dev if you'd like someone to take a look._"
 				}
 
-				// Post investigation reply with CTA button
-				blocks := islack.TicketBlocks(text, notice.ThreadTS)
+				// Post investigation reply, with a CTA button only when the
+				// tracker can actually create issues — otherwise plain text,
+				// rather than a button that always errors when clicked.
 				replyTS := ""
-				if ts, err := slackClient.ReplyInThreadWithBlocks(
-					notice.Channel, notice.ThreadTS, text, blocks,
-				); err != nil {
+				if ticketEngine.ShouldCreateIssues() {
+					blocks := islack.TicketBlocks(text, notice.ThreadTS)
+					if ts, err := slackClient.ReplyInThreadWithBlocks(
+						notice.Channel, notice.ThreadTS, text, blocks,
+					); err != nil {
+						slog.Warn("digest investigation reply failed", "error", err)
+					} else {
+						replyTS = ts
+					}
+				} else if ts, err := slackClient.ReplyInThread(notice.Channel, notice.ThreadTS, text); err != nil {
 					slog.Warn("digest investigation reply failed", "error", err)
 				} else {
 					replyTS = ts
@@ -304,9 +319,9 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 						reasoning := strings.TrimPrefix(notice.Text, ":mag: *Investigation findings:*\n\n")
 						body := "**Toad investigation findings**\n\n" + reasoning + "\n\n"
 						if permalink != "" {
-							body += fmt.Sprintf("Toad can fix this automatically — [go to the Slack thread](%s) and click the button to start.", permalink)
+							body += fmt.Sprintf("Toad can file a ticket for this — [go to the Slack thread](%s) and click the button to create it.", permalink)
 						} else {
-							body += "Toad can fix this automatically — go to the Slack thread and click the button to start."
+							body += "Toad can file a ticket for this — go to the Slack thread and click the button to create it."
 						}
 						if err := tracker.PostComment(context.Background(), ref, body); err != nil {
 							slog.Warn("failed to crosspost investigation to issue tracker",

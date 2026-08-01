@@ -21,11 +21,13 @@ func TestComposeBody_Golden(t *testing.T) {
 		AcceptanceCriteria: []string{"Empty-account export no longer 500s", "Regression test covers the zero case"},
 		Confidence:         0.92,
 		SentryIssueIDs:     []string{"BILLING-2291"},
+		Repo:               "billing-api",
 	}
 
 	got := ComposeBody(f, "https://slack.example.com/archives/C123/p172250000", "inv-42")
 
-	want := "## Problem\n\n" +
+	want := "**Repo:** billing-api\n\n" +
+		"## Problem\n\n" +
 		"Billing export fails for accounts with zero line items.\n\n" +
 		"## Root cause (hypothesis)\n\n" +
 		"The aggregator divides by the line-item count without a zero guard.\n\n" +
@@ -66,7 +68,7 @@ func TestComposeBody_OmitsEmptySections(t *testing.T) {
 		t.Errorf("ComposeBody() mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 
-	for _, unwanted := range []string{"## Scope", "## Non-goals", "## Acceptance criteria"} {
+	for _, unwanted := range []string{"## Scope", "## Non-goals", "## Acceptance criteria", "**Repo:**"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("expected %q section to be omitted, got:\n%s", unwanted, got)
 		}

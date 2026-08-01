@@ -17,6 +17,10 @@ import (
 func ComposeBody(f investigation.Findings, slackPermalink, investigationID string) string {
 	var b strings.Builder
 
+	if strings.TrimSpace(f.Repo) != "" {
+		b.WriteString("**Repo:** " + f.Repo + "\n")
+	}
+
 	writeTextSection(&b, "Problem", f.Problem)
 	writeTextSection(&b, "Root cause (hypothesis)", composeRootCause(f))
 	writeListSection(&b, "Scope", f.Scope, "- ")

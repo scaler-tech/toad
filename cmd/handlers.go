@@ -44,11 +44,20 @@ func handleMessage(
 	// toad's own (bot) messages, so the fetched message will have IsBot=true.
 	if msg.IsTicketRequest {
 		slog.Info("handler: ticket requested", "channel", channelName, "thread", msg.ThreadTS())
-		handleTicketRequest(ctx, msg, slackClient, nil, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, ticket.SourceCTA)
+		// sentryCorroborated is computed at intake from the SAME rule used
+		// everywhere else in this flow (see runTriggeredInvestigation's doc
+		// comment): external corroboration requires the message to have
+		// arrived from an allowlisted monitoring bot. A ticket-request
+		// reaction fires on toad's OWN reply (msg.BotID is toad's bot ID),
+		// never an allowlisted monitoring bot's, so this is always false in
+		// practice here — computed rather than hardcoded so the rule stays
+		// in one place.
+		sentryCorroborated := msg.IsBot && slices.Contains(botAllowlist, msg.BotID)
+		handleTicketRequest(ctx, msg, slackClient, nil, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, ticket.SourceCTA, sentryCorroborated)
 		return
 	}
 
-	// EXPLICIT TRIGGER: @toad mention or reaction/keyword trigger (never from bots)
+	// EXPLICIT TRIGGER: @toad mention or reaction/keyword trigger
 	if msg.IsMention || msg.IsTriggered {
 		slog.Debug("handler: triggered path", "mention", msg.IsMention, "triggered", msg.IsTriggered, "channel", channelName)
 
@@ -60,7 +69,7 @@ func handleMessage(
 			return
 		}
 
-		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, channelName, tracker, resolver, repoPaths, investRunner, ticketEngine, investigateSem)
+		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, channelName, tracker, resolver, repoPaths, investRunner, ticketEngine, investigateSem, botAllowlist)
 		return
 	}
 
@@ -94,7 +103,12 @@ func handleMessage(
 		}
 
 		slog.Debug("handler: allowlisted bot message, routing to intake", "bot_id", msg.BotID, "channel", channelName)
-		handleBotIntake(ctx, msg, triageEngine, slackClient, stateManager, channelName, tracker, resolver, investRunner, ticketEngine, investigateSem)
+		// This message just passed the allowlist check above, so it's the
+		// one case where external corroboration is genuine: the report text
+		// came directly from an allowlisted monitoring bot, not from
+		// human-pasted text or model output.
+		sentryCorroborated := msg.IsBot && slices.Contains(botAllowlist, msg.BotID)
+		handleBotIntake(ctx, msg, triageEngine, slackClient, stateManager, channelName, tracker, resolver, investRunner, ticketEngine, investigateSem, sentryCorroborated)
 		return
 	}
 
@@ -113,7 +127,7 @@ func handleMessage(
 	}
 
 	slog.Debug("handler: passive path", "channel", channelName, "user", msg.User)
-	handlePassive(ctx, msg, triageEngine, ribbitEngine, slackClient, channelName, resolver, repoPaths)
+	handlePassive(ctx, msg, triageEngine, ribbitEngine, slackClient, channelName, resolver, repoPaths, ticketEngine)
 }
 
 func handleTriggered(
@@ -130,6 +144,7 @@ func handleTriggered(
 	investRunner *investigation.Runner,
 	ticketEngine *ticket.Engine,
 	investigateSem chan struct{},
+	botAllowlist []string,
 ) {
 	// Check if already working on this thread
 	threadTS := msg.ThreadTS()
@@ -217,12 +232,22 @@ func handleTriggered(
 		daemonCounters.triageOther.Add(1)
 	}
 
+	// sentryCorroborated gates every ticket-identity/automation use of
+	// msg.SentryRefs and the investigation's Findings.SentryIssueIDs below
+	// (see runTriggeredInvestigation's doc comment for the full rule):
+	// external corroboration requires the report to have arrived from an
+	// allowlisted monitoring bot, never from human-pasted text or model
+	// output. This branch is reached for @toad mentions and reaction/keyword
+	// triggers — computed rather than assumed false, since a bot can still
+	// @mention toad directly (handleAppMention sets IsBot from the event).
+	sentryCorroborated := msg.IsBot && slices.Contains(botAllowlist, msg.BotID)
+
 	// ESCALATE: triage flagged this as needing a ticket regardless of
 	// category/confidence — route to the same investigate-and-file flow the
 	// CTA button uses, just with a different Source for the ticket index.
 	if result.Escalate {
 		slog.Info("triage escalate flag set, routing to ticket flow", "summary", result.Summary)
-		handleTicketRequest(ctx, msg, slackClient, result, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, ticket.SourceEscalation)
+		handleTicketRequest(ctx, msg, slackClient, result, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, ticket.SourceEscalation, sentryCorroborated)
 		return
 	}
 
@@ -240,11 +265,15 @@ func handleTriggered(
 		slackClient.SetStatus(msg.Channel, threadTS, "Investigating the codebase...")
 
 		outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS,
-			stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+			stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, sentryCorroborated)
 
 		if outcome.Kind != outcomeFallThrough {
 			slackClient.ClearStatus(msg.Channel, threadTS)
-			if outcome.Kind == outcomeProposed {
+			// The CTA button is suppressed when the tracker can't actually
+			// create issues (e.g. the default, tracker-less install) — the
+			// findings still post, as plain text, rather than attaching a
+			// button that always errors when clicked.
+			if outcome.Kind == outcomeProposed && ticketEngine.ShouldCreateIssues() {
 				blocks := islack.TicketBlocks(outcome.ReplyText, threadTS)
 				if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, threadTS, outcome.ReplyText, blocks); err != nil {
 					slog.Warn("investigation reply failed", "error", err)
@@ -304,7 +333,10 @@ func handleTriggered(
 	}
 
 	daemonCounters.ribbits.Add(1)
-	if result.Category == "bug" || result.Category == "feature" {
+	// The CTA button is suppressed when the tracker can't actually create
+	// issues (e.g. the default, tracker-less install) — post plain text
+	// instead of a button that always errors when clicked.
+	if (result.Category == "bug" || result.Category == "feature") && ticketEngine.ShouldCreateIssues() {
 		blocks := islack.TicketBlocks(resp.Text, msg.ThreadTS())
 		if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, msg.ThreadTS(), resp.Text, blocks); err != nil {
 			slog.Warn("ribbit reply failed", "error", err)
@@ -324,6 +356,7 @@ func handlePassive(
 	channelName string,
 	resolver *config.Resolver,
 	repoPaths map[string]string,
+	ticketEngine *ticket.Engine,
 ) {
 	result, err := triageEngine.Classify(ctx, msg, channelName)
 	if err != nil {
@@ -355,8 +388,12 @@ func handlePassive(
 	}
 
 	daemonCounters.ribbits.Add(1)
-	blocks := islack.TicketBlocks(resp.Text, msg.ThreadTS())
-	if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, msg.Timestamp, resp.Text, blocks); err != nil {
+	if ticketEngine.ShouldCreateIssues() {
+		blocks := islack.TicketBlocks(resp.Text, msg.ThreadTS())
+		if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, msg.Timestamp, resp.Text, blocks); err != nil {
+			slog.Warn("passive ribbit reply failed", "error", err)
+		}
+	} else if _, err := slackClient.ReplyInThread(msg.Channel, msg.Timestamp, resp.Text); err != nil {
 		slog.Warn("passive ribbit reply failed", "error", err)
 	}
 }

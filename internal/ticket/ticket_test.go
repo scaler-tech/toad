@@ -41,6 +41,12 @@ func (s *fakeStore) GetTicketIndex(externalKey string) (*state.TicketIndexEntry,
 
 // fakeTracker is a small hand-written issuetracker.Tracker fake that counts
 // CreateIssue and PostComment calls so tests can assert which path fired.
+//
+// ShouldCreateIssues defaults to true (overriding the embedded NoopTracker's
+// false) since every pre-existing test in this file exercises a tracker
+// that's meant to be capable of filing — set cannotCreate to exercise the
+// "tracker can't create issues" guard in file() instead (see
+// TestFileOrUpdate_ShouldCreateIssuesFalse below).
 type fakeTracker struct {
 	issuetracker.NoopTracker
 	createCalls  []issuetracker.CreateIssueOpts
@@ -48,14 +54,23 @@ type fakeTracker struct {
 		ref  *issuetracker.IssueRef
 		body string
 	}
-	nextID    string
-	createErr error
-	postErr   error
+	nextID       string
+	createErr    error
+	postErr      error
+	cannotCreate bool
+	nilRef       bool
+}
+
+func (t *fakeTracker) ShouldCreateIssues() bool {
+	return !t.cannotCreate
 }
 
 func (t *fakeTracker) CreateIssue(_ context.Context, opts issuetracker.CreateIssueOpts) (*issuetracker.IssueRef, error) {
 	if t.createErr != nil {
 		return nil, t.createErr
+	}
+	if t.nilRef {
+		return nil, nil
 	}
 	t.createCalls = append(t.createCalls, opts)
 	id := t.nextID
@@ -375,6 +390,51 @@ func TestFileOrUpdate_EmptyCategoryWhenNoSentryCorroboration(t *testing.T) {
 	}
 	if got := tracker.createCalls[0].Category; got != "" {
 		t.Errorf("Category = %q, want empty (no Sentry corroboration, no category label)", got)
+	}
+}
+
+// Regression for the critical nil-deref: issuetracker.NewTracker returns a
+// NoopTracker (CreateIssue -> (nil, nil), ShouldCreateIssues -> false)
+// whenever issue_tracker.enabled is false — the default for a stock install.
+// Before the ShouldCreateIssues guard in file(), the first ticket request on
+// such an install would panic dereferencing a nil ref.ID. This must instead
+// return a clean error, and never call CreateIssue at all.
+func TestFileOrUpdate_ShouldCreateIssuesFalseReturnsCleanError(t *testing.T) {
+	tracker := &fakeTracker{cannotCreate: true}
+	store := newFakeStore()
+	e := New(tracker, store, config.TicketConfig{}, nil)
+
+	f := investigation.Findings{Problem: "Something broke.", SentryIssueIDs: []string{"X-1"}}
+
+	result, err := e.FileOrUpdate(context.Background(), f, "C1", "1.0", "inv-1", SourceAuto)
+	if err == nil {
+		t.Fatal("expected an error when the tracker cannot create issues, got nil")
+	}
+	if result != nil {
+		t.Errorf("expected nil result on error, got %+v", result)
+	}
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected CreateIssue never called, got %d calls", len(tracker.createCalls))
+	}
+}
+
+// Belt-and-suspenders: even when ShouldCreateIssues reports true, a Tracker
+// implementation (like NoopTracker.CreateIssue) could still return a nil ref
+// with no error — file() must catch this explicitly rather than
+// dereferencing ref.ID/ref.URL and panicking.
+func TestFileOrUpdate_NilRefFromCreateIssueReturnsCleanError(t *testing.T) {
+	tracker := &fakeTracker{nilRef: true}
+	store := newFakeStore()
+	e := New(tracker, store, config.TicketConfig{}, nil)
+
+	f := investigation.Findings{Problem: "Something broke.", SentryIssueIDs: []string{"X-1"}}
+
+	result, err := e.FileOrUpdate(context.Background(), f, "C1", "1.0", "inv-1", SourceAuto)
+	if err == nil {
+		t.Fatal("expected an error when CreateIssue returns a nil ref, got nil")
+	}
+	if result != nil {
+		t.Errorf("expected nil result on error, got %+v", result)
 	}
 }
 

@@ -290,6 +290,24 @@ type triggeredOutcome struct {
 // (claim before investigate, unclaim on every non-filed exit, claim released
 // after ticket filed/proposed): since nothing here creates a long-lived Run
 // to hand the claim off to, every exit path releases it.
+//
+// sentryCorroborated must be true only when this report arrived from an
+// allowlisted monitoring bot (see the caller's computation of the flag) —
+// NEVER when a Sentry reference merely appears in human-pasted text or in
+// the investigation agent's own output. Without this gate, any channel user
+// could paste (or guess) a Sentry issue key to: (1) use
+// preInvestigationTicketCheck as a ticket-existence oracle — a
+// differently-worded reply reveals whether that key is already tracked —
+// and spam re-observation comments onto an arbitrary existing ticket, or
+// (2) get a fabricated/model-inferred Sentry ID auto-filed and dedup-keyed
+// as if it were real external corroboration. When false, this both skips
+// the sentry-key path in preInvestigationTicketCheck entirely (passing nil
+// refs — the thread-keyed fallback in ExternalKey still applies) and clears
+// the investigation's own Findings.SentryIssueIDs before Decide/
+// ExternalKey/FileOrUpdate/the ticket footer ever see them. The refs may
+// still flow into the investigation PROMPT as leads (req.SentryRefs below)
+// and the model may cite them in its reasoning text — that's fine, they
+// just must never drive automation or identity keys.
 func runTriggeredInvestigation(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
@@ -301,14 +319,20 @@ func runTriggeredInvestigation(
 	investRunner *investigation.Runner,
 	ticketEngine *ticket.Engine,
 	investigateSem chan struct{},
+	sentryCorroborated bool,
 ) triggeredOutcome {
 	defer stateManager.Unclaim(threadTS)
 
 	db := stateManager.DB()
 
+	sentryRefsForCheck := msg.SentryRefs
+	if !sentryCorroborated {
+		sentryRefsForCheck = nil
+	}
+
 	// Idempotency pre-check: skip a fresh, expensive investigation entirely
 	// when a ticket already tracks this exact problem.
-	if existing := preInvestigationTicketCheck(ctx, db, tracker, msg.SentryRefs, msg.Channel, threadTS); existing != nil {
+	if existing := preInvestigationTicketCheck(ctx, db, tracker, sentryRefsForCheck, msg.Channel, threadTS); existing != nil {
 		return triggeredOutcome{
 			Kind:      outcomeIdempotentHit,
 			ReplyText: fmt.Sprintf(":ticket: Already tracked as %s: %s", existing.IssueID, existing.IssueURL),
@@ -340,6 +364,13 @@ func runTriggeredInvestigation(
 	if err != nil {
 		slog.Warn("triggered investigation failed, falling through to ribbit", "error", err, "summary", result.Summary)
 		return triggeredOutcome{Kind: outcomeFallThrough}
+	}
+	if !sentryCorroborated {
+		// Strip any Sentry IDs the model surfaced (from req.SentryRefs leads,
+		// or inferred from thread text) before they can drive Decide,
+		// ExternalKey, FileOrUpdate, or the ticket footer — see this
+		// function's doc comment.
+		findings.SentryIssueIDs = nil
 	}
 
 	recordID := generateInvestigationID()
@@ -435,6 +466,19 @@ type ticketRequestOutcome struct {
 // Claim/Unclaim bookkeeping mirrors runTriggeredInvestigation: a claim
 // conflict short-circuits before any work (Conflict: true, no investigation
 // run), and a successful claim is released via defer regardless of outcome.
+//
+// sentryCorroborated follows the same rule as runTriggeredInvestigation's
+// (see its doc comment): true only when this request arrived from an
+// allowlisted monitoring bot, never from a human click/reaction or
+// human-pasted text. It gates a FRESH investigation's Findings.SentryIssueIDs
+// the same way — this path bypasses Decide entirely (an explicit human
+// request already IS the sign-off, so auto-file's confidence/corroboration
+// gate doesn't apply), but FileOrUpdate's ExternalKey/footer must still never
+// trust an unverified Sentry ID as the ticket's identity key. A REUSED saved
+// finding is left untouched here regardless of the current request's
+// corroboration — it was already gated correctly at the point it was
+// produced (by runTriggeredInvestigation or a prior investigateFromDigest),
+// and reusing it doesn't rerun that judgment.
 func runTicketRequest(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
@@ -447,6 +491,7 @@ func runTicketRequest(
 	investigateSem chan struct{},
 	channelName, threadTS string,
 	src ticket.Source,
+	sentryCorroborated bool,
 ) ticketRequestOutcome {
 	if !stateManager.Claim(threadTS) {
 		return ticketRequestOutcome{Conflict: true}
@@ -487,6 +532,9 @@ func runTicketRequest(
 		f, err := runInvestigation(ctx, investRunner, investigateSem, req)
 		if err != nil {
 			return ticketRequestOutcome{Err: fmt.Errorf("investigation failed: %w", err)}
+		}
+		if !sentryCorroborated {
+			f.SentryIssueIDs = nil
 		}
 		findings = f
 		recordID = generateInvestigationID()
@@ -554,6 +602,7 @@ func handleTicketRequest(
 	investigateSem chan struct{},
 	channelName string,
 	src ticket.Source,
+	sentryCorroborated bool,
 ) {
 	threadTS := msg.ThreadTS()
 
@@ -583,7 +632,7 @@ func handleTicketRequest(
 		msg.ThreadContext = enrichWithIssueDetails(ctx, tracker, msg.Text, msg.ThreadContext)
 	}
 
-	outcome := runTicketRequest(ctx, msg, result, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, threadTS, src)
+	outcome := runTicketRequest(ctx, msg, result, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, threadTS, src, sentryCorroborated)
 	if outcome.Conflict {
 		slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
 		return
@@ -619,6 +668,7 @@ func runBotIntake(
 	investRunner *investigation.Runner,
 	ticketEngine *ticket.Engine,
 	investigateSem chan struct{},
+	sentryCorroborated bool,
 ) *triggeredOutcome {
 	result, err := triageEngine.Classify(ctx, msg, channelName)
 	if err != nil {
@@ -652,7 +702,7 @@ func runBotIntake(
 
 	slog.Info("bot intake investigating", "summary", result.Summary, "category", result.Category, "bot_id", msg.BotID)
 	outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS,
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, sentryCorroborated)
 
 	if outcome.Kind == outcomeFallThrough {
 		slog.Debug("bot intake: investigation fell through (infeasible or errored), dropping", "bot_id", msg.BotID)
@@ -676,6 +726,7 @@ func handleBotIntake(
 	investRunner *investigation.Runner,
 	ticketEngine *ticket.Engine,
 	investigateSem chan struct{},
+	sentryCorroborated bool,
 ) {
 	if msg.ThreadTimestamp != "" {
 		if tc, err := slackClient.FetchThreadMessages(msg.Channel, msg.ThreadTimestamp); err != nil {
@@ -686,13 +737,16 @@ func handleBotIntake(
 	}
 	msg.ThreadContext = enrichWithIssueDetails(ctx, tracker, msg.Text, msg.ThreadContext)
 
-	outcome := runBotIntake(ctx, msg, triageEngine, channelName, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem)
+	outcome := runBotIntake(ctx, msg, triageEngine, channelName, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, sentryCorroborated)
 	if outcome == nil {
 		return
 	}
 
 	threadTS := msg.ThreadTS()
-	if outcome.Kind == outcomeProposed {
+	// The CTA button is suppressed when the tracker can't actually create
+	// issues — post plain text instead of a button that always errors when
+	// clicked.
+	if outcome.Kind == outcomeProposed && ticketEngine.ShouldCreateIssues() {
 		blocks := islack.TicketBlocks(outcome.ReplyText, threadTS)
 		if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, threadTS, outcome.ReplyText, blocks); err != nil {
 			slog.Warn("bot intake investigation reply failed", "error", err)
@@ -751,8 +805,21 @@ func composeDigestProposalText(f investigation.Findings) string {
 // for the digest path. See digestInvestigationID's doc comment for why this
 // is a lookup rather than a parameter threaded through digest.ProposeFunc's
 // signature.
+//
+// sentryCorroborated follows the same rule as runTriggeredInvestigation's
+// (see its doc comment): true only when msg.BotID is an allowlisted
+// monitoring bot, computed by the caller (root.go, from cfg.Intake.
+// BotAllowlist) — never merely because a Sentry reference appears in the
+// message text. When false, f.SentryIssueIDs is cleared before it can drive
+// Decide, ExternalKey, FileOrUpdate, or the ticket footer — a digest message
+// with a non-allowlisted BotID (or no BotID, i.e. a human message the digest
+// batched) must never auto-file or dedup-key on an unverified Sentry ID.
 func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, db *state.DB, post digestPostFunc,
-	f investigation.Findings, msg digest.Message) error {
+	f investigation.Findings, msg digest.Message, sentryCorroborated bool) error {
+	if !sentryCorroborated {
+		f.SentryIssueIDs = nil
+	}
+
 	investigationID := digestInvestigationID(db, msg.ThreadTS)
 	decision, fileResult, err := fileOrProposeFromFindings(ctx, ticketEngine, f, msg.Channel, msg.ThreadTS, investigationID, ticket.SourceDigest)
 	if err != nil {
@@ -765,7 +832,13 @@ func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, db *sta
 	}
 
 	text := composeDigestProposalText(f)
-	blocks := islack.TicketBlocks(text, msg.ThreadTS)
+	// The CTA button is suppressed when the tracker can't actually create
+	// issues — post plain text instead of a button that always errors when
+	// clicked.
+	var blocks []slack.Block
+	if ticketEngine.ShouldCreateIssues() {
+		blocks = islack.TicketBlocks(text, msg.ThreadTS)
+	}
 	_, err = post(msg.Channel, msg.ThreadTS, text, blocks)
 	return err
 }

@@ -499,6 +499,84 @@ func TestDefaults_TicketConfig(t *testing.T) {
 	}
 }
 
+// Fix 1b: ticket.auto_file defaults to true, but issuetracker.NewTracker
+// returns a NoopTracker (which can never create issues) whenever the tracker
+// isn't enabled/configured to create issues — also the default. Load() must
+// downgrade auto_file to false (with a warning, not a hard error, since a
+// stock install can't be distinguished from one that explicitly asked for
+// auto_file: true) rather than leaving a config that would panic the first
+// time ticket.Engine.file() runs against a NoopTracker.
+func TestLoad_DowngradesAutoFileWhenTrackerCannotCreateIssues(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TOAD_HOME", dir)
+	t.Setenv("TOAD_SLACK_APP_TOKEN", "xapp-test")
+	t.Setenv("TOAD_SLACK_BOT_TOKEN", "xoxb-test")
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(origWd) })
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("os.Chdir: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.IssueTracker.Enabled {
+		t.Fatal("test assumption broken: default issue_tracker.enabled should be false")
+	}
+	if cfg.Ticket.AutoFile {
+		t.Error("expected ticket.auto_file to be downgraded to false when the tracker cannot create issues")
+	}
+}
+
+// Load() must NOT downgrade auto_file when the tracker genuinely can create
+// issues (enabled + linear + create_issues) — the guard is meant to catch
+// the tracker-less default, not to neuter a fully configured tracker.
+func TestLoad_KeepsAutoFileWhenTrackerCanCreateIssues(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TOAD_HOME", dir)
+	t.Setenv("TOAD_SLACK_APP_TOKEN", "xapp-test")
+	t.Setenv("TOAD_SLACK_BOT_TOKEN", "xoxb-test")
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(origWd) })
+	projectDir := t.TempDir()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("os.Chdir: %v", err)
+	}
+
+	yamlContent := `
+issue_tracker:
+  enabled: true
+  provider: linear
+  create_issues: true
+  api_token: test-token
+  team_id: team-1
+ticket:
+  auto_file: true
+`
+	if err := os.WriteFile(projectDir+"/.toad.yaml", []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write test YAML: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !cfg.Ticket.AutoFile {
+		t.Error("expected ticket.auto_file to stay true when the tracker can create issues")
+	}
+}
+
 func TestValidate_MCPServerMissingBothURLAndCommand(t *testing.T) {
 	cfg := validTestCfg()
 	cfg.Slack.AppToken = "xapp-test"
