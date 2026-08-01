@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -357,5 +358,167 @@ func TestResolvedVCS_FullOverride(t *testing.T) {
 	}
 	if len(got.BotUsernames) != 1 || got.BotUsernames[0] != "renovate" {
 		t.Errorf("expected [renovate], got %v", got.BotUsernames)
+	}
+}
+
+func TestYAMLOverlay_IntakeTicketAgentMCP(t *testing.T) {
+	// Test that YAML overlay loads new intake, ticket, and agent mcp fields correctly.
+	yamlContent := `
+slack:
+  app_token: xapp-test
+  bot_token: xoxb-test
+repos:
+  list:
+    - name: test-repo
+      path: /tmp/test-repo
+      primary: true
+intake:
+  bot_allowlist:
+    - U123456
+    - U789012
+ticket:
+  auto_file: true
+  auto_file_confidence: 0.9
+  triage_state_id: backlog-1
+agent:
+  platform: claude
+  model: sonnet
+  mcp_servers:
+    sentry:
+      url: https://sentry.example.com
+      command: ""
+      auth_token_env: SENTRY_API_TOKEN
+    linear:
+      url: ""
+      command: /usr/local/bin/linear-mcp
+      auth_token_env: LINEAR_API_TOKEN
+  fallback_api_key_env: ANTHROPIC_API_KEY
+`
+	// Create temp directory and write YAML
+	dir := t.TempDir()
+	yamlPath := dir + "/test.yaml"
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write test YAML: %v", err)
+	}
+
+	cfg := defaults()
+	if err := loadFile(cfg, yamlPath); err != nil {
+		t.Fatalf("failed to load YAML: %v", err)
+	}
+
+	// Verify intake.bot_allowlist loaded
+	if len(cfg.Intake.BotAllowlist) != 2 {
+		t.Errorf("expected 2 bot allowlist entries, got %d", len(cfg.Intake.BotAllowlist))
+	}
+	if cfg.Intake.BotAllowlist[0] != "U123456" {
+		t.Errorf("expected bot_allowlist[0]='U123456', got %q", cfg.Intake.BotAllowlist[0])
+	}
+
+	// Verify ticket fields loaded
+	if !cfg.Ticket.AutoFile {
+		t.Error("expected ticket.auto_file=true")
+	}
+	if cfg.Ticket.AutoFileConfidence != 0.9 {
+		t.Errorf("expected ticket.auto_file_confidence=0.9, got %v", cfg.Ticket.AutoFileConfidence)
+	}
+	if cfg.Ticket.TriageStateID != "backlog-1" {
+		t.Errorf("expected ticket.triage_state_id='backlog-1', got %q", cfg.Ticket.TriageStateID)
+	}
+
+	// Verify agent.mcp_servers loaded
+	if cfg.Agent.MCPServers == nil {
+		t.Fatal("expected agent.mcp_servers to be initialized")
+	}
+	if len(cfg.Agent.MCPServers) != 2 {
+		t.Errorf("expected 2 MCP servers, got %d", len(cfg.Agent.MCPServers))
+	}
+
+	sentry, hasSentry := cfg.Agent.MCPServers["sentry"]
+	if !hasSentry {
+		t.Fatal("expected 'sentry' MCP server config")
+	}
+	if sentry.URL != "https://sentry.example.com" {
+		t.Errorf("expected sentry.url='https://sentry.example.com', got %q", sentry.URL)
+	}
+	if sentry.AuthTokenEnv != "SENTRY_API_TOKEN" {
+		t.Errorf("expected sentry.auth_token_env='SENTRY_API_TOKEN', got %q", sentry.AuthTokenEnv)
+	}
+
+	linear, hasLinear := cfg.Agent.MCPServers["linear"]
+	if !hasLinear {
+		t.Fatal("expected 'linear' MCP server config")
+	}
+	if linear.Command != "/usr/local/bin/linear-mcp" {
+		t.Errorf("expected linear.command='/usr/local/bin/linear-mcp', got %q", linear.Command)
+	}
+
+	// Verify agent.fallback_api_key_env loaded
+	if cfg.Agent.FallbackAPIKeyEnv != "ANTHROPIC_API_KEY" {
+		t.Errorf("expected agent.fallback_api_key_env='ANTHROPIC_API_KEY', got %q", cfg.Agent.FallbackAPIKeyEnv)
+	}
+}
+
+func TestDefaults_TicketConfig(t *testing.T) {
+	cfg := defaults()
+
+	if !cfg.Ticket.AutoFile {
+		t.Error("expected ticket.auto_file to default to true")
+	}
+	if cfg.Ticket.AutoFileConfidence != 0.85 {
+		t.Errorf("expected ticket.auto_file_confidence to default to 0.85, got %v", cfg.Ticket.AutoFileConfidence)
+	}
+}
+
+func TestValidate_MCPServerMissingBothURLAndCommand(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.Agent.MCPServers = map[string]MCPServerConfig{
+		"invalid": {
+			URL:          "",
+			Command:      "",
+			AuthTokenEnv: "SOME_TOKEN",
+		},
+	}
+	err := Validate(cfg)
+	if err == nil {
+		t.Error("expected error when MCP server has both URL and Command empty")
+	}
+	if !strings.Contains(err.Error(), "agent.mcp_servers.invalid") {
+		t.Errorf("expected error to mention 'agent.mcp_servers.invalid', got: %v", err)
+	}
+}
+
+func TestValidate_MCPServerValidWithURL(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.Agent.MCPServers = map[string]MCPServerConfig{
+		"valid": {
+			URL:          "https://example.com",
+			Command:      "",
+			AuthTokenEnv: "SOME_TOKEN",
+		},
+	}
+	err := Validate(cfg)
+	if err != nil {
+		t.Errorf("expected no error for valid MCP server with URL, got: %v", err)
+	}
+}
+
+func TestValidate_MCPServerValidWithCommand(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.Agent.MCPServers = map[string]MCPServerConfig{
+		"valid": {
+			URL:          "",
+			Command:      "/usr/bin/cmd",
+			AuthTokenEnv: "SOME_TOKEN",
+		},
+	}
+	err := Validate(cfg)
+	if err != nil {
+		t.Errorf("expected no error for valid MCP server with Command, got: %v", err)
 	}
 }

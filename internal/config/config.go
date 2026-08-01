@@ -24,6 +24,8 @@ type Config struct {
 	Log          LogConfig          `yaml:"log"`
 	MCP          MCPConfig          `yaml:"mcp"`
 	Personality  PersonalityConfig  `yaml:"personality"`
+	Intake       IntakeConfig       `yaml:"intake"`
+	Ticket       TicketConfig       `yaml:"ticket"`
 }
 
 type SlackConfig struct {
@@ -124,9 +126,11 @@ type VCSConfig struct {
 }
 
 type AgentConfig struct {
-	Platform           string `yaml:"platform"`             // "claude" (default)
-	Model              string `yaml:"model"`                // default: "sonnet"
-	AppendSystemPrompt string `yaml:"append_system_prompt"` // extra instructions for all agent runs
+	Platform           string                     `yaml:"platform"`             // "claude" (default)
+	Model              string                     `yaml:"model"`                // default: "sonnet"
+	AppendSystemPrompt string                     `yaml:"append_system_prompt"` // extra instructions for all agent runs
+	MCPServers         map[string]MCPServerConfig `yaml:"mcp_servers"`
+	FallbackAPIKeyEnv  string                     `yaml:"fallback_api_key_env"`
 }
 
 type LogConfig struct {
@@ -147,6 +151,22 @@ type PersonalityConfig struct {
 	Enabled         bool   `yaml:"enabled"`          // default: false (opt-in)
 	LearningEnabled bool   `yaml:"learning_enabled"` // default: true
 	FilePath        string `yaml:"file_path"`        // default: ~/.toad/personality.yaml
+}
+
+type IntakeConfig struct {
+	BotAllowlist []string `yaml:"bot_allowlist"` // Slack BotIDs allowed into triage
+}
+
+type TicketConfig struct {
+	AutoFile           bool    `yaml:"auto_file"`
+	AutoFileConfidence float64 `yaml:"auto_file_confidence"` // default 0.85
+	TriageStateID      string  `yaml:"triage_state_id"`
+}
+
+type MCPServerConfig struct {
+	URL          string `yaml:"url"`
+	Command      string `yaml:"command"`
+	AuthTokenEnv string `yaml:"auth_token_env"`
 }
 
 func defaults() *Config {
@@ -214,6 +234,10 @@ func defaults() *Config {
 		Personality: PersonalityConfig{
 			Enabled:         false,
 			LearningEnabled: true,
+		},
+		Ticket: TicketConfig{
+			AutoFile:           true,
+			AutoFileConfidence: 0.85,
 		},
 	}
 }
@@ -318,6 +342,12 @@ func Validate(cfg *Config) error {
 		}
 		if cfg.IssueTracker.TeamID == "" {
 			return fmt.Errorf("issue_tracker.team_id is required when create_issues is enabled")
+		}
+	}
+	// Validate MCPServerConfig entries
+	for name, mcp := range cfg.Agent.MCPServers {
+		if mcp.URL == "" && mcp.Command == "" {
+			return fmt.Errorf("agent.mcp_servers.%s: url or command required", name)
 		}
 	}
 	return nil
