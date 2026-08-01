@@ -26,7 +26,6 @@ type RunOpts struct {
 	Prompt              string
 	Model               string
 	WorkDir             string // working directory; empty = inherit process cwd
-	MaxTurns            int
 	Timeout             time.Duration
 	Permissions         Permission
 	AdditionalDirs      []string // extra directories the agent can access
@@ -36,11 +35,10 @@ type RunOpts struct {
 
 // RunResult holds the parsed output of an agent invocation.
 type RunResult struct {
-	Result      string
-	SessionID   string
-	CostUSD     float64
-	Duration    time.Duration
-	HitMaxTurns bool
+	Result    string
+	SessionID string
+	CostUSD   float64
+	Duration  time.Duration
 }
 
 // Provider is the interface that agent backends must implement.

@@ -122,7 +122,6 @@ func (e *Engine) analyze(ctx context.Context, msgs []Message) ([]Opportunity, er
 	result, err := e.agent.Run(ctx, agent.RunOpts{
 		Prompt:      prompt,
 		Model:       e.model,
-		MaxTurns:    1,
 		Permissions: agent.PermissionNone,
 	})
 	if err != nil {

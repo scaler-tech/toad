@@ -40,9 +40,6 @@ func TestClassify_RunOptsWiring(t *testing.T) {
 	if opts.Model != "haiku" {
 		t.Errorf("expected model 'haiku', got %q", opts.Model)
 	}
-	if opts.MaxTurns != 1 {
-		t.Errorf("expected MaxTurns=1, got %d", opts.MaxTurns)
-	}
 	if opts.Timeout != 30*time.Second {
 		t.Errorf("expected Timeout=30s, got %v", opts.Timeout)
 	}

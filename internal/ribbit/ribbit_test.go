@@ -53,9 +53,6 @@ func TestRespond_RunOptsWiring(t *testing.T) {
 	if opts.Model != "sonnet" {
 		t.Errorf("expected model 'sonnet', got %q", opts.Model)
 	}
-	if opts.MaxTurns != 10 {
-		t.Errorf("expected MaxTurns=10, got %d", opts.MaxTurns)
-	}
 	if opts.Timeout != 10*time.Minute {
 		t.Errorf("expected Timeout=10m, got %v", opts.Timeout)
 	}

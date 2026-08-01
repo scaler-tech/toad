@@ -45,9 +45,6 @@ func TestAnalyze_RunOptsWiring(t *testing.T) {
 	if opts.Model != "haiku" {
 		t.Errorf("expected model 'haiku', got %q", opts.Model)
 	}
-	if opts.MaxTurns != 1 {
-		t.Errorf("expected MaxTurns=1, got %d", opts.MaxTurns)
-	}
 	if opts.Permissions != agent.PermissionNone {
 		t.Errorf("expected PermissionNone, got %d", opts.Permissions)
 	}

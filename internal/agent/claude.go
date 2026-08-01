@@ -34,7 +34,6 @@ func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, err
 
 	slog.Info("running claude",
 		"model", opts.Model,
-		"max_turns", opts.MaxTurns,
 		"permissions", opts.Permissions,
 		"workdir", opts.WorkDir,
 	)
@@ -75,7 +74,6 @@ func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, err
 	slog.Debug("claude result parsed",
 		"result_len", len(result.Result),
 		"cost_usd", result.CostUSD,
-		"hit_max_turns", result.HitMaxTurns,
 		"session_id", result.SessionID,
 		"duration", duration,
 	)
@@ -84,13 +82,7 @@ func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, err
 }
 
 func (c *ClaudeProvider) Resume(ctx context.Context, sessionID, prompt, workDir string) (*RunResult, error) {
-	args := []string{
-		"--print",
-		"--resume", sessionID,
-		"--max-turns", "1",
-		"--output-format", "json",
-		"-p", prompt,
-	}
+	args := buildResumeArgs(sessionID, prompt)
 
 	start := time.Now()
 
@@ -119,6 +111,16 @@ func (c *ClaudeProvider) Resume(ctx context.Context, sessionID, prompt, workDir 
 	return result, nil
 }
 
+// buildResumeArgs constructs the Claude CLI argument list for resuming a session.
+func buildResumeArgs(sessionID, prompt string) []string {
+	return []string{
+		"--print",
+		"--resume", sessionID,
+		"--output-format", "json",
+		"-p", prompt,
+	}
+}
+
 // buildArgs constructs the Claude CLI argument list from RunOpts.
 func buildArgs(opts RunOpts) []string {
 	args := []string{
@@ -128,9 +130,6 @@ func buildArgs(opts RunOpts) []string {
 
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
-	}
-	if opts.MaxTurns > 0 {
-		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
 	}
 
 	switch opts.Permissions {
@@ -182,9 +181,8 @@ func parseEnvelope(output []byte) (*RunResult, error) {
 	}
 
 	return &RunResult{
-		Result:      env.Result,
-		SessionID:   env.SessionID,
-		CostUSD:     env.CostUSD,
-		HitMaxTurns: env.Subtype == "error_max_turns",
+		Result:    env.Result,
+		SessionID: env.SessionID,
+		CostUSD:   env.CostUSD,
 	}, nil
 }

@@ -20,9 +20,6 @@ func TestParseEnvelope_Valid(t *testing.T) {
 	if r.CostUSD != 0.05 {
 		t.Errorf("cost = %v, want 0.05", r.CostUSD)
 	}
-	if r.HitMaxTurns {
-		t.Error("expected HitMaxTurns=false")
-	}
 }
 
 func TestParseEnvelope_Error(t *testing.T) {
@@ -47,20 +44,6 @@ func TestParseEnvelope_InvalidJSON(t *testing.T) {
 	}
 }
 
-func TestParseEnvelope_MaxTurns(t *testing.T) {
-	output := []byte(`{"result":"","is_error":false,"subtype":"error_max_turns","session_id":"sess42"}`)
-	r, err := parseEnvelope(output)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !r.HitMaxTurns {
-		t.Error("expected HitMaxTurns=true")
-	}
-	if r.SessionID != "sess42" {
-		t.Errorf("session_id = %q, want %q", r.SessionID, "sess42")
-	}
-}
-
 func TestParseEnvelope_EmptyResult(t *testing.T) {
 	output := []byte(`{"result":"","is_error":false}`)
 	r, err := parseEnvelope(output)
@@ -74,15 +57,15 @@ func TestParseEnvelope_EmptyResult(t *testing.T) {
 
 func TestBuildArgs_PermissionNone(t *testing.T) {
 	args := buildArgs(RunOpts{
-		Model:    "haiku",
-		MaxTurns: 1,
-		Prompt:   "classify this",
+		Model:  "haiku",
+		Prompt: "classify this",
 	})
 	assertContains(t, args, "--print")
 	assertContains(t, args, "--output-format")
 	assertContains(t, args, "--model")
 	assertNotContains(t, args, "--dangerously-skip-permissions")
 	assertNotContains(t, args, "--allowedTools")
+	assertNotContains(t, args, "--max-turns")
 	// -p must be second-to-last
 	if args[len(args)-2] != "-p" || args[len(args)-1] != "classify this" {
 		t.Errorf("expected -p as last flag, got: %v", args[len(args)-2:])
@@ -143,6 +126,13 @@ func TestBuildArgs_NoModel(t *testing.T) {
 func TestBuildArgs_NoMaxTurns(t *testing.T) {
 	args := buildArgs(RunOpts{Prompt: "test"})
 	assertNotContains(t, args, "--max-turns")
+}
+
+func TestBuildResumeArgs_NoMaxTurns(t *testing.T) {
+	args := buildResumeArgs("sess-123", "continue please")
+	assertNotContains(t, args, "--max-turns")
+	assertContains(t, args, "--resume")
+	assertContains(t, args, "sess-123")
 }
 
 func TestBuildArgs_PermissionReadOnlyWithBash(t *testing.T) {

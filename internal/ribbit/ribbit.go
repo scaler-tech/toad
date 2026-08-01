@@ -133,8 +133,6 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 
 	prompt := fmt.Sprintf(ribbitPrompt, messageText, triageCtx)
 
-	maxTurns := 10
-
 	slog.Debug("running ribbit", "model", e.model, "repo", repoPath)
 
 	additionalDirs := make([]string, 0, len(repoPaths))
@@ -145,7 +143,6 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 	runOpts := agent.RunOpts{
 		Prompt:         prompt,
 		Model:          e.model,
-		MaxTurns:       maxTurns,
 		Timeout:        time.Duration(e.timeoutMinutes) * time.Minute,
 		Permissions:    agent.PermissionReadOnly,
 		WorkDir:        repoPath,
@@ -172,18 +169,12 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 	}
 
 	slog.Debug("ribbit raw response", "output", result.Result,
-		"hit_max_turns", result.HitMaxTurns, "cost_usd", result.CostUSD, "duration", result.Duration)
+		"cost_usd", result.CostUSD, "duration", result.Duration)
 
-	// Retry once on empty result — the agent may have spent all turns searching
+	// Retry once on empty result — the agent may have spent its budget searching
 	// without producing a response, or hit a transient issue.
 	if strings.TrimSpace(result.Result) == "" {
-		reason := "empty result"
-		if result.HitMaxTurns {
-			reason = "hit max turns without responding"
-			// Give more turns on retry
-			runOpts.MaxTurns = maxTurns + 5
-		}
-		slog.Warn("ribbit empty, retrying once", "reason", reason, "max_turns", runOpts.MaxTurns)
+		slog.Warn("ribbit empty, retrying once")
 
 		result, err = e.agent.Run(ctx, runOpts)
 		if err != nil {
@@ -191,14 +182,10 @@ func (e *Engine) Respond(ctx context.Context, messageText string, tr *triage.Res
 		}
 
 		slog.Debug("ribbit retry response", "output", result.Result,
-			"hit_max_turns", result.HitMaxTurns, "cost_usd", result.CostUSD, "duration", result.Duration)
+			"cost_usd", result.CostUSD, "duration", result.Duration)
 
 		if strings.TrimSpace(result.Result) == "" {
-			reason = "empty result after retry"
-			if result.HitMaxTurns {
-				reason = "hit max turns after retry"
-			}
-			return nil, fmt.Errorf("agent returned %s", reason)
+			return nil, fmt.Errorf("agent returned empty result after retry")
 		}
 	}
 
