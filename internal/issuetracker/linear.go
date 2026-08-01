@@ -43,16 +43,17 @@ type LinearTracker struct {
 	createIssues   bool
 	httpClient     *http.Client
 
-	// teamIDOnce guards team-key-to-UUID resolution so concurrent callers
-	// trigger at most one "teams" query against the Linear API. teamID
-	// itself is never mutated after construction (so it's safe to read
-	// unsynchronized, e.g. for the "configured?" check in CreateIssue) —
-	// the resolved UUID is cached separately in resolvedTeamID, which is
-	// only ever written inside the Once and only read via resolveTeamID's
-	// return value, so every reader is synchronized-after the write.
-	teamIDOnce     sync.Once
+	// teamIDMu guards team-key-to-UUID resolution. It's held across the
+	// resolution call itself, so concurrent first-callers serialize rather
+	// than each firing their own "teams" query. Only a *successful*
+	// resolution is cached (in resolvedTeamID) — a failed attempt caches
+	// nothing, so the next CreateIssue call retries instead of being
+	// permanently wedged by one transient error. teamID itself is never
+	// mutated after construction (so it's safe to read unsynchronized,
+	// e.g. for the "configured?" check in CreateIssue); resolvedTeamID is
+	// only ever read/written under teamIDMu.
+	teamIDMu       sync.Mutex
 	resolvedTeamID string
-	teamIDErr      error
 }
 
 // NewLinearTracker creates a Linear tracker from config.
@@ -301,49 +302,59 @@ func (lt *LinearTracker) doGraphQL(ctx context.Context, query string, variables 
 
 // resolveTeamID resolves a team key (e.g. "PLF") to its UUID via the Linear
 // API and returns the effective team ID to use in subsequent requests. If
-// teamID is already a UUID, it's returned as-is. The resolution work itself
-// runs at most once per tracker instance — concurrent callers all block on
-// the same sync.Once and observe its result, avoiding duplicate "teams"
-// queries.
+// teamID is already a UUID, it's returned as-is.
+//
+// A successful resolution is cached in resolvedTeamID for the lifetime of
+// the tracker, so it runs at most once across all callers. A failed
+// resolution (network error, bad response, unknown team key) is NOT
+// cached — the error is returned to that caller, but the next call to
+// resolveTeamID retries from scratch, so a single transient failure
+// doesn't permanently disable issue creation for the process's lifetime.
+// The mutex is held across the (network) resolution call itself, so
+// concurrent first-callers serialize instead of each firing their own
+// "teams" query; once resolvedTeamID is set, later callers take a fast
+// path (lock, read, unlock) with no network call.
 func (lt *LinearTracker) resolveTeamID(ctx context.Context) (string, error) {
-	lt.teamIDOnce.Do(func() {
-		if uuidRe.MatchString(lt.teamID) {
-			lt.resolvedTeamID = lt.teamID
-			return
-		}
+	lt.teamIDMu.Lock()
+	defer lt.teamIDMu.Unlock()
 
-		slog.Info("resolving Linear team key to UUID", "key", lt.teamID)
+	if lt.resolvedTeamID != "" {
+		return lt.resolvedTeamID, nil
+	}
 
-		data, err := lt.doGraphQL(ctx, `{ teams { nodes { id key } } }`, nil)
-		if err != nil {
-			lt.teamIDErr = fmt.Errorf("fetching teams: %w", err)
-			return
-		}
+	if uuidRe.MatchString(lt.teamID) {
+		lt.resolvedTeamID = lt.teamID
+		return lt.resolvedTeamID, nil
+	}
 
-		var result struct {
-			Teams struct {
-				Nodes []struct {
-					ID  string `json:"id"`
-					Key string `json:"key"`
-				} `json:"nodes"`
-			} `json:"teams"`
-		}
-		if err := json.Unmarshal(data, &result); err != nil {
-			lt.teamIDErr = fmt.Errorf("parsing teams response: %w", err)
-			return
-		}
+	slog.Info("resolving Linear team key to UUID", "key", lt.teamID)
 
-		for _, team := range result.Teams.Nodes {
-			if team.Key == lt.teamID {
-				slog.Info("resolved Linear team", "key", lt.teamID, "uuid", team.ID)
-				lt.resolvedTeamID = team.ID
-				return
-			}
-		}
+	data, err := lt.doGraphQL(ctx, `{ teams { nodes { id key } } }`, nil)
+	if err != nil {
+		return "", fmt.Errorf("fetching teams: %w", err)
+	}
 
-		lt.teamIDErr = fmt.Errorf("linear team key %q not found", lt.teamID)
-	})
-	return lt.resolvedTeamID, lt.teamIDErr
+	var result struct {
+		Teams struct {
+			Nodes []struct {
+				ID  string `json:"id"`
+				Key string `json:"key"`
+			} `json:"nodes"`
+		} `json:"teams"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parsing teams response: %w", err)
+	}
+
+	for _, team := range result.Teams.Nodes {
+		if team.Key == lt.teamID {
+			slog.Info("resolved Linear team", "key", lt.teamID, "uuid", team.ID)
+			lt.resolvedTeamID = team.ID
+			return lt.resolvedTeamID, nil
+		}
+	}
+
+	return "", fmt.Errorf("linear team key %q not found", lt.teamID)
 }
 
 // CreateIssue creates a new Linear issue via the GraphQL API.

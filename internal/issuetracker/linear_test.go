@@ -778,6 +778,81 @@ func TestResolveTeamID_ConcurrentSingleFlight(t *testing.T) {
 	}
 }
 
+func TestResolveTeamID_RetriesAfterFailure(t *testing.T) {
+	var teamsCallCount int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Query string `json:"query"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+
+		if strings.Contains(payload.Query, "teams {") {
+			n := atomic.AddInt32(&teamsCallCount, 1)
+			if n == 1 {
+				// First resolution attempt fails transiently.
+				json.NewEncoder(w).Encode(map[string]any{
+					"errors": []map[string]any{
+						{"message": "temporary failure"},
+					},
+				})
+				return
+			}
+			// Second attempt succeeds.
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"teams": map[string]any{
+						"nodes": []map[string]any{
+							{"id": "00000000-0000-0000-0000-000000000abc", "key": "PLF"},
+						},
+					},
+				},
+			})
+			return
+		}
+
+		// issueCreate mutation
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issueCreate": map[string]any{
+					"success": true,
+					"issue": map[string]any{
+						"id":         "issue-uuid",
+						"identifier": "PLF-1",
+						"url":        "https://linear.app/team/issue/PLF-1",
+						"title":      "test",
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lt := &LinearTracker{
+		apiToken:   "token",
+		teamID:     "PLF",
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+
+	// First call: team resolution fails, CreateIssue should surface the error
+	// rather than caching it permanently.
+	_, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "first"})
+	if err == nil {
+		t.Fatal("expected first CreateIssue to fail (team resolution error)")
+	}
+
+	// Second call: resolution is retried (not stuck on the cached failure)
+	// and succeeds.
+	_, err = lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "second"})
+	if err != nil {
+		t.Fatalf("expected second CreateIssue to succeed after retry, got %v", err)
+	}
+
+	if got := atomic.LoadInt32(&teamsCallCount); got != 2 {
+		t.Errorf("expected exactly 2 teams resolution queries (fail then succeed), got %d", got)
+	}
+}
+
 func TestCreateIssue_GraphQLError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
