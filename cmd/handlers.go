@@ -305,5 +305,10 @@ func handlePassive(
 // lands — this currently just acknowledges the request so the reaction path
 // compiles and gives the user a clear "not yet" message instead of silence.
 func handleTicketRequest(_ context.Context, msg *islack.IncomingMessage, slackClient *islack.Client) {
+	// The CTA/reaction path already set a "Spawning tadpole..." thread status
+	// (internal/slack/interactive.go) before dispatching here. ReplyInThread
+	// does not clear it, so without this the thread would be stuck showing
+	// that status forever alongside the phase-4 stub reply.
+	slackClient.ClearStatus(msg.Channel, msg.ThreadTS())
 	slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(), ":ticket: Ticket flow lands in phase 4.")
 }
