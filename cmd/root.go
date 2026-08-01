@@ -100,7 +100,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 
 	// 6. Check required CLI tools
-	agentProvider, err := agent.NewProvider(cfg.Agent.Platform)
+	agentProvider, err := agent.NewProvider(cfg.Agent.Platform, cfg.Agent.FallbackAPIKeyEnv)
 	if err != nil {
 		return fmt.Errorf("agent config: %w", err)
 	}

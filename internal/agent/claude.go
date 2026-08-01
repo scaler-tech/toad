@@ -6,13 +6,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
 
+// execCommand is a seam over exec.CommandContext so tests can swap in a fake
+// subprocess without invoking the real "claude" CLI.
+var execCommand = exec.CommandContext
+
+// seatThrottlePattern matches Claude CLI error text indicating the
+// subscription-seat usage limit has been hit (as opposed to some other
+// failure), which is the only condition eligible for API-key fallback.
+var seatThrottlePattern = regexp.MustCompile(`(?i)(usage limit|rate limit|out of extra usage)`)
+
 // ClaudeProvider implements Provider using the Claude Code CLI.
-type ClaudeProvider struct{}
+type ClaudeProvider struct {
+	// FallbackAPIKeyEnv, if set, names an environment variable holding an
+	// Anthropic API key. When a run fails because the subscription seat is
+	// throttled, Run retries once with ANTHROPIC_API_KEY set from this
+	// variable's value (at metered API cost) so intake keeps flowing.
+	FallbackAPIKeyEnv string
+}
 
 func (c *ClaudeProvider) Check() error {
 	_, err := exec.LookPath("claude")
@@ -23,6 +40,30 @@ func (c *ClaudeProvider) Check() error {
 }
 
 func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, error) {
+	result, err := c.runOnce(ctx, opts, nil)
+	if err == nil {
+		return result, nil
+	}
+
+	if !seatThrottlePattern.MatchString(err.Error()) {
+		return nil, err
+	}
+	if c.FallbackAPIKeyEnv == "" {
+		return nil, err
+	}
+	apiKey := os.Getenv(c.FallbackAPIKeyEnv)
+	if apiKey == "" {
+		return nil, err
+	}
+
+	slog.Warn("claude seat throttled, retrying via API key", "env", c.FallbackAPIKeyEnv)
+	return c.runOnce(ctx, opts, []string{"ANTHROPIC_API_KEY=" + apiKey})
+}
+
+// runOnce executes a single Claude CLI invocation. extraEnv, when non-empty,
+// is appended to the subprocess environment (on top of a full copy of the
+// current process environment) — used for the API-key fallback retry.
+func (c *ClaudeProvider) runOnce(ctx context.Context, opts RunOpts, extraEnv []string) (*RunResult, error) {
 	args := buildArgs(opts)
 
 	callCtx := ctx
@@ -40,9 +81,12 @@ func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, err
 
 	start := time.Now()
 
-	cmd := exec.CommandContext(callCtx, "claude", args...)
+	cmd := execCommand(callCtx, "claude", args...)
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
+	}
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -59,11 +59,14 @@ type Provider interface {
 // ErrResumeNotSupported is returned by providers that cannot resume sessions.
 var ErrResumeNotSupported = fmt.Errorf("agent provider does not support session resumption")
 
-// NewProvider returns a Provider for the given platform name.
-func NewProvider(platform string) (Provider, error) {
+// NewProvider returns a Provider for the given platform name. fallbackEnv
+// names an environment variable holding an Anthropic API key to fall back to
+// when the subscription seat is throttled (Claude platform only); pass "" to
+// disable the fallback.
+func NewProvider(platform, fallbackEnv string) (Provider, error) {
 	switch strings.ToLower(platform) {
 	case "claude", "":
-		return &ClaudeProvider{}, nil
+		return &ClaudeProvider{FallbackAPIKeyEnv: fallbackEnv}, nil
 	default:
 		return nil, fmt.Errorf("unsupported agent platform: %q", platform)
 	}

@@ -1,6 +1,11 @@
 package agent
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -225,6 +230,160 @@ func TestBuildArgs_PermissionReadOnlyWithBashAndMCPTools(t *testing.T) {
 	want := "Read,Glob,Grep,Bash(gh pr view:*),mcp__sentry__*"
 	if tools != want {
 		t.Errorf("tools = %q, want %q", tools, want)
+	}
+}
+
+// fakeScript describes a single canned CLI invocation for the execCommand seam.
+type fakeScript struct {
+	stdout   string
+	stderr   string
+	exitCode int
+}
+
+// newFakeExecCommand returns an execCommand-shaped function that, on each
+// successive call, executes the next script in order (as a real subprocess,
+// so cmd.Run/cmd.Env behave exactly as they would against the real "claude"
+// binary). It also returns the slice of *exec.Cmd it produced, so tests can
+// inspect what env/args were ultimately set on them after the code under
+// test has finished mutating and running them.
+func newFakeExecCommand(t *testing.T, scripts []fakeScript) (*[]*exec.Cmd, func(ctx context.Context, name string, arg ...string) *exec.Cmd) {
+	t.Helper()
+	dir := t.TempDir()
+	calls := &[]*exec.Cmd{}
+	idx := 0
+	fn := func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		if idx >= len(scripts) {
+			t.Fatalf("execCommand invoked more times (%d) than scripts provided (%d)", idx+1, len(scripts))
+		}
+		s := scripts[idx]
+		scriptPath := filepath.Join(dir, fmt.Sprintf("fake-claude-%d.sh", idx))
+		idx++
+
+		body := "#!/bin/sh\n"
+		if s.stdout != "" {
+			body += "cat <<'FAKE_STDOUT_EOF'\n" + s.stdout + "\nFAKE_STDOUT_EOF\n"
+		}
+		if s.stderr != "" {
+			body += "cat <<'FAKE_STDERR_EOF' >&2\n" + s.stderr + "\nFAKE_STDERR_EOF\n"
+		}
+		body += fmt.Sprintf("exit %d\n", s.exitCode)
+
+		if err := os.WriteFile(scriptPath, []byte(body), 0o755); err != nil {
+			t.Fatalf("write fake script: %v", err)
+		}
+
+		cmd := exec.CommandContext(ctx, scriptPath)
+		*calls = append(*calls, cmd)
+		return cmd
+	}
+	return calls, fn
+}
+
+func TestRun_ThrottleFallback_Success(t *testing.T) {
+	calls, fake := newFakeExecCommand(t, []fakeScript{
+		{stderr: "Claude AI usage limit reached, retry later", exitCode: 1},
+		{stdout: `{"result":"done via fallback","is_error":false,"session_id":"s1","total_cost_usd":0.01}`, exitCode: 0},
+	})
+	origExecCommand := execCommand
+	execCommand = fake
+	defer func() { execCommand = origExecCommand }()
+
+	t.Setenv("FAKE_ANTHROPIC_KEY", "sk-ant-test-value")
+
+	p := &ClaudeProvider{FallbackAPIKeyEnv: "FAKE_ANTHROPIC_KEY"}
+	result, err := p.Run(context.Background(), RunOpts{Prompt: "do work"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Result != "done via fallback" {
+		t.Errorf("result = %q, want %q", result.Result, "done via fallback")
+	}
+
+	if len(*calls) != 2 {
+		t.Fatalf("expected 2 executions, got %d", len(*calls))
+	}
+	first := (*calls)[0]
+	for _, e := range first.Env {
+		if strings.HasPrefix(e, "ANTHROPIC_API_KEY=") {
+			t.Errorf("first execution should not carry ANTHROPIC_API_KEY, got env %v", first.Env)
+		}
+	}
+	second := (*calls)[1]
+	found := false
+	for _, e := range second.Env {
+		if e == "ANTHROPIC_API_KEY=sk-ant-test-value" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("second execution env missing ANTHROPIC_API_KEY=sk-ant-test-value, got %v", second.Env)
+	}
+}
+
+func TestRun_ThrottleNoFallbackEnv_ReturnsOriginalError(t *testing.T) {
+	calls, fake := newFakeExecCommand(t, []fakeScript{
+		{stderr: "Claude AI usage limit reached, retry later", exitCode: 1},
+	})
+	origExecCommand := execCommand
+	execCommand = fake
+	defer func() { execCommand = origExecCommand }()
+
+	// FallbackAPIKeyEnv left empty entirely.
+	p := &ClaudeProvider{}
+	_, err := p.Run(context.Background(), RunOpts{Prompt: "do work"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "usage limit") {
+		t.Errorf("expected original throttle error preserved, got: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected exactly 1 execution, got %d", len(*calls))
+	}
+}
+
+func TestRun_ThrottleFallbackEnvUnset_ReturnsOriginalError(t *testing.T) {
+	calls, fake := newFakeExecCommand(t, []fakeScript{
+		{stderr: "rate limit exceeded, try again shortly", exitCode: 1},
+	})
+	origExecCommand := execCommand
+	execCommand = fake
+	defer func() { execCommand = origExecCommand }()
+
+	// FallbackAPIKeyEnv points at a var that isn't actually set in the environment.
+	os.Unsetenv("FAKE_ANTHROPIC_KEY_UNSET")
+	p := &ClaudeProvider{FallbackAPIKeyEnv: "FAKE_ANTHROPIC_KEY_UNSET"}
+	_, err := p.Run(context.Background(), RunOpts{Prompt: "do work"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "rate limit") {
+		t.Errorf("expected original throttle error preserved, got: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected exactly 1 execution (no fallback without env value), got %d", len(*calls))
+	}
+}
+
+func TestRun_NonThrottleError_NoFallback(t *testing.T) {
+	calls, fake := newFakeExecCommand(t, []fakeScript{
+		{stderr: "something unrelated broke", exitCode: 1},
+	})
+	origExecCommand := execCommand
+	execCommand = fake
+	defer func() { execCommand = origExecCommand }()
+
+	t.Setenv("FAKE_ANTHROPIC_KEY", "sk-ant-test-value")
+	p := &ClaudeProvider{FallbackAPIKeyEnv: "FAKE_ANTHROPIC_KEY"}
+	_, err := p.Run(context.Background(), RunOpts{Prompt: "do work"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "something unrelated broke") {
+		t.Errorf("expected original error preserved, got: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected exactly 1 execution for non-throttle error, got %d", len(*calls))
 	}
 }
 
