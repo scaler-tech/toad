@@ -318,61 +318,66 @@ func RegisterAskTool(srv *gomcp.Server, deps *AskDeps) {
 	})
 }
 
-// PRWatchReader abstracts PR watch queries for testability.
-type PRWatchReader interface {
-	OpenPRWatches(maxReviewRounds, maxCIFixRounds int) ([]*state.PRWatch, error)
+type investigationsArgs struct {
+	Ticket string `json:"ticket,omitempty" jsonschema:"Linear ticket ref, e.g. SCL-1482. Takes precedence over thread if both are given."`
+	Thread string `json:"thread,omitempty" jsonschema:"Slack thread timestamp"`
 }
 
-type watchesArgs struct {
-	// no args needed — returns all open watches
-}
-
-// RegisterWatchesTool registers the watches tool on the given MCP server.
-func RegisterWatchesTool(srv *gomcp.Server, db PRWatchReader) {
+// RegisterInvestigationsTool registers the investigations tool on the given MCP server.
+// It looks up toad's stored investigation findings for a ticket or Slack thread — the
+// bridge Biome uses to pull toad's full investigation context for a ticket it's executing.
+func RegisterInvestigationsTool(srv *gomcp.Server, db *state.DB) {
 	gomcp.AddTool(srv, &gomcp.Tool{
-		Name:        "watches",
-		Description: "List open PR watches being monitored by the review watcher. Dev-only access.",
-	}, func(ctx context.Context, req *gomcp.CallToolRequest, args watchesArgs) (*gomcp.CallToolResult, any, error) {
+		Name:        "investigations",
+		Description: "Look up toad's investigation findings for a ticket or Slack thread. If both ticket and thread are given, ticket takes precedence.",
+	}, func(ctx context.Context, req *gomcp.CallToolRequest, args investigationsArgs) (*gomcp.CallToolResult, any, error) {
 		tok := tokenFromContext(ctx)
-		if tok == nil || tok.Role != "dev" {
-			return nil, nil, fmt.Errorf("access denied: dev role required")
+		if tok == nil {
+			return nil, nil, fmt.Errorf("authentication required")
 		}
 
-		// Use high limits to return all open watches.
-		watches, err := db.OpenPRWatches(100, 100)
+		result, err := formatInvestigation(db, strings.TrimSpace(args.Ticket), strings.TrimSpace(args.Thread))
 		if err != nil {
-			return nil, nil, fmt.Errorf("reading PR watches: %w", err)
+			return nil, nil, err
 		}
 
-		if len(watches) == 0 {
-			return &gomcp.CallToolResult{
-				Content: []gomcp.Content{&gomcp.TextContent{Text: "No open PR watches."}},
-			}, nil, nil
-		}
-
-		result := formatWatches(watches)
 		return &gomcp.CallToolResult{
 			Content: []gomcp.Content{&gomcp.TextContent{Text: result}},
 		}, nil, nil
 	})
 }
 
-func formatWatches(watches []*state.PRWatch) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%d open PR watches:\n\n", len(watches))
-	for _, w := range watches {
-		age := time.Since(w.CreatedAt).Truncate(time.Minute)
-		fmt.Fprintf(&b, "PR #%d  %s\n", w.PRNumber, w.PRURL)
-		fmt.Fprintf(&b, "  Branch: %s\n", w.Branch)
-		fmt.Fprintf(&b, "  Age: %s\n", age)
-		fmt.Fprintf(&b, "  Review fixes: %d  CI fixes: %d  Conflict fixes: %d\n",
-			w.FixCount, w.CIFixCount, w.ConflictFixCount)
-		if w.OriginalSummary != "" {
-			fmt.Fprintf(&b, "  Summary: %s\n", w.OriginalSummary)
-		}
-		b.WriteString("\n")
+// formatInvestigation resolves an investigation by ticket (preferred) or thread and
+// formats it as a one-line header (ID/repo/created_at) followed by the raw findings
+// JSON. Returns a friendly message (not an error) when nothing is found or when both
+// ticket and thread are empty.
+func formatInvestigation(db *state.DB, ticket, thread string) (string, error) {
+	if ticket == "" && thread == "" {
+		return "provide ticket or thread", nil
 	}
-	return strings.TrimRight(b.String(), "\n")
+
+	var (
+		rec *state.InvestigationRecord
+		err error
+		ref string
+	)
+	if ticket != "" {
+		rec, err = db.FindInvestigationByTicket(ticket)
+		ref = fmt.Sprintf("ticket %s", ticket)
+	} else {
+		rec, err = db.GetInvestigationByThread(thread)
+		ref = fmt.Sprintf("thread %s", thread)
+	}
+	if err != nil {
+		return "", fmt.Errorf("looking up investigation: %w", err)
+	}
+	if rec == nil {
+		return fmt.Sprintf("no investigation found for %s", ref), nil
+	}
+
+	header := fmt.Sprintf("Investigation %s  repo=%s  created=%s\n\n",
+		rec.ID, rec.Repo, rec.CreatedAt.UTC().Format(time.RFC3339))
+	return header + rec.FindingsJSON, nil
 }
 
 // DBQuerier abstracts read-only database queries for testability.
@@ -400,11 +405,11 @@ func RegisterQueryTool(srv *gomcp.Server, db *state.DB) {
 		Name: "query",
 		Description: `Execute a read-only SQL query against the toad state database. Dev-only access.
 
-Tables: runs, thread_memory, pr_watches, daemon_stats, settings, personality_adjustments
+Tables: runs, thread_memory, daemon_stats, settings, ticket_index, investigations
 
-personality_adjustments columns: id, trait, delta, source, trigger_detail, reasoning, before_value, after_value, created_at
 runs columns: id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json, updated_at
-pr_watches columns: pr_number, pr_url, branch, run_id, slack_channel, slack_thread, last_comment_id, fix_count, ci_fix_count, conflict_fix_count, repo_path, ci_exhausted_notified, created_at, closed, final_state, original_summary, original_description`,
+ticket_index columns: external_key, issue_id, issue_url, source, investigation_id, created_at, last_seen_at, last_status, status_checked_at
+investigations columns: id, thread_ts, channel, repo, findings_json, created_at`,
 	}, func(ctx context.Context, req *gomcp.CallToolRequest, args queryArgs) (*gomcp.CallToolResult, any, error) {
 		tok := tokenFromContext(ctx)
 		if tok == nil || tok.Role != "dev" {

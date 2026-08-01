@@ -189,7 +189,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		mcpSrv = toadmcp.New(cfg.MCP, stateDB)
 
 		toadmcp.RegisterLogsTool(mcpSrv.MCPServer(), cfg.Log.File)
-		toadmcp.RegisterWatchesTool(mcpSrv.MCPServer(), stateDB)
+		toadmcp.RegisterInvestigationsTool(mcpSrv.MCPServer(), stateDB)
 		toadmcp.RegisterQueryTool(mcpSrv.MCPServer(), stateDB)
 		toadmcp.RegisterAskTool(mcpSrv.MCPServer(), &toadmcp.AskDeps{
 			Ribbit:   ribbitEngine,

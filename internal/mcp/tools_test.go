@@ -73,53 +73,163 @@ func TestReadLogs(t *testing.T) {
 	}
 }
 
-func TestFormatWatches(t *testing.T) {
-	watches := []*state.PRWatch{
-		{
-			PRNumber:         9461,
-			PRURL:            "https://github.com/org/repo/pull/9461",
-			Branch:           "fix/upload-validation",
-			FixCount:         1,
-			CIFixCount:       2,
-			ConflictFixCount: 0,
-			OriginalSummary:  "Fix upload validation for empty CSV",
-			CreatedAt:        time.Now().Add(-2 * time.Hour),
-		},
-		{
-			PRNumber:  9462,
-			PRURL:     "https://github.com/org/repo/pull/9462",
-			Branch:    "feat/add-key-row",
-			CreatedAt: time.Now().Add(-30 * time.Minute),
-		},
+func TestFormatInvestigation_ByTicket(t *testing.T) {
+	db := openTestDB(t)
+	created := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+
+	if err := db.SaveInvestigation(&state.InvestigationRecord{
+		ID:           "inv-1",
+		ThreadTS:     "1722500000.000100",
+		Channel:      "C123",
+		Repo:         "toad",
+		FindingsJSON: `{"summary":"billing crash"}`,
+		CreatedAt:    created,
+	}); err != nil {
+		t.Fatalf("SaveInvestigation: %v", err)
+	}
+	if err := db.UpsertTicketIndex(&state.TicketIndexEntry{
+		ExternalKey:     "thread:C123:1722500000.000100",
+		IssueID:         "SCL-1482",
+		IssueURL:        "https://linear.app/scl/issue/SCL-1482",
+		Source:          "auto",
+		InvestigationID: "inv-1",
+		CreatedAt:       created,
+		LastSeenAt:      created,
+	}); err != nil {
+		t.Fatalf("UpsertTicketIndex: %v", err)
 	}
 
-	result := formatWatches(watches)
-
-	if !strings.Contains(result, "2 open PR watches") {
-		t.Errorf("expected header with count, got: %q", result)
+	result, err := formatInvestigation(db, "SCL-1482", "")
+	if err != nil {
+		t.Fatalf("formatInvestigation: %v", err)
 	}
-	if !strings.Contains(result, "PR #9461") {
-		t.Error("expected PR 9461 in output")
+	if !strings.Contains(result, "inv-1") {
+		t.Errorf("expected investigation ID in header, got: %q", result)
 	}
-	if !strings.Contains(result, "PR #9462") {
-		t.Error("expected PR 9462 in output")
+	if !strings.Contains(result, "toad") {
+		t.Errorf("expected repo in header, got: %q", result)
 	}
-	if !strings.Contains(result, "Review fixes: 1  CI fixes: 2") {
-		t.Error("expected fix counts in output")
-	}
-	if !strings.Contains(result, "Fix upload validation") {
-		t.Error("expected summary in output")
-	}
-	// PR 9462 has no summary, so "Summary:" should not appear for it
-	parts := strings.SplitN(result, "PR #9462", 2)
-	if len(parts) == 2 && strings.Contains(parts[1], "Summary:") {
-		t.Error("should not show Summary line when empty")
+	if !strings.Contains(result, `{"summary":"billing crash"}`) {
+		t.Errorf("expected findings JSON in result, got: %q", result)
 	}
 }
 
-func TestFormatWatches_Empty(t *testing.T) {
-	result := formatWatches(nil)
-	if !strings.Contains(result, "0 open PR watches") {
-		t.Errorf("expected empty header, got: %q", result)
+func TestFormatInvestigation_ByThread(t *testing.T) {
+	db := openTestDB(t)
+	created := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+
+	if err := db.SaveInvestigation(&state.InvestigationRecord{
+		ID:           "inv-2",
+		ThreadTS:     "1722500000.000200",
+		Channel:      "C456",
+		Repo:         "hopper",
+		FindingsJSON: `{"summary":"upload timeout"}`,
+		CreatedAt:    created,
+	}); err != nil {
+		t.Fatalf("SaveInvestigation: %v", err)
 	}
+
+	result, err := formatInvestigation(db, "", "1722500000.000200")
+	if err != nil {
+		t.Fatalf("formatInvestigation: %v", err)
+	}
+	if !strings.Contains(result, "inv-2") {
+		t.Errorf("expected investigation ID in header, got: %q", result)
+	}
+	if !strings.Contains(result, `{"summary":"upload timeout"}`) {
+		t.Errorf("expected findings JSON in result, got: %q", result)
+	}
+}
+
+func TestFormatInvestigation_TicketPreferredOverThread(t *testing.T) {
+	db := openTestDB(t)
+	created := time.Now()
+
+	if err := db.SaveInvestigation(&state.InvestigationRecord{
+		ID:           "inv-ticket",
+		ThreadTS:     "thread-a",
+		Channel:      "C1",
+		Repo:         "toad",
+		FindingsJSON: `{"summary":"from ticket"}`,
+		CreatedAt:    created,
+	}); err != nil {
+		t.Fatalf("SaveInvestigation: %v", err)
+	}
+	if err := db.UpsertTicketIndex(&state.TicketIndexEntry{
+		ExternalKey:     "thread:C1:thread-a",
+		IssueID:         "SCL-1",
+		Source:          "auto",
+		InvestigationID: "inv-ticket",
+		CreatedAt:       created,
+		LastSeenAt:      created,
+	}); err != nil {
+		t.Fatalf("UpsertTicketIndex: %v", err)
+	}
+	if err := db.SaveInvestigation(&state.InvestigationRecord{
+		ID:           "inv-thread",
+		ThreadTS:     "thread-b",
+		Channel:      "C2",
+		Repo:         "toad",
+		FindingsJSON: `{"summary":"from thread"}`,
+		CreatedAt:    created,
+	}); err != nil {
+		t.Fatalf("SaveInvestigation: %v", err)
+	}
+
+	// Both ticket and thread set: ticket should win.
+	result, err := formatInvestigation(db, "SCL-1", "thread-b")
+	if err != nil {
+		t.Fatalf("formatInvestigation: %v", err)
+	}
+	if !strings.Contains(result, "inv-ticket") {
+		t.Errorf("expected ticket-resolved investigation to win, got: %q", result)
+	}
+	if strings.Contains(result, "inv-thread") {
+		t.Errorf("expected thread investigation to be ignored when ticket set, got: %q", result)
+	}
+}
+
+func TestFormatInvestigation_NotFound(t *testing.T) {
+	db := openTestDB(t)
+
+	result, err := formatInvestigation(db, "SCL-9999", "")
+	if err != nil {
+		t.Fatalf("formatInvestigation: %v", err)
+	}
+	if !strings.Contains(result, "no investigation found") {
+		t.Errorf("expected friendly not-found message, got: %q", result)
+	}
+	if !strings.Contains(result, "SCL-9999") {
+		t.Errorf("expected ticket ref in not-found message, got: %q", result)
+	}
+
+	result, err = formatInvestigation(db, "", "nonexistent-thread")
+	if err != nil {
+		t.Fatalf("formatInvestigation: %v", err)
+	}
+	if !strings.Contains(result, "no investigation found") {
+		t.Errorf("expected friendly not-found message, got: %q", result)
+	}
+}
+
+func TestFormatInvestigation_BothEmpty(t *testing.T) {
+	db := openTestDB(t)
+
+	result, err := formatInvestigation(db, "", "")
+	if err != nil {
+		t.Fatalf("formatInvestigation: %v", err)
+	}
+	if result != "provide ticket or thread" {
+		t.Errorf("got %q, want %q", result, "provide ticket or thread")
+	}
+}
+
+func openTestDB(t *testing.T) *state.DB {
+	t.Helper()
+	db, err := state.OpenDBAt(":memory:")
+	if err != nil {
+		t.Fatalf("opening test db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
 }
