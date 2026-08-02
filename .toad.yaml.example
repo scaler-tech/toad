@@ -49,8 +49,6 @@ repos:
 limits:
   max_concurrent: 2            # max concurrent investigations; ribbit pool is 3x this
   timeout_minutes: 10          # ribbit run timeout
-  max_retries: 1
-  history_size: 50             # thread history lines included as context
 
 # ──────────────────────────────────────────────
 # Triage — message classification
@@ -109,7 +107,8 @@ issue_tracker:
   stale_days: 7                # ignore assignments older than this many days
 
 # ──────────────────────────────────────────────
-# VCS Platform — read-only PR/CI/issue lookups for ribbit and investigation
+# VCS Platform — read-only PR/CI/issue lookups for ribbit (investigations
+# get no gh/glab access at all — Read/Glob/Grep + MCP only)
 # ──────────────────────────────────────────────
 vcs:
   platform: "github"          # "github" or "gitlab"

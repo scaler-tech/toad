@@ -132,7 +132,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		slog.Warn("startup recovery failed", "error", err)
 	}
 
-	stateManager, err := state.NewPersistentManager(stateDB, cfg.Limits.HistorySize)
+	stateManager, err := state.NewPersistentManager(stateDB)
 	if err != nil {
 		return fmt.Errorf("hydrating state: %w", err)
 	}

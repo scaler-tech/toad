@@ -486,10 +486,12 @@ personality:
 // several keys deleted from Config/RepoConfig in the F-C config sweep (dead
 // tadpole/worktree-era fields: limits.max_turns, limits.max_files_changed,
 // limits.max_retries, limits.worktree_ttl_hours, triage.auto_spawn,
-// digest.investigate_max_turns, repos[].test_command/lint_command/auto_merge/pr_labels/services) still
-// loads without error — yaml.v3 silently ignores unknown keys during
-// unmarshal, so operators upgrading an old .toad.yaml don't hit a hard
-// failure at startup.
+// digest.investigate_max_turns, repos[].test_command/lint_command/auto_merge/pr_labels/services),
+// plus limits.history_size (removed in the final-review doc-drift sweep —
+// it was accepted-and-discarded by NewPersistentManager, never actually
+// used), still loads without error — yaml.v3 silently ignores unknown keys
+// during unmarshal, so operators upgrading an old .toad.yaml don't hit a
+// hard failure at startup.
 func TestYAMLOverlay_RemovedKeysIgnored(t *testing.T) {
 	yamlContent := `
 slack:
@@ -517,6 +519,7 @@ limits:
   max_ci_fix_rounds: 2
   review_bots: ["greptile[bot]"]
   worktree_ttl_hours: 24
+  history_size: 50
 triage:
   auto_spawn: true
 digest:

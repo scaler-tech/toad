@@ -23,7 +23,7 @@ The complete guide to installing, configuring, and running toad — from zero to
 |---|---|---|
 | **Go 1.25+** | Toad is written in Go | [go.dev/dl](https://go.dev/dl/) (only needed to build from source) |
 | **Claude Code CLI** (`claude`), with a subscription seat | Toad invokes Claude as a subprocess for triage, ribbit, and investigation | [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code) |
-| **GitHub CLI** (`gh`) or **GitLab CLI** (`glab`) | Read-only PR/issue lookups used by ribbit and investigation | [cli.github.com](https://cli.github.com) / [gitlab.com/gitlab-org/cli](https://gitlab.com/gitlab-org/cli) |
+| **GitHub CLI** (`gh`) or **GitLab CLI** (`glab`) | Read-only PR/issue lookups used by ribbit (investigations are Read/Glob/Grep + MCP only, no `gh`/`glab`) | [cli.github.com](https://cli.github.com) / [gitlab.com/gitlab-org/cli](https://gitlab.com/gitlab-org/cli) |
 | **A Slack app** with Socket Mode | Toad's transport — no public URL needed | [api.slack.com/apps](https://api.slack.com/apps) |
 | **A Linear API token + team** | Toad files tickets here | [linear.app/settings/api](https://linear.app/settings/api) |
 | **A Sentry MCP token** (optional) | Lets investigations pull stack traces/issue context directly | [mcp.sentry.dev](https://mcp.sentry.dev) |
@@ -129,8 +129,6 @@ toad init
 
 Walks you through Slack tokens, repo paths, and the Toad King (digest) opt-in, then writes `.toad.yaml` in the current directory. The wizard doesn't yet cover every v2 section — notably `intake.bot_allowlist` and `ticket` tuning — so open the generated file afterward and add those by hand. [`.toad.yaml.example`](.toad.yaml.example) has every key with a comment; treat it as the reference, not something to copy wholesale.
 
-> Heads up: the wizard's welcome screen and some prompt copy still describe v1 behavior ("fixes bugs by autonomously creating pull requests") and haven't been updated for this rewrite. Ignore that copy — the [Configuration Walkthrough](#configuration-walkthrough) below is the source of truth for what toad actually does and what `.toad.yaml` should contain.
-
 ```bash
 toad
 ```
@@ -189,8 +187,6 @@ Repos are read-only context for investigations — toad never commits, pushes, o
 limits:
   max_concurrent: 2     # concurrent investigations; ribbit pool is 3x this
   timeout_minutes: 10   # ribbit run timeout
-  max_retries: 1
-  history_size: 50      # thread history lines included as context
 ```
 
 ### `triage`
@@ -287,7 +283,7 @@ vcs:
   # bot_usernames: []
 ```
 
-Used for ribbit's and investigation's read-only PR/CI/issue lookups (`gh pr view`, `gh issue view`, etc. — or the `glab` equivalents). Per-repo overrides are supported via `repos[].vcs` with the same fields.
+Used for ribbit's read-only PR/CI/issue lookups (`gh pr view`, `gh issue view`, etc. — or the `glab` equivalents). Investigations do not get `gh`/`glab` — they run with Read/Glob/Grep plus any configured MCP tools only. Per-repo overrides are supported via `repos[].vcs` with the same fields.
 
 ### `log`
 

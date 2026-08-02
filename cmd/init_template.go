@@ -114,7 +114,6 @@ repos:
 limits:
   max_concurrent: {{ .Limits.MaxConcurrent }}
   timeout_minutes: {{ .Limits.TimeoutMinutes }}
-  # history_size: 50          # Max completed runs to keep in state
 
 # ──────────────────────────────────────────────
 # Triage — message classification

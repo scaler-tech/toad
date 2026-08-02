@@ -28,7 +28,7 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 **Message flow:** Slack event (including allowlisted bots, e.g. Sentry) -> triage (Haiku, ~1s) -> route by category:
 - `question` -> ribbit reply (Claude + read-only tools)
 - `bug`/`feature` -> read-only investigation -> ticket gate: auto-file iff Sentry-corroborated + confident + feasible, else propose via a "Create Linear ticket" CTA button
-- A triage `Escalate` result, or a human clicking the CTA button / reacting with `:frog:`/`:ticket:` on a toad message, files a ticket directly — bypassing the auto-file gate, since that's already an explicit sign-off
+- A triage `Escalate` result, or a human clicking the CTA button / reacting with the single configured trigger emoji (default `:frog:`, `triggers.emoji` in config, `internal/slack/events.go`'s `handleReaction`) on a toad message, files a ticket directly — bypassing the auto-file gate, since that's already an explicit sign-off
 - Passive (Toad King digest): batches untriggered messages, analyzes with Haiku, and applies the same investigate-then-gate flow to auto-file or propose a ticket
 
 **Investigation lifecycle:** thread claim (`state.Manager.Claim`/`ClaimScoped`) -> repo re-sync (best-effort; failure appends a staleness caveat rather than blocking) -> `investigation.Runner.Run` (read-only Claude CLI subprocess, `--add-dir` for every configured repo) -> `ParseFindings` -> `ticket.Engine.Decide` (auto-file vs propose) -> `FileOrUpdate` (idempotent, keyed by Sentry issue or Slack thread) -> claim released. Findings are always persisted to the `investigations` table (even when not fed to the ticket engine) so a later CTA click or MCP `investigations` lookup can reuse them instead of re-investigating.
@@ -53,7 +53,7 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 - `internal/digest/` — Toad King: batch messages, Haiku analysis, guardrails. Split into `digest.go` (engine), `analyze.go` (LLM analysis), `chunking.go` (batching), `guardrails.go` (filtering). Proposes/files tickets through the same gate as the Slack-thread flow — never spawns anything
 - `internal/config/` — YAML config loading with cascading defaults, multi-repo profiles and resolver
 - `internal/agent/` — Agent CLI abstraction (Claude Code subprocess), MCP config writer, API-key fallback, provider interface for swappable backends
-- `internal/vcs/` — VCS provider abstraction (GitHub via `gh`, GitLab via `gitlab`), PR/CI status lookups used by ribbit's read-only tool access
+- `internal/vcs/` — VCS provider abstraction (GitHub via `gh`, GitLab via `glab`); the `Provider` interface is now just CLI availability checks (`Check`) and suggested-reviewer lookups (`GetSuggestedReviewers`) — PR/CI status lookups happen directly via ribbit/investigation's own Bash-tool `gh`/`glab` invocations, not through this package
 - `internal/issuetracker/` — Linear integration: issue creation/lookup, detail+comment fetching, assignee gating, crossposting
 - `internal/mcp/` — Model Context Protocol server: `ask`, `logs`, `investigations`, `query` tools with token auth
 - `internal/tui/` — Shared huh theme for init wizard
@@ -68,7 +68,7 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 - Investigations run with `--allowedTools Read,Glob,Grep` plus any per-run `Bash(<cmd>:*)` and `mcp__<server>__*` entries; ribbit uses the same read-only permission mode with a VCS-specific Bash allowlist (`gh pr view/list/diff/checks`, `gh issue view/list`, `gh search` on GitHub; the `glab` equivalents on GitLab)
 - When `agent.mcp_servers` is configured (e.g. a `sentry` entry), toad writes an MCP config JSON and passes `--mcp-config <path> --strict-mcp-config`; HTTP-type servers get a bearer token from `auth_token_env` if set, command-type servers run as a subprocess
 - `agent.fallback_api_key_env` names an env var holding an Anthropic API key: if a run fails because the CLI's subscription seat is throttled (usage/rate limit), toad retries once with `ANTHROPIC_API_KEY` set from that var
-- SQLite uses `modernc.org/sqlite` (pure Go, no CGo) with WAL mode; `dbRetry` wrapper retries on SQLITE_BUSY; current schema is version 10, adding `ticket_index` (external key -> filed issue, dedup/status tracking) and `investigations` (findings by ID, looked up by thread or by ticket)
+- SQLite uses `modernc.org/sqlite` (pure Go, no CGo) with WAL mode; `dbRetry` wrapper retries on SQLITE_BUSY; current schema is version 12 — v10 added `ticket_index` (external key -> filed issue, dedup/status tracking) and `investigations` (findings by ID, looked up by thread or by ticket), v11 added MCP token hashing (`mcp_tokens.expires_at`, forced rotation) and Linear state-type tracking (`ticket_index.last_state_type`), v12 added `metrics_hourly` (dashboard trend sparklines) and `investigations.duration_ms`
 - Config loads: defaults -> `~/.toad/config.yaml` -> `.toad.yaml` -> env vars
 - All Slack tokens come from env vars (`TOAD_SLACK_APP_TOKEN`, `TOAD_SLACK_BOT_TOKEN`) or `.toad.yaml`
 - Slack API calls have a 30-second HTTP timeout to prevent hung goroutines

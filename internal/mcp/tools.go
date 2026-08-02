@@ -484,11 +484,12 @@ func RegisterQueryTool(srv *gomcp.Server, db *state.DB) {
 		Name: "query",
 		Description: `Execute a read-only SQL query against the toad state database. Dev-only access.
 
-Tables: runs, thread_memory, daemon_stats, settings, ticket_index, investigations
+Tables: thread_memory, daemon_stats, settings, ticket_index, investigations, digest_opportunities, metrics_hourly, runs (legacy v1 pipeline table, unused since v2 dropped coding/PRs — kept in the schema but never written to)
 
-runs columns: id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json, updated_at
 ticket_index columns: external_key, issue_id, issue_url, source, investigation_id, created_at, last_seen_at, last_status, last_state_type, status_checked_at
-investigations columns: id, thread_ts, channel, repo, findings_json, created_at`,
+investigations columns: id, thread_ts, channel, repo, findings_json, duration_ms, created_at
+digest_opportunities columns: id, summary, category, confidence, est_size, channel, channel_id, thread_ts, message, keywords, dry_run, dismissed, reasoning, investigating, created_at
+metrics_hourly columns: bucket, name, count`,
 	}, func(ctx context.Context, req *gomcp.CallToolRequest, args queryArgs) (*gomcp.CallToolResult, any, error) {
 		tok := tokenFromContext(ctx)
 		if tok == nil || tok.Role != "dev" {

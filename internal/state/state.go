@@ -25,11 +25,8 @@ func NewManager() *Manager {
 	}
 }
 
-// NewPersistentManager creates a manager backed by SQLite. historySize is
-// accepted for backward-compatible call sites but is unused now that the
-// runs/history pipeline has been removed.
-func NewPersistentManager(db *DB, historySize int) (*Manager, error) {
-	_ = historySize
+// NewPersistentManager creates a manager backed by SQLite.
+func NewPersistentManager(db *DB) (*Manager, error) {
 	return &Manager{
 		db:      db,
 		threads: make(map[string]map[string]string),

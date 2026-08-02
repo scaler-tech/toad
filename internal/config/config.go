@@ -57,7 +57,6 @@ type RepoConfig struct {
 type LimitsConfig struct {
 	MaxConcurrent  int `yaml:"max_concurrent"`
 	TimeoutMinutes int `yaml:"timeout_minutes"`
-	HistorySize    int `yaml:"history_size"`
 }
 
 type TriageConfig struct {
@@ -159,7 +158,6 @@ func defaults() *Config {
 		Limits: LimitsConfig{
 			MaxConcurrent:  2,
 			TimeoutMinutes: 10,
-			HistorySize:    50,
 		},
 		Triage: TriageConfig{
 			Model: "haiku",

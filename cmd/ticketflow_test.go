@@ -95,7 +95,7 @@ func newTestDB(t *testing.T) *state.DB {
 
 func newTestStateManager(t *testing.T, db *state.DB) *state.Manager {
 	t.Helper()
-	m, err := state.NewPersistentManager(db, 50)
+	m, err := state.NewPersistentManager(db)
 	if err != nil {
 		t.Fatalf("creating persistent manager: %v", err)
 	}

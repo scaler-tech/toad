@@ -182,7 +182,6 @@ func TestRenderConfig_CommentsPresent(t *testing.T) {
 
 	// Check advanced options are commented out
 	commentedOptions := []string{
-		"# history_size:",
 		"# append_system_prompt:",
 		"# batch_minutes:",
 		"# min_confidence:",
