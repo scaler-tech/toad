@@ -9,6 +9,7 @@ import (
 
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/digest"
+	"github.com/scaler-tech/toad/internal/issuetracker"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/ticket"
@@ -42,7 +43,10 @@ func handleMessage(
 		// always false in practice here — computed rather than hardcoded so
 		// the rule stays in one place.
 		sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
-		handleTicketRequest(ctx, msg, slackClient, nil, deps, channelName, ticket.SourceCTA, sentryCorroborated)
+		// nil issueDetails: a bare CTA/reaction click has no thread context
+		// fetched yet — handleTicketRequest's own guard enriches it from
+		// scratch when ThreadContext is empty.
+		handleTicketRequest(ctx, msg, slackClient, nil, deps, nil, channelName, ticket.SourceCTA, sentryCorroborated)
 		return
 	}
 
@@ -188,7 +192,12 @@ func handleTriggered(
 
 	// Enrich thread context by resolving any Linear ticket URLs/references
 	// into full issue descriptions so triage and ribbit have real context.
-	msg.ThreadContext = enrichWithIssueDetails(ctx, deps.tracker, msg.Text, msg.ThreadContext)
+	// issueDetails is threaded through to runTriggeredInvestigation/
+	// handleTicketRequest below so buildTicketContextBlock (ticketflow.go)
+	// can reuse these already-fetched details instead of re-extracting and
+	// re-fetching the same tickets from the tracker.
+	var issueDetails []issuetracker.IssueDetails
+	msg.ThreadContext, issueDetails = enrichWithIssueDetails(ctx, deps.tracker, msg.Text, msg.ThreadContext)
 
 	// Triage — fast Haiku classification (~1s) to decide category for ribbit.
 	result, err := triageEngine.Classify(ctx, msg, channelName)
@@ -244,7 +253,7 @@ func handleTriggered(
 	if result.Escalate {
 		slog.Info("triage escalate flag set, routing to ticket flow", "summary", result.Summary)
 		releaseRibbitSem()
-		handleTicketRequest(ctx, msg, slackClient, result, deps, channelName, ticket.SourceEscalation, sentryCorroborated)
+		handleTicketRequest(ctx, msg, slackClient, result, deps, issueDetails, channelName, ticket.SourceEscalation, sentryCorroborated)
 		return
 	}
 
@@ -262,7 +271,7 @@ func handleTriggered(
 		slackClient.SetStatus(msg.Channel, threadTS, "Investigating the codebase...")
 		releaseRibbitSem()
 
-		outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS, deps, sentryCorroborated)
+		outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS, deps, issueDetails, sentryCorroborated)
 
 		if outcome.Kind != outcomeFallThrough {
 			slackClient.ClearStatus(msg.Channel, threadTS)

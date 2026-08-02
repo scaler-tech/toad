@@ -196,39 +196,20 @@ func renderTicketContextBlock(items []ticketItem) string {
 	return b.String()
 }
 
-// buildTicketContextBlock formats any issue-tracker references found in text
-// or threadContext into the "<linked_tickets>" block (mirroring the deleted
-// v1 cmd/investigation.go's formatTicketContext). Reuses the same
-// extraction as enrichWithIssueDetails (cmd/helpers.go) but renders a
-// separate tagged block instead of appending plain entries to a context
-// slice, since investigation.Request keeps ticket context distinct from raw
-// thread conversation. Returns "" when no issue references are found.
-func buildTicketContextBlock(ctx context.Context, tracker issuetracker.Tracker, text string, threadContext []string) string {
-	allText := text
-	for _, tc := range threadContext {
-		allText += "\n" + tc
-	}
-	refs := tracker.ExtractAllIssueRefs(allText)
-	if len(refs) == 0 {
-		return ""
-	}
-
-	limit := 3
-	if len(refs) < limit {
-		limit = len(refs)
-	}
-
-	var items []ticketItem
-	for _, ref := range refs[:limit] {
-		details, err := tracker.GetIssueDetails(ctx, ref)
-		if err != nil {
-			slog.Warn("failed to fetch issue details for ticket context", "issue", ref.ID, "error", err)
-			continue
-		}
-		if details == nil {
-			continue
-		}
-		items = append(items, ticketItem{ID: details.ID, Title: details.Title, Description: details.Description})
+// buildTicketContextBlock formats already-fetched issue-tracker details into
+// the "<linked_tickets>" block (mirroring the deleted v1
+// cmd/investigation.go's formatTicketContext). details comes from the
+// caller's own enrichWithIssueDetails call (cmd/helpers.go) — that function
+// already extracts issue references from the same text/threadContext this
+// function used to re-extract from, and fetches their details over the
+// network; re-extracting and re-fetching here duplicated that work (up to 2
+// GetIssueDetails calls per ticket per flow) for the identical result, since
+// every caller of this function enriches its message before calling it.
+// Returns "" when details is empty.
+func buildTicketContextBlock(details []issuetracker.IssueDetails) string {
+	items := make([]ticketItem, 0, len(details))
+	for _, d := range details {
+		items = append(items, ticketItem{ID: d.ID, Title: d.Title, Description: d.Description})
 	}
 	return renderTicketContextBlock(items)
 }
@@ -389,6 +370,7 @@ func runTriggeredInvestigation(
 	result *triage.Result,
 	channelName, threadTS string,
 	deps flowDeps,
+	issueDetails []issuetracker.IssueDetails,
 	sentryCorroborated bool,
 ) triggeredOutcome {
 	defer deps.stateManager.Unclaim(threadTS)
@@ -425,7 +407,7 @@ func runTriggeredInvestigation(
 		Keywords:      result.Keywords,
 		FilesHint:     result.FilesHint,
 		SentryRefs:    msg.SentryRefs,
-		TicketContext: buildTicketContextBlock(ctx, deps.tracker, msg.Text, msg.ThreadContext),
+		TicketContext: buildTicketContextBlock(issueDetails),
 		Repo:          repo,
 		Timeout:       4 * time.Minute,
 	}
@@ -552,6 +534,7 @@ func runTicketRequest(
 	msg *islack.IncomingMessage,
 	result *triage.Result, // nil for a bare CTA click with no fresh triage
 	deps flowDeps,
+	issueDetails []issuetracker.IssueDetails,
 	channelName, threadTS string,
 	src ticket.Source,
 	sentryCorroborated bool,
@@ -587,7 +570,7 @@ func runTicketRequest(
 			Keywords:      keywords,
 			FilesHint:     filesHint,
 			SentryRefs:    msg.SentryRefs,
-			TicketContext: buildTicketContextBlock(ctx, deps.tracker, msg.Text, msg.ThreadContext),
+			TicketContext: buildTicketContextBlock(issueDetails),
 			Repo:          repo,
 			Timeout:       4 * time.Minute,
 		}
@@ -666,6 +649,7 @@ func handleTicketRequest(
 	slackClient *islack.Client,
 	result *triage.Result,
 	deps flowDeps,
+	issueDetails []issuetracker.IssueDetails,
 	channelName string,
 	src ticket.Source,
 	sentryCorroborated bool,
@@ -679,14 +663,15 @@ func handleTicketRequest(
 	defer slackClient.ClearStatus(msg.Channel, threadTS)
 	slackClient.SetStatus(msg.Channel, threadTS, "Filing a ticket...")
 
-	// Reuse already-fetched, already-enriched thread context when the caller
-	// already has it (the escalation branch reuses msg from handleTriggered,
-	// which already populated AND enriched ThreadContext via
-	// enrichWithIssueDetails) — the guard covers both the fetch and the
-	// enrich call, so a bare CTA click (no context yet) does both exactly
-	// once, and the escalation path does neither again (review minor: this
-	// guard previously covered only the fetch, so escalation threads got
-	// enriched twice).
+	// Reuse already-fetched, already-enriched thread context (and its
+	// fetched issueDetails) when the caller already has it — the escalation
+	// branch reuses msg from handleTriggered, which already populated AND
+	// enriched ThreadContext via enrichWithIssueDetails, passing its
+	// issueDetails through as this function's own parameter. The guard
+	// covers both the fetch and the enrich call, so a bare CTA click (no
+	// context yet) does both exactly once, and the escalation path does
+	// neither again (review minor: this guard previously covered only the
+	// fetch, so escalation threads got enriched twice).
 	if len(msg.ThreadContext) == 0 {
 		if msg.ThreadTimestamp != "" {
 			if tc, err := slackClient.FetchThreadMessages(msg.Channel, msg.ThreadTimestamp); err != nil {
@@ -695,10 +680,10 @@ func handleTicketRequest(
 				msg.ThreadContext = tc
 			}
 		}
-		msg.ThreadContext = enrichWithIssueDetails(ctx, deps.tracker, msg.Text, msg.ThreadContext)
+		msg.ThreadContext, issueDetails = enrichWithIssueDetails(ctx, deps.tracker, msg.Text, msg.ThreadContext)
 	}
 
-	outcome := runTicketRequest(ctx, msg, result, deps, channelName, threadTS, src, sentryCorroborated)
+	outcome := runTicketRequest(ctx, msg, result, deps, issueDetails, channelName, threadTS, src, sentryCorroborated)
 	if outcome.Conflict {
 		slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
 		return
@@ -729,6 +714,7 @@ func runBotIntake(
 	triageEngine *triage.Engine,
 	channelName string,
 	deps flowDeps,
+	issueDetails []issuetracker.IssueDetails,
 	sentryCorroborated bool,
 ) *triggeredOutcome {
 	result, err := triageEngine.Classify(ctx, msg, channelName)
@@ -762,7 +748,7 @@ func runBotIntake(
 	}
 
 	slog.Info("bot intake investigating", "summary", result.Summary, "category", result.Category, "bot_id", msg.BotID)
-	outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS, deps, sentryCorroborated)
+	outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS, deps, issueDetails, sentryCorroborated)
 
 	if outcome.Kind == outcomeFallThrough {
 		slog.Debug("bot intake: investigation fell through (infeasible or errored), dropping", "bot_id", msg.BotID)
@@ -790,9 +776,10 @@ func handleBotIntake(
 			msg.ThreadContext = tc
 		}
 	}
-	msg.ThreadContext = enrichWithIssueDetails(ctx, deps.tracker, msg.Text, msg.ThreadContext)
+	var issueDetails []issuetracker.IssueDetails
+	msg.ThreadContext, issueDetails = enrichWithIssueDetails(ctx, deps.tracker, msg.Text, msg.ThreadContext)
 
-	outcome := runBotIntake(ctx, msg, triageEngine, channelName, deps, sentryCorroborated)
+	outcome := runBotIntake(ctx, msg, triageEngine, channelName, deps, issueDetails, sentryCorroborated)
 	if outcome == nil {
 		return
 	}

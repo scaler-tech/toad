@@ -35,11 +35,33 @@ type ticketflowTrackerFake struct {
 	// exercises preInvestigationTicketCheck's re-observation comment failing
 	// without crashing the flow (it's logged and swallowed).
 	postErr error
+
+	// refs and detailsByID, when set, make ExtractAllIssueRefs/GetIssueDetails
+	// behave like a real tracker instead of the embedded NoopTracker's
+	// always-nil — used by the double-fetch regression test (item 12):
+	// getIssueDetailsCalls counts invocations so a test can assert
+	// buildTicketContextBlock reuses enrichWithIssueDetails' already-fetched
+	// details instead of independently re-extracting refs and re-fetching them.
+	refs                 []*issuetracker.IssueRef
+	detailsByID          map[string]*issuetracker.IssueDetails
+	getIssueDetailsCalls int
 }
 
 // ShouldCreateIssues overrides the embedded NoopTracker's false — every test
 // in this file exercises a tracker meant to be capable of filing.
 func (f *ticketflowTrackerFake) ShouldCreateIssues() bool { return true }
+
+func (f *ticketflowTrackerFake) ExtractAllIssueRefs(string) []*issuetracker.IssueRef {
+	return f.refs
+}
+
+func (f *ticketflowTrackerFake) GetIssueDetails(_ context.Context, ref *issuetracker.IssueRef) (*issuetracker.IssueDetails, error) {
+	f.getIssueDetailsCalls++
+	if d, ok := f.detailsByID[ref.ID]; ok {
+		return d, nil
+	}
+	return nil, nil
+}
 
 func (f *ticketflowTrackerFake) CreateIssue(_ context.Context, opts issuetracker.CreateIssueOpts) (*issuetracker.IssueRef, error) {
 	if f.createErr != nil {
@@ -167,7 +189,7 @@ func TestRunTriggeredInvestigation_AutoFilesHighConfidenceSentryFinding(t *testi
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		deps, true /* sentryCorroborated */)
+		deps, nil, true /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeFiled {
 		t.Fatalf("expected outcomeFiled, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -199,6 +221,52 @@ func TestRunTriggeredInvestigation_AutoFilesHighConfidenceSentryFinding(t *testi
 	}
 }
 
+// Item 12 (perf) regression: handleTriggered/handleBotIntake enrich a
+// message's thread context by fetching linked-ticket details via
+// enrichWithIssueDetails, then used to pass the (already-enriched) text back
+// into buildTicketContextBlock, which independently re-extracted the same
+// refs and re-fetched their details a second time — up to 2 GetIssueDetails
+// calls per ticket per flow. buildTicketContextBlock now takes the
+// caller's already-fetched issuetracker.IssueDetails directly instead, so
+// this exercises runTriggeredInvestigation exactly as handleTriggered calls
+// it (enrich once, thread the result through) and asserts GetIssueDetails is
+// called exactly once per ref — and that the investigation prompt still
+// carries the linked ticket's title, i.e. same final prompt content, fewer
+// HTTP calls.
+func TestRunTriggeredInvestigation_TicketContextReusesEnrichedDetailsNoDoubleFetch(t *testing.T) {
+	_, stateManager, tracker, mockProvider, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+	tracker.refs = []*issuetracker.IssueRef{{Provider: "linear", ID: "TOAD-9"}}
+	tracker.detailsByID = map[string]*issuetracker.IssueDetails{
+		"TOAD-9": {ID: "TOAD-9", Title: "Linked ticket title", Description: "Linked ticket description"},
+	}
+
+	msg := &islack.IncomingMessage{Channel: "C15", Timestamp: "1500.1", Text: "see TOAD-9 for context, users report double refunds"}
+	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "double refunds", Actionable: true}
+
+	// Mirrors handleTriggered: enrich once, thread the fetched details
+	// through to runTriggeredInvestigation as its own parameter.
+	threadContext, issueDetails := enrichWithIssueDetails(context.Background(), tracker, msg.Text, msg.ThreadContext)
+	msg.ThreadContext = threadContext
+
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Fatal("expected claim to succeed on a fresh thread")
+	}
+
+	runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
+		deps, issueDetails, true /* sentryCorroborated */)
+
+	if tracker.getIssueDetailsCalls != 1 {
+		t.Errorf("expected exactly 1 GetIssueDetails call (no independent re-fetch by buildTicketContextBlock), got %d", tracker.getIssueDetailsCalls)
+	}
+	if len(mockProvider.RunCalls) != 1 {
+		t.Fatalf("expected exactly 1 investigation agent Run call, got %d", len(mockProvider.RunCalls))
+	}
+	prompt := mockProvider.RunCalls[0].Prompt
+	if !strings.Contains(prompt, "TOAD-9") || !strings.Contains(prompt, "Linked ticket title") {
+		t.Errorf("expected the investigation prompt to carry the linked ticket's title, got %q", prompt)
+	}
+}
+
 // (b) low-confidence finding -> proposed to a human, with TicketBlocks
 // producing real Slack blocks for the composed reply.
 func TestRunTriggeredInvestigation_ProposesLowConfidenceFinding(t *testing.T) {
@@ -212,7 +280,7 @@ func TestRunTriggeredInvestigation_ProposesLowConfidenceFinding(t *testing.T) {
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		deps, false /* sentryCorroborated */)
+		deps, nil, false /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeProposed {
 		t.Fatalf("expected outcomeProposed, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -257,7 +325,7 @@ func TestRunTriggeredInvestigation_DuplicateSentryKeySkipsInvestigation(t *testi
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		deps, true /* sentryCorroborated */)
+		deps, nil, true /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeIdempotentHit {
 		t.Fatalf("expected outcomeIdempotentHit, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -311,7 +379,7 @@ func TestRunTriggeredInvestigation_FallsThroughToRibbitOnInvestigationError(t *t
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		deps, false /* sentryCorroborated */)
+		deps, nil, false /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeFallThrough {
 		t.Fatalf("expected outcomeFallThrough on an investigation agent error, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -340,7 +408,7 @@ func TestRunTriggeredInvestigation_CreateIssueErrorSurfacesAsFilingFailed(t *tes
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		deps, true /* sentryCorroborated */)
+		deps, nil, true /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeFilingFailed {
 		t.Fatalf("expected outcomeFilingFailed, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -391,7 +459,7 @@ func TestRunTriggeredInvestigation_ReObservationPostCommentErrorDoesNotCrashFlow
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		deps, true /* sentryCorroborated */)
+		deps, nil, true /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeIdempotentHit {
 		t.Fatalf("expected outcomeIdempotentHit despite the PostComment error, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -428,7 +496,7 @@ func TestRunTriggeredInvestigation_HumanPastedSentryIDDoesNotAutoFile(t *testing
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		deps, false /* sentryCorroborated */)
+		deps, nil, false /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeProposed {
 		t.Fatalf("expected outcomeProposed for a non-corroborated Sentry ID, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -439,7 +507,7 @@ func TestRunTriggeredInvestigation_HumanPastedSentryIDDoesNotAutoFile(t *testing
 
 	// A human later explicitly files it via the CTA, reusing the saved
 	// finding — must dedup-key on the thread, not the unverified sentry ID.
-	outcome2 := runTicketRequest(context.Background(), msg, nil, deps, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
+	outcome2 := runTicketRequest(context.Background(), msg, nil, deps, nil, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
 	if outcome2.Err != nil {
 		t.Fatalf("unexpected error filing via CTA: %v", outcome2.Err)
 	}
@@ -502,7 +570,7 @@ func TestRunTicketRequest_FilesDirectlyForPreviouslyProposedFinding(t *testing.T
 	msg := &islack.IncomingMessage{Channel: "C5", Timestamp: "500.1", Text: "please file a ticket for this"}
 	saveInvestigationRecord(db, "invest-test-1", msg.ThreadTS(), msg.Channel, findings)
 
-	outcome := runTicketRequest(context.Background(), msg, nil, deps, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
+	outcome := runTicketRequest(context.Background(), msg, nil, deps, nil, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
 
 	if outcome.Err != nil {
 		t.Fatalf("unexpected error: %v", outcome.Err)
@@ -548,7 +616,7 @@ func TestRunTicketRequest_ConflictWhenThreadAlreadyClaimed(t *testing.T) {
 	// Deliberately not unclaiming, to simulate a concurrent flow already
 	// holding this thread's claim.
 
-	outcome := runTicketRequest(context.Background(), msg, nil, deps, "eng-alerts", threadTS, ticket.SourceEscalation, false /* sentryCorroborated */)
+	outcome := runTicketRequest(context.Background(), msg, nil, deps, nil, "eng-alerts", threadTS, ticket.SourceEscalation, false /* sentryCorroborated */)
 
 	if !outcome.Conflict {
 		t.Fatalf("expected Conflict outcome, got %+v", outcome)
@@ -577,7 +645,7 @@ func TestRunBotIntake_ActionableCorroboratedBugAutoFiles(t *testing.T) {
 
 	msg := &islack.IncomingMessage{Channel: "C14", Timestamp: "1400.1", SentryRefs: []string{"BILLING-42"}, Text: "users report double refunds", IsBot: true, BotID: "B_SENTRY"}
 
-	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts", deps, true /* sentryCorroborated */)
+	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts", deps, nil, true /* sentryCorroborated */)
 
 	if outcome == nil {
 		t.Fatal("expected a non-nil outcome for an actionable, corroborated bug")
@@ -616,7 +684,7 @@ func TestRunBotIntake_DropsQuestionCategoryNoInvestigation(t *testing.T) {
 
 	msg := &islack.IncomingMessage{Channel: "C7", Timestamp: "700.1", BotID: "B123", IsBot: true, Text: "what's the deploy status?"}
 
-	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts", deps, true /* sentryCorroborated */)
+	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts", deps, nil, true /* sentryCorroborated */)
 
 	if outcome != nil {
 		t.Fatalf("expected nil outcome (dropped) for a question-triaged bot message, got %+v", outcome)
@@ -909,7 +977,7 @@ func TestDigestSaveThenCTAReuse_NonCorroboratedClearsSentryID(t *testing.T) {
 		ticketEngine:   ticketEngine,
 		investigateSem: investigateSem,
 	}
-	outcome := runTicketRequest(context.Background(), ctaMsg, nil, deps, "eng-alerts", ctaMsg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
+	outcome := runTicketRequest(context.Background(), ctaMsg, nil, deps, nil, "eng-alerts", ctaMsg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
 	if outcome.Err != nil {
 		t.Fatalf("unexpected error filing via CTA: %v", outcome.Err)
 	}
@@ -967,7 +1035,7 @@ func TestDigestSaveThenCTAReuse_CorroboratedKeepsSentryID(t *testing.T) {
 		ticketEngine:   ticketEngine,
 		investigateSem: investigateSem,
 	}
-	outcome := runTicketRequest(context.Background(), ctaMsg, nil, deps, "eng-alerts", ctaMsg.ThreadTS(), ticket.SourceCTA, true /* sentryCorroborated */)
+	outcome := runTicketRequest(context.Background(), ctaMsg, nil, deps, nil, "eng-alerts", ctaMsg.ThreadTS(), ticket.SourceCTA, true /* sentryCorroborated */)
 	if outcome.Err != nil {
 		t.Fatalf("unexpected error filing via CTA: %v", outcome.Err)
 	}

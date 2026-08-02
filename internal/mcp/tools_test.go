@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,64 @@ func TestReadLogs(t *testing.T) {
 	result, _ = readLogs(logFile, 100, "", "nonexistent", "")
 	if !strings.Contains(result, "No matching") {
 		t.Errorf("expected no matches message, got: %q", result)
+	}
+}
+
+// TestReadLogs_LargeFileSpansMultipleChunks exercises scanLinesBackward's
+// bounded backward-chunked read (readChunkSize = 64KiB) against a file large
+// enough to span several chunks — a regression test for item 13's rewrite
+// from "read the entire file into memory, then truncate" to a backward scan
+// bounded by lines needed rather than file size. Verifies lines aren't
+// corrupted, dropped, or duplicated at chunk boundaries, and that a match
+// near the very start of the file is still found by walking back across
+// every intervening boundary.
+func TestReadLogs_LargeFileSpansMultipleChunks(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "toad-large.log")
+
+	const numLines = 5000 // ~240KB total, spanning several 64KB chunks
+	lines := make([]string, numLines)
+	for i := 0; i < numLines; i++ {
+		lines[i] = fmt.Sprintf(`time=2026-03-09T10:00:00Z level=INFO msg="line %06d"`, i)
+	}
+	// A distinctive marker near the very start of the file — finding it
+	// forces the backward scan to walk across every chunk boundary.
+	lines[3] = `time=2026-03-09T10:00:00Z level=INFO msg="UNIQUE_EARLY_MARKER"`
+
+	if err := os.WriteFile(logFile, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() <= readChunkSize {
+		t.Fatalf("test fixture (%d bytes) does not exceed readChunkSize (%d) — not exercising multi-chunk behavior", info.Size(), readChunkSize)
+	}
+
+	// The last 10 lines, byte-exact and in chronological order.
+	result, err := readLogs(logFile, 10, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(strings.TrimSpace(result), "\n")
+	if len(got) != 10 {
+		t.Fatalf("expected 10 lines, got %d", len(got))
+	}
+	for i, want := range lines[numLines-10:] {
+		if got[i] != want {
+			t.Errorf("line %d: got %q, want %q", i, got[i], want)
+		}
+	}
+
+	// A match near the very start of the file must still be found.
+	result, err = readLogs(logFile, 10, "", "UNIQUE_EARLY_MARKER", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(result) != lines[3] {
+		t.Errorf("expected the near-the-start marker line, got %q", result)
 	}
 }
 

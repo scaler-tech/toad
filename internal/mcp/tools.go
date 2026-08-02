@@ -1,9 +1,9 @@
 package mcp
 
 import (
-	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"regexp"
@@ -52,31 +52,30 @@ func RegisterLogsTool(srv *gomcp.Server, logFile string) {
 	})
 }
 
-// maxScanLines is the maximum number of lines read from the log file.
-// This caps memory usage for long-running daemons with large log files.
+// maxScanLines is the maximum number of lines scanned from the log file,
+// walking backward from the end. This caps IO/memory for long-running
+// daemons with large log files — readLogs stops once it has scanned this
+// many lines (or found maxLines matches, whichever comes first), rather
+// than reading the entire file into memory before truncating to this bound.
 const maxScanLines = 10000
 
-// readLogs reads the log file, keeps the last maxScanLines lines to bound
-// memory, filters them, and returns up to maxLines matches in chronological order.
+// readChunkSize is the size of each backward read in scanLinesBackward.
+// Bounds how much of the file is held in memory at once, independent of
+// how large the file itself is.
+const readChunkSize = 64 * 1024
+
+// readLogs scans the log file backward from the end, in bounded chunks
+// (see scanLinesBackward), filters lines as they're read, and returns up to
+// maxLines matches in chronological order. It reads only as much of the
+// file as needed to satisfy maxLines matches, capped at maxScanLines lines
+// scanned — never the whole file, which the previous implementation read
+// into memory in full on every call before truncating to maxScanLines.
 func readLogs(logFile string, maxLines int, level, search, since string) (string, error) {
 	f, err := os.Open(logFile)
 	if err != nil {
 		return "", fmt.Errorf("reading log file: %w", err)
 	}
 	defer f.Close()
-
-	// Read all lines, then keep only the tail to bound memory.
-	var lines []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if len(lines) > maxScanLines {
-		lines = lines[len(lines)-maxScanLines:]
-	}
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("scanning log file: %w", err)
-	}
 
 	var sinceTime time.Time
 	if since != "" {
@@ -99,31 +98,41 @@ func readLogs(logFile string, maxLines int, level, search, since string) (string
 		}
 	}
 
-	// Filter from end for tail behavior, collect matches.
-	var matched []string
-	for i := len(lines) - 1; i >= 0 && len(matched) < maxLines; i-- {
-		line := lines[i]
+	matchesFilters := func(line string) bool {
 		if line == "" {
-			continue
+			return false
 		}
-
 		if levelUpper != "" && !strings.Contains(line, "level="+levelUpper) {
-			continue
+			return false
 		}
-
-		if searchRe != nil && !searchRe.MatchString(line) {
-			continue
+		if searchRe != nil {
+			if !searchRe.MatchString(line) {
+				return false
+			}
 		} else if searchLower != "" && !strings.Contains(strings.ToLower(line), searchLower) {
-			continue
+			return false
 		}
-
 		if !sinceTime.IsZero() {
 			if t, ok := parseLogTime(line); ok && t.Before(sinceTime) {
-				continue
+				return false
 			}
 		}
+		return true
+	}
 
-		matched = append(matched, line)
+	// matched accumulates newest-first (scanLinesBackward visits lines from
+	// the end of the file backward) — reversed to chronological order below.
+	var matched []string
+	scanned := 0
+	err = scanLinesBackward(f, func(line string) (stop bool) {
+		scanned++
+		if matchesFilters(line) {
+			matched = append(matched, line)
+		}
+		return len(matched) >= maxLines || scanned >= maxScanLines
+	})
+	if err != nil {
+		return "", fmt.Errorf("scanning log file: %w", err)
 	}
 
 	if len(matched) == 0 {
@@ -136,6 +145,67 @@ func readLogs(logFile string, maxLines int, level, search, since string) (string
 	}
 
 	return strings.Join(matched, "\n"), nil
+}
+
+// scanLinesBackward reads f from the end in readChunkSize-sized chunks,
+// invoking visit once per complete line in reverse order (the file's last
+// line first, working back toward the first). It stops as soon as visit
+// returns true — the caller has everything it needs — or once the
+// beginning of the file is reached. At most a small, fixed number of
+// readChunkSize buffers are held in memory at once, regardless of how large
+// f is: the bound is on lines actually read, not file size.
+func scanLinesBackward(f *os.File, visit func(line string) (stop bool)) error {
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+
+	// carry holds the leading fragment of the most-recently-read chunk:
+	// a line whose true beginning lies in the next (earlier) chunk still to
+	// be read. It's stitched onto the front of that earlier chunk's own
+	// data before splitting into lines again.
+	var carry []byte
+	pos := size
+	buf := make([]byte, readChunkSize)
+
+	for pos > 0 {
+		readSize := int64(readChunkSize)
+		if readSize > pos {
+			readSize = pos
+		}
+		pos -= readSize
+
+		if _, err := f.ReadAt(buf[:readSize], pos); err != nil {
+			return fmt.Errorf("reading chunk at offset %d: %w", pos, err)
+		}
+
+		data := buf[:readSize]
+		if len(carry) > 0 {
+			data = append(append([]byte{}, buf[:readSize]...), carry...)
+		}
+
+		lines := strings.Split(string(data), "\n")
+
+		// lines[0] is only a complete line if this chunk reaches all the
+		// way back to the start of the file (pos == 0) — otherwise its true
+		// beginning is in the chunk read next, so carry it forward instead
+		// of visiting it yet.
+		startIdx := 0
+		if pos > 0 {
+			carry = []byte(lines[0])
+			startIdx = 1
+		} else {
+			carry = nil
+		}
+
+		for i := len(lines) - 1; i >= startIdx; i-- {
+			if visit(lines[i]) {
+				return nil
+			}
+		}
+	}
+
+	return nil
 }
 
 // parseSince parses a duration string (e.g. "1h", "30m") relative to now,

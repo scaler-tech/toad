@@ -18,7 +18,16 @@ import (
 // unique reference found, it fetches the full issue title and description
 // and appends them as additional context lines. This lets triage and ribbit
 // see what a linked ticket actually says rather than just its ID.
-func enrichWithIssueDetails(ctx context.Context, tracker issuetracker.Tracker, text string, threadContext []string) []string {
+//
+// It also returns the raw fetched issuetracker.IssueDetails alongside the
+// formatted context lines. Callers (cmd/handlers.go, cmd/ticketflow.go)
+// thread this slice through to buildTicketContextBlock instead of letting
+// it re-derive and re-fetch the same references from the now-enriched
+// text — GetIssueDetails is a network call per ref, and both functions were
+// independently extracting refs from and fetching details for the same
+// underlying message/thread (up to 2 GetIssueDetails calls per ticket per
+// flow) before this was threaded through.
+func enrichWithIssueDetails(ctx context.Context, tracker issuetracker.Tracker, text string, threadContext []string) ([]string, []issuetracker.IssueDetails) {
 	// Gather all text to scan for references
 	allText := text
 	for _, tc := range threadContext {
@@ -27,7 +36,7 @@ func enrichWithIssueDetails(ctx context.Context, tracker issuetracker.Tracker, t
 
 	refs := tracker.ExtractAllIssueRefs(allText)
 	if len(refs) == 0 {
-		return threadContext
+		return threadContext, nil
 	}
 
 	// Resolve each unique ref (cap at 3 to avoid slow lookups)
@@ -36,6 +45,7 @@ func enrichWithIssueDetails(ctx context.Context, tracker issuetracker.Tracker, t
 		limit = len(refs)
 	}
 	var enriched []string
+	var fetched []issuetracker.IssueDetails
 	for _, ref := range refs[:limit] {
 		details, err := tracker.GetIssueDetails(ctx, ref)
 		if err != nil {
@@ -55,14 +65,15 @@ func enrichWithIssueDetails(ctx context.Context, tracker issuetracker.Tracker, t
 			entry += "\n" + desc
 		}
 		enriched = append(enriched, entry)
+		fetched = append(fetched, *details)
 		slog.Debug("enriched thread context with issue details", "issue", details.ID)
 	}
 
 	if len(enriched) == 0 {
-		return threadContext
+		return threadContext, nil
 	}
 
-	return append(threadContext, enriched...)
+	return append(threadContext, enriched...), fetched
 }
 
 // syncRepos periodically fetches and fast-forward pulls all configured repos.
