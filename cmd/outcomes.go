@@ -138,7 +138,12 @@ func classifyOutcome(status, stateType string) string {
 		return "accepted"
 	}
 
-	// No state type available — fall back to name matching.
+	// stateType is either empty or something outside Linear's known set
+	// (e.g. a non-Linear tracker, or a future Linear type this switch
+	// hasn't been taught yet). Both are deliberately treated the same way:
+	// fall back to name matching rather than bucketing straight to
+	// "unknown". This widens the fallback rather than narrowing it — an
+	// unrecognized type is no worse a signal than no type at all.
 	switch strings.ToLower(status) {
 	case "cancelled", "canceled", "duplicate": //nolint:misspell // Linear uses British spelling
 		return "rejected"
