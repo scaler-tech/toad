@@ -232,23 +232,6 @@ func (m *Manager) Complete(runID string, result *RunResult) {
 	}
 }
 
-// GetByThread looks up all active runs for a Slack thread timestamp.
-func (m *Manager) GetByThread(threadTS string) []*Run {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	inner, ok := m.threads[threadTS]
-	if !ok {
-		return nil
-	}
-	var runs []*Run
-	for _, runID := range inner {
-		if run, exists := m.runs[runID]; exists {
-			runs = append(runs, run)
-		}
-	}
-	return runs
-}
-
 // Active returns all currently running investigations.
 func (m *Manager) Active() []*Run {
 	m.mu.RLock()

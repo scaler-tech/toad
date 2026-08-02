@@ -19,6 +19,13 @@ func (e *Engine) passesGuardrails(opp Opportunity) bool {
 		return false
 	}
 
+	// A nil cfg means the engine was never configured with guardrails at
+	// all — fail closed rather than dereference a nil pointer for the
+	// category/size checks below.
+	if e.cfg == nil {
+		return false
+	}
+
 	// Category check
 	allowed := false
 	for _, cat := range e.cfg.AllowedCategories {
@@ -49,6 +56,12 @@ func (e *Engine) passesGuardrails(opp Opportunity) bool {
 // trySpawn checks and increments the hourly spawn counter.
 // Returns true if under the limit, false if at capacity.
 func (e *Engine) trySpawn() bool {
+	// A nil cfg has no configured hourly cap — conservative behavior is to
+	// refuse to spawn rather than dereference a nil pointer.
+	if e.cfg == nil {
+		return false
+	}
+
 	e.spawnMu.Lock()
 	defer e.spawnMu.Unlock()
 

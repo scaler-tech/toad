@@ -7,33 +7,6 @@ import (
 	"time"
 )
 
-func TestTrackAndGetByThread(t *testing.T) {
-	m := NewManager()
-	run := &Run{
-		ID:            "run-1",
-		Status:        "running",
-		SlackThreadTS: "1234.5678",
-		Task:          "fix bug",
-		StartedAt:     time.Now(),
-	}
-	m.Track(run)
-
-	got := m.GetByThread("1234.5678")
-	if len(got) == 0 {
-		t.Fatal("expected to find run by thread")
-	}
-	if got[0].ID != "run-1" {
-		t.Errorf("got ID %q, want %q", got[0].ID, "run-1")
-	}
-}
-
-func TestGetByThread_NotFound(t *testing.T) {
-	m := NewManager()
-	if got := m.GetByThread("nonexistent"); len(got) != 0 {
-		t.Errorf("expected empty slice, got %v", got)
-	}
-}
-
 func TestClaim(t *testing.T) {
 	m := NewManager()
 	if !m.Claim("thread-1") {
@@ -77,8 +50,9 @@ func TestUnclaim_DoesNotRemoveTrackedRun(t *testing.T) {
 	// Unclaim should NOT remove a thread that has a real run tracked
 	m.Unclaim("thread-1")
 
-	got := m.GetByThread("thread-1")
-	if len(got) == 0 {
+	// If the mapping had been removed, this claim would succeed; it must
+	// fail instead, proving the tracked run's exclusive claim is still held.
+	if m.Claim("thread-1") {
 		t.Fatal("unclaim should not remove a tracked run's thread mapping")
 	}
 }
@@ -167,7 +141,6 @@ func TestConcurrentAccess(t *testing.T) {
 			m.Claim(ts)
 			m.Track(&Run{ID: id, Status: "running", SlackThreadTS: ts, StartedAt: time.Now()})
 			m.Update(id, "validating")
-			m.GetByThread(ts)
 			m.Active()
 			m.Complete(id, &RunResult{Success: true})
 			m.History()
@@ -271,11 +244,10 @@ func TestUnclaimScoped_OnlyRemovesPlaceholder(t *testing.T) {
 		StartedAt:     time.Now(),
 	})
 
-	// UnclaimScoped should NOT remove because it has a real runID
+	// UnclaimScoped should NOT remove because it has a real runID — a
+	// subsequent claim of the same scope must still fail.
 	m.UnclaimScoped("thread-1", "DAT-100")
-
-	got := m.GetByThread("thread-1")
-	if len(got) == 0 {
+	if m.ClaimScoped("thread-1", "DAT-100") {
 		t.Fatal("unclaim should not remove a tracked run's thread mapping")
 	}
 
@@ -283,13 +255,13 @@ func TestUnclaimScoped_OnlyRemovesPlaceholder(t *testing.T) {
 	m.ClaimScoped("thread-1", "DAT-200")
 	m.UnclaimScoped("thread-1", "DAT-200")
 
-	// DAT-200 should be gone, DAT-100 should remain
-	got = m.GetByThread("thread-1")
-	if len(got) != 1 {
-		t.Fatalf("expected 1 run after unclaim of placeholder, got %d", len(got))
+	// DAT-200's placeholder is gone, so the scope is claimable again ...
+	if !m.ClaimScoped("thread-1", "DAT-200") {
+		t.Fatal("expected DAT-200 to be reclaimable after its placeholder was unclaimed")
 	}
-	if got[0].ID != "run-1" {
-		t.Errorf("expected run-1, got %s", got[0].ID)
+	// ... while DAT-100 still can't be, since run-1's tracked claim survived.
+	if m.ClaimScoped("thread-1", "DAT-100") {
+		t.Error("expected DAT-100 to remain held by the tracked run")
 	}
 }
 
@@ -315,50 +287,14 @@ func TestComplete_ScopedReleasesOnlyItsScope(t *testing.T) {
 	// Complete run-1 (DAT-100)
 	m.Complete("run-1", &RunResult{Success: true})
 
-	// DAT-200 should still be active
-	got := m.GetByThread("thread-1")
-	if len(got) != 1 {
-		t.Fatalf("expected 1 remaining run, got %d", len(got))
-	}
-	if got[0].ID != "run-2" {
-		t.Errorf("expected run-2 to survive, got %s", got[0].ID)
+	// DAT-200 should still be active — its scope must still be held, i.e.
+	// unclaimable, since run-2 is untouched by completing run-1.
+	if m.ClaimScoped("thread-1", "DAT-200") {
+		t.Error("expected DAT-200 to still be held by run-2 after completing only run-1")
 	}
 
 	// DAT-100 should be reclaimable
 	if !m.ClaimScoped("thread-1", "DAT-100") {
 		t.Error("DAT-100 should be reclaimable after completion")
-	}
-}
-
-func TestGetByThread_ReturnsMultiple(t *testing.T) {
-	m := NewManager()
-	m.ClaimScoped("thread-1", "DAT-100")
-	m.Track(&Run{
-		ID:            "run-1",
-		Status:        "running",
-		SlackThreadTS: "thread-1",
-		ClaimScope:    "DAT-100",
-		StartedAt:     time.Now(),
-	})
-	m.ClaimScoped("thread-1", "DAT-200")
-	m.Track(&Run{
-		ID:            "run-2",
-		Status:        "running",
-		SlackThreadTS: "thread-1",
-		ClaimScope:    "DAT-200",
-		StartedAt:     time.Now(),
-	})
-
-	got := m.GetByThread("thread-1")
-	if len(got) != 2 {
-		t.Fatalf("expected 2 runs, got %d", len(got))
-	}
-
-	ids := map[string]bool{}
-	for _, r := range got {
-		ids[r.ID] = true
-	}
-	if !ids["run-1"] || !ids["run-2"] {
-		t.Errorf("expected run-1 and run-2, got %v", ids)
 	}
 }

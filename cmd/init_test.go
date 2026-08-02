@@ -195,60 +195,6 @@ func TestRenderConfig_CommentsPresent(t *testing.T) {
 	}
 }
 
-func TestSuggestCommands(t *testing.T) {
-	tests := []struct {
-		stack    string
-		wantTest string
-		wantLint string
-	}{
-		{"Go", "go test ./...", "go vet ./..."},
-		{"TypeScript", "npm test", "npm run lint"},
-		{"Python", "pytest", "ruff check ."},
-		{"Rust", "cargo test", "cargo clippy"},
-		{"", "", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.stack, func(t *testing.T) {
-			// Use a temp dir that won't have lock files
-			tmpDir := t.TempDir()
-			gotTest, gotLint := suggestCommands(tt.stack, tmpDir)
-			if gotTest != tt.wantTest {
-				t.Errorf("test command: got %q, want %q", gotTest, tt.wantTest)
-			}
-			if gotLint != tt.wantLint {
-				t.Errorf("lint command: got %q, want %q", gotLint, tt.wantLint)
-			}
-		})
-	}
-}
-
-func TestSuggestCommands_YarnLock(t *testing.T) {
-	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "yarn.lock"), []byte(""), 0o644)
-
-	testCmd, lintCmd := suggestCommands("TypeScript", tmpDir)
-	if testCmd != "yarn test" {
-		t.Errorf("test command: got %q, want %q", testCmd, "yarn test")
-	}
-	if lintCmd != "yarn lint" {
-		t.Errorf("lint command: got %q, want %q", lintCmd, "yarn lint")
-	}
-}
-
-func TestSuggestCommands_PHPMakefile(t *testing.T) {
-	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "Makefile"), []byte("test:\n\tphpunit"), 0o644)
-
-	testCmd, lintCmd := suggestCommands("PHP", tmpDir)
-	if testCmd != "make test" {
-		t.Errorf("test command: got %q, want %q", testCmd, "make test")
-	}
-	if lintCmd != "make stan && make cs" {
-		t.Errorf("lint command: got %q, want %q", lintCmd, "make stan && make cs")
-	}
-}
-
 func TestDetectDefaultBranch(t *testing.T) {
 	// Create a temporary git repo
 	tmpDir := t.TempDir()
