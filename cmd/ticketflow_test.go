@@ -142,9 +142,27 @@ const highConfidenceSentryFindings = `{"feasible":true,"title":"Refund export do
 
 const lowConfidenceSentryFindings = `{"feasible":true,"title":"Maybe a bug","problem":"p","root_cause":"rc","evidence":[],"scope":["s"],"non_goals":[],"acceptance_criteria":["ac"],"confidence":0.5,"repo":"svc","sentry_issue_ids":["BILLING-42"],"issue_id":"","files_found":[],"reasoning":"Not fully confident this is the root cause."}`
 
+// twoSentryIDsFindings is highConfidenceSentryFindings but with the model
+// emitting TWO sentry_issue_ids instead of one — used by Fix 2's ref-scoping
+// tests, where only one of the two actually appears in the corroborating
+// message's own extracted refs (msg.SentryRefs/trustedRefs) and the other
+// must not survive enforceCorroboration's intersection even though the whole
+// finding is otherwise corroborated.
+const twoSentryIDsFindings = `{"feasible":true,"title":"Refund export double-counts partial refunds","problem":"p","root_cause":"rc","evidence":[],"scope":["s"],"non_goals":[],"acceptance_criteria":["ac"],"confidence":0.92,"repo":"svc","sentry_issue_ids":["BILLING-42","BILLING-43"],"issue_id":"","files_found":[],"reasoning":"Found the root cause via Sentry stack trace."}`
+
 func autoFileCfg() config.TicketConfig {
 	return config.TicketConfig{AutoFile: true, AutoFileConfidence: 0.85}
 }
+
+// billing42SentryLink is a realistic Sentry-link-wrapped mrkdwn reference to
+// "BILLING-42" — the same shape internal/slack/sentry_test.go exercises for
+// ExtractSentryRefs. Digest fixtures below use this (rather than plain text
+// like "double refunds") wherever a test needs islack.ExtractSentryRefs to
+// actually find "BILLING-42" in a digest.Message's Text — Fix 2's ref-scoping
+// intersects findings.SentryIssueIDs against exactly these extracted refs, so
+// a corroborated finding whose message text doesn't literally contain the ID
+// no longer survives just because BotID is allowlisted.
+const billing42SentryLink = "<https://acme.sentry.io/issues/5566778899|BILLING-42>"
 
 // TestComposeFiledReply_AlreadyExistedUsesLinkedWording exercises
 // composeFiledReply directly (no investigation/state/tracker scaffolding
@@ -741,7 +759,7 @@ func TestProposeFromDigest_AutoFilesSentryCorroboratedFinding(t *testing.T) {
 		SentryIssueIDs: []string{"BILLING-42"},
 		Reasoning:      "Found the root cause via Sentry stack trace.",
 	}
-	msg := digest.Message{Channel: "C1", ThreadTS: "100.1", Text: "double refunds", BotID: "B_SENTRY"}
+	msg := digest.Message{Channel: "C1", ThreadTS: "100.1", Text: "double refunds " + billing42SentryLink, BotID: "B_SENTRY"}
 
 	var calls []digestPostCall
 	post := func(channel, threadTS, text string, showCTA bool) (string, error) {
@@ -872,7 +890,7 @@ func TestDigestFlow_AutoFiledTicketBacklinksInvestigation(t *testing.T) {
 	investigateSem := make(chan struct{}, 1)
 
 	opp := digest.Opportunity{Summary: "fix refunds", Category: "bug", Confidence: 0.99, Repo: "svc"}
-	msg := digest.Message{Channel: "C9", ThreadTS: "900.1", ChannelName: "errors", Text: "users report double refunds", BotID: "B_SENTRY"}
+	msg := digest.Message{Channel: "C9", ThreadTS: "900.1", ChannelName: "errors", Text: "users report double refunds " + billing42SentryLink, BotID: "B_SENTRY"}
 
 	// B_SENTRY is allowlisted, so investigateFromDigest must NOT clear
 	// findings.SentryIssueIDs before saving the InvestigationRecord.
@@ -1016,7 +1034,7 @@ func TestDigestSaveThenCTAReuse_CorroboratedKeepsSentryID(t *testing.T) {
 	investRunner := investigation.NewRunner(mockProvider, "sonnet", "", nil, nil, nil)
 
 	opp := digest.Opportunity{Summary: "double refunds", Category: "bug", Confidence: 0.99, Repo: "svc"}
-	digestMsg := digest.Message{Channel: "C21", ThreadTS: "2100.1", ChannelName: "eng-alerts", Text: "double refunds", BotID: "B_SENTRY"}
+	digestMsg := digest.Message{Channel: "C21", ThreadTS: "2100.1", ChannelName: "eng-alerts", Text: "double refunds " + billing42SentryLink, BotID: "B_SENTRY"}
 
 	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, db, 600, opp, digestMsg, nil, []string{"B_SENTRY"})
 	if err != nil {
@@ -1026,7 +1044,13 @@ func TestDigestSaveThenCTAReuse_CorroboratedKeepsSentryID(t *testing.T) {
 		t.Fatal("expected investigateFromDigest to keep SentryIssueIDs for an allowlisted-bot-sourced message")
 	}
 
-	ctaMsg := &islack.IncomingMessage{Channel: digestMsg.Channel, Timestamp: digestMsg.ThreadTS, IsBot: true, BotID: "B_SENTRY"}
+	// ctaMsg.SentryRefs mirrors what a real button click would carry: the
+	// button path's FetchMessage (internal/slack/interactive.go) re-extracts
+	// SentryRefs from the fetched anchor message's own text, so the CURRENT
+	// request's trusted refs are populated here too, not left empty — an
+	// empty SentryRefs would (correctly, per Fix 2's ref-scoping) intersect
+	// down to nothing regardless of corroboration.
+	ctaMsg := &islack.IncomingMessage{Channel: digestMsg.Channel, Timestamp: digestMsg.ThreadTS, IsBot: true, BotID: "B_SENTRY", SentryRefs: []string{"BILLING-42"}}
 	deps := flowDeps{
 		stateManager:   newTestStateManager(t, db),
 		tracker:        tracker,
@@ -1046,5 +1070,193 @@ func TestDigestSaveThenCTAReuse_CorroboratedKeepsSentryID(t *testing.T) {
 	}
 	if entry == nil {
 		t.Fatal("expected a ticket_index row keyed sentry:BILLING-42 for a corroborated report, got none")
+	}
+}
+
+// Fix 2 (security, follow-up): ref-scoping. Before this fix,
+// enforceCorroboration kept f.SentryIssueIDs verbatim whenever corroborated
+// was true — but SentryIssueIDs is model output influenced by the WHOLE
+// thread, including any human-pasted text, not just the corroborating bot
+// message. A thread rooted by an allowlisted monitoring bot's message (which
+// only ever mentions BILLING-99) could still have a human reply paste an
+// unrelated "BILLING-42", and the model might surface BILLING-42 in its
+// findings — that must not steer ticket identity onto BILLING-42 merely
+// because the THREAD as a whole is bot-corroborated. This exercises case (a)
+// from the review: the model-emitted ID is NOT among the refs extracted from
+// the corroborating message itself, so it must be dropped entirely and
+// ExternalKey must fall back to the thread key.
+func TestRunTriggeredInvestigation_ModelEmittedSentryIDNotInBotMessageDropsIt(t *testing.T) {
+	db, stateManager, tracker, _, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+
+	// The bot's own message only ever mentioned BILLING-99 — msg.SentryRefs
+	// is the trusted set. The mock investigation (highConfidenceSentryFindings)
+	// emits BILLING-42 instead, simulating a model surfacing a DIFFERENT
+	// Sentry ID than the one the corroborating bot message actually carried
+	// (e.g. inferred from human-pasted text elsewhere in the thread).
+	msg := &islack.IncomingMessage{Channel: "C30", Timestamp: "3000.1", SentryRefs: []string{"BILLING-99"}, Text: "users report double refunds", IsBot: true, BotID: "B_SENTRY"}
+	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "double refunds", Actionable: true}
+
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Fatal("expected claim to succeed on a fresh thread")
+	}
+
+	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
+		deps, nil, true /* sentryCorroborated */)
+
+	// With SentryIssueIDs dropped entirely, ticketEngine.Decide's auto-file
+	// gate (which requires a non-blank Sentry ID) no longer clears — this
+	// falls back to a human-gated propose, not a silent auto-file, which is
+	// itself part of what ref-scoping is meant to enforce: an unverified ID
+	// must not be able to buy its way into auto-file just because the THREAD
+	// happens to be bot-corroborated.
+	if outcome.Kind != outcomeProposed {
+		t.Fatalf("expected outcomeProposed once the untrusted sentry ID is dropped, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
+	}
+	if outcome.Findings == nil || len(outcome.Findings.SentryIssueIDs) != 0 {
+		t.Errorf("expected the model-emitted BILLING-42 to be dropped (not in trusted refs), got %+v", outcome.Findings)
+	}
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected no CreateIssue call once auto-file's sentry-ID gate no longer clears, got %d", len(tracker.createCalls))
+	}
+
+	// ExternalKey would have fallen back to the thread key had this been
+	// filed at all — confirmed here as a negative: no ticket_index row of any
+	// kind exists yet, sentry- or thread-keyed, since nothing was filed.
+	if entry, err := db.GetTicketIndex("sentry:BILLING-42"); err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	} else if entry != nil {
+		t.Errorf("expected no ticket_index row keyed by the untrusted sentry ID, got %+v", entry)
+	}
+	threadKey := "thread:" + msg.Channel + ":" + msg.ThreadTS()
+	if entry, err := db.GetTicketIndex(threadKey); err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	} else if entry != nil {
+		t.Errorf("expected no ticket_index row at all (propose path doesn't file), got %+v", entry)
+	}
+}
+
+// Fix 2 (security, follow-up), case (b): the corroborating bot message's own
+// text only carries ONE of the two Sentry IDs the model emitted — only that
+// one may survive enforceCorroboration's intersection, not both.
+func TestRunTriggeredInvestigation_ModelEmittedExtraSentryIDIntersectedOut(t *testing.T) {
+	db, stateManager, tracker, _, deps := setupTriggeredTest(t, twoSentryIDsFindings, autoFileCfg())
+
+	// The bot message itself only mentions BILLING-42 (msg.SentryRefs); the
+	// model's findings (twoSentryIDsFindings) additionally emit BILLING-43.
+	msg := &islack.IncomingMessage{Channel: "C31", Timestamp: "3100.1", SentryRefs: []string{"BILLING-42"}, Text: "users report double refunds", IsBot: true, BotID: "B_SENTRY"}
+	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "double refunds", Actionable: true}
+
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Fatal("expected claim to succeed on a fresh thread")
+	}
+
+	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
+		deps, nil, true /* sentryCorroborated */)
+
+	if outcome.Kind != outcomeFiled {
+		t.Fatalf("expected outcomeFiled, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
+	}
+	if outcome.Findings == nil || len(outcome.Findings.SentryIssueIDs) != 1 || outcome.Findings.SentryIssueIDs[0] != "BILLING-42" {
+		t.Errorf("expected only BILLING-42 to survive the intersection, got %+v", outcome.Findings)
+	}
+
+	if entry, err := db.GetTicketIndex("sentry:BILLING-43"); err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	} else if entry != nil {
+		t.Errorf("expected no ticket_index row keyed by the untrusted extra sentry ID BILLING-43, got %+v", entry)
+	}
+
+	entry, err := db.GetTicketIndex("sentry:BILLING-42")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected a ticket_index row keyed by the one trusted sentry ID BILLING-42, got none")
+	}
+	if len(tracker.createCalls) != 1 {
+		t.Fatalf("expected exactly 1 CreateIssue call, got %d", len(tracker.createCalls))
+	}
+}
+
+// Fix 2 (security, follow-up), case (c): a non-corroborated report (no
+// allowlisted bot involved at all) must still clear SentryIssueIDs entirely,
+// regardless of trustedRefs — this is the pre-existing behavior
+// (enforceCorroboration's corroborated==false branch), asserted directly
+// here for completeness alongside the new ref-scoping cases above. Even
+// though msg.SentryRefs here matches the model's emitted ID exactly, an
+// unauthenticated/non-bot source must still yield nothing.
+func TestRunTriggeredInvestigation_NonCorroboratedClearsSentryIDsEvenIfRefsMatch(t *testing.T) {
+	db, stateManager, tracker, _, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+
+	msg := &islack.IncomingMessage{Channel: "C32", Timestamp: "3200.1", SentryRefs: []string{"BILLING-42"}, Text: "users report double refunds"}
+	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "double refunds", Actionable: true}
+
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Fatal("expected claim to succeed on a fresh thread")
+	}
+
+	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
+		deps, nil, false /* sentryCorroborated */)
+
+	if outcome.Kind != outcomeProposed {
+		t.Fatalf("expected outcomeProposed for a non-corroborated report, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
+	}
+	if outcome.Findings == nil || len(outcome.Findings.SentryIssueIDs) != 0 {
+		t.Errorf("expected SentryIssueIDs cleared entirely for a non-corroborated report, got %+v", outcome.Findings)
+	}
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected no CreateIssue call for a non-corroborated finding, got %d", len(tracker.createCalls))
+	}
+	if entry, err := db.GetTicketIndex("sentry:BILLING-42"); err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	} else if entry != nil {
+		t.Errorf("expected no ticket_index row keyed by sentry ID for a non-corroborated report, got %+v", entry)
+	}
+}
+
+// Fix 2 (security, follow-up), case (d): the reuse path. A saved investigation
+// record can carry SentryIssueIDs that were never scoped to any particular
+// request's trusted refs (e.g. saved before this fix, or by a differently-
+// gated path) — runTicketRequest's unconditional re-apply of
+// enforceCorroboration on reuse must intersect against the CURRENT request's
+// own trustedRefs (msg.SentryRefs), not just check the corroborated flag.
+// Here the saved record carries two IDs; the current CTA request's message
+// only corroborates one of them.
+func TestRunTicketRequest_ReuseIntersectsAgainstCurrentRequestTrustedRefs(t *testing.T) {
+	db, _, tracker, mockProvider, deps := setupTriggeredTest(t, "", autoFileCfg())
+
+	findings := &investigation.Findings{
+		Feasible: true, Title: "Refund export double-counts partial refunds", Problem: "p", RootCause: "rc",
+		Confidence: 0.92, Repo: "svc", Reasoning: "root cause found via sentry",
+		SentryIssueIDs: []string{"BILLING-42", "BILLING-99"}, // saved un-scoped, predating/bypassing this fix
+	}
+	msg := &islack.IncomingMessage{Channel: "C33", Timestamp: "3300.1", Text: "please file a ticket for this", SentryRefs: []string{"BILLING-42"}, IsBot: true, BotID: "B_SENTRY"}
+	saveInvestigationRecord(db, "invest-test-reuse-1", msg.ThreadTS(), msg.Channel, findings)
+
+	outcome := runTicketRequest(context.Background(), msg, nil, deps, nil, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, true /* sentryCorroborated */)
+
+	if outcome.Err != nil {
+		t.Fatalf("unexpected error: %v", outcome.Err)
+	}
+	if len(tracker.createCalls) != 1 {
+		t.Fatalf("expected exactly 1 CreateIssue call, got %d", len(tracker.createCalls))
+	}
+	// The saved (reused) finding was used directly — no fresh investigation.
+	if len(mockProvider.RunCalls) != 0 {
+		t.Errorf("expected no investigation agent Run call when reusing a saved finding, got %d", len(mockProvider.RunCalls))
+	}
+
+	if entry, err := db.GetTicketIndex("sentry:BILLING-99"); err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	} else if entry != nil {
+		t.Errorf("expected no ticket_index row keyed by BILLING-99 (not in the current request's trusted refs), got %+v", entry)
+	}
+
+	entry, err := db.GetTicketIndex("sentry:BILLING-42")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected a ticket_index row keyed by BILLING-42 (the current request's trusted ref), got none")
 	}
 }

@@ -44,11 +44,15 @@ func handleMessage(
 	if msg.IsTicketRequest {
 		slog.Info("handler: ticket requested", "channel", channelName, "thread", msg.ThreadTS())
 		// sentryCorroborated uses the single corroboration mechanism (see
-		// isSentryCorroborated's doc comment in ticketflow.go). A
-		// ticket-request reaction fires on toad's OWN reply (msg.BotID is
-		// toad's bot ID), never an allowlisted monitoring bot's, so this is
-		// always false in practice here — computed rather than hardcoded so
-		// the rule stays in one place.
+		// isSentryCorroborated's doc comment in ticketflow.go). This is NOT
+		// always false in practice: a :frog:-reaction ticket request fires on
+		// toad's OWN reply (msg.BotID is toad's bot ID, never allowlisted),
+		// but the button path (internal/slack/interactive.go's
+		// handleInteractive) fetches the original thread anchor at threadTS
+		// via FetchMessage — which can legitimately be an allowlisted
+		// monitoring bot's message, not toad's own. Computed rather than
+		// hardcoded so the rule stays in one place regardless of which entry
+		// path produced msg.
 		sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
 		// nil issueDetails: a bare CTA/reaction click has no thread context
 		// fetched yet — handleTicketRequest's own guard enriches it from

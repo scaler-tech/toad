@@ -96,29 +96,73 @@ func runInvestigation(ctx context.Context, investRunner *investigation.Runner, i
 // works for callers that only have a raw bot ID string (e.g. digest.Message,
 // which carries no IsBot field of its own).
 //
-// This is the single mechanism for the corroboration gate: a Sentry ID must
-// never drive ticket identity, auto-file, or the ticket footer merely
-// because it appears in human-pasted text or an investigation agent's own
-// output — only because it arrived from a bot on the configured allowlist.
-// See enforceCorroboration for the other half of the rule (clearing
-// findings that fail this check).
+// This is the single mechanism for the corroboration gate, combined with
+// enforceCorroboration's ref-scoping: a Sentry ID must never drive ticket
+// identity, auto-file, or the ticket footer merely because it appears in
+// human-pasted text or an investigation agent's own output — only because
+// it arrived from a bot on the configured allowlist AND matches one of the
+// Sentry refs extracted from that bot message's own text. isSentryCorroborated
+// answers "did this arrive from an allowlisted bot at all"; it is not by
+// itself sufficient to trust an arbitrary model-emitted Sentry ID — see
+// enforceCorroboration for the ref-intersection that closes that gap.
 func isSentryCorroborated(botID string, allowlist []string) bool {
 	return botID != "" && slices.Contains(allowlist, botID)
 }
 
-// enforceCorroboration clears f.SentryIssueIDs when corroborated is false —
-// the single enforcement point for the corroboration rule (see
-// isSentryCorroborated's doc comment for the full rationale): a Sentry
-// reference may only drive Decide/ExternalKey/FileOrUpdate/the ticket
+// enforceCorroboration is the single enforcement point for the corroboration
+// rule (see isSentryCorroborated's doc comment for the full rationale): a
+// Sentry reference may only drive Decide/ExternalKey/FileOrUpdate/the ticket
 // footer once it's been confirmed to have arrived from an allowlisted
-// monitoring bot, never from human-pasted text or model output. Nil-safe —
-// a no-op when f is nil — so callers can pass a possibly-nil *Findings
-// without a separate guard.
-func enforceCorroboration(f *investigation.Findings, corroborated bool) {
-	if f == nil || corroborated {
+// monitoring bot, never from human-pasted text or model output.
+//
+// When corroborated is false, f.SentryIssueIDs is cleared entirely.
+//
+// When corroborated is true, f.SentryIssueIDs is intersected against
+// trustedRefs — the Sentry refs extracted directly from the corroborating
+// bot message's own text (via islack.ExtractSentryRefs), NOT the model's
+// freeform output. f.SentryIssueIDs is itself model output, and the model
+// sees the whole thread — including any human-pasted text — so "corroborated
+// == true" alone is not enough to trust whichever IDs the model happened to
+// emit: a human reply pasting an arbitrary Sentry key into a thread rooted by
+// an allowlisted bot could otherwise steer ticket identity (ExternalKey ->
+// sentry:<id>) and the auto-file gate onto a fabricated ID. Only IDs that
+// also appear in trustedRefs survive; anything else the model emitted is
+// dropped, same as the non-corroborated case, and ExternalKey falls back to
+// the thread key.
+//
+// Nil-safe — a no-op when f is nil — so callers can pass a possibly-nil
+// *Findings without a separate guard.
+func enforceCorroboration(f *investigation.Findings, corroborated bool, trustedRefs []string) {
+	if f == nil {
 		return
 	}
-	f.SentryIssueIDs = nil
+	if !corroborated {
+		f.SentryIssueIDs = nil
+		return
+	}
+	f.SentryIssueIDs = intersectTrustedSentryRefs(f.SentryIssueIDs, trustedRefs)
+}
+
+// intersectTrustedSentryRefs returns the subset of ids that also appears in
+// trusted, preserving ids' order. Returns nil (not an empty slice) when
+// either input is empty or nothing survives, matching enforceCorroboration's
+// prior "cleared means nil" convention that callers (e.g. ticket.ExternalKey)
+// already rely on.
+func intersectTrustedSentryRefs(ids, trusted []string) []string {
+	if len(ids) == 0 || len(trusted) == 0 {
+		return nil
+	}
+	trustedSet := make(map[string]struct{}, len(trusted))
+	for _, r := range trusted {
+		trustedSet[r] = struct{}{}
+	}
+	var kept []string
+	for _, id := range ids {
+		if _, ok := trustedSet[id]; ok {
+			kept = append(kept, id)
+		}
+	}
+	return kept
 }
 
 // randomHex mirrors the v1 tadpole runner's ID-suffix generator (deleted in
@@ -364,6 +408,13 @@ type triggeredOutcome struct {
 // still flow into the investigation PROMPT as leads (req.SentryRefs below)
 // and the model may cite them in its reasoning text — that's fine, they
 // just must never drive automation or identity keys.
+//
+// Even when sentryCorroborated is true, enforceCorroboration further scopes
+// findings.SentryIssueIDs to msg.SentryRefs (the refs extracted from this
+// message's own text): the model sees the whole thread, so a human reply
+// pasting an arbitrary Sentry key into a thread rooted by an allowlisted bot
+// must not be able to steer ticket identity onto that pasted ID merely
+// because the thread as a whole is corroborated.
 func runTriggeredInvestigation(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
@@ -420,8 +471,11 @@ func runTriggeredInvestigation(
 	// See this function's doc comment, and enforceCorroboration's, for the
 	// rule: any Sentry IDs the model surfaced (from req.SentryRefs leads, or
 	// inferred from thread text) must never drive Decide/ExternalKey/
-	// FileOrUpdate/the ticket footer unless sentryCorroborated is true.
-	enforceCorroboration(findings, sentryCorroborated)
+	// FileOrUpdate/the ticket footer unless sentryCorroborated is true AND
+	// the ID also appears in msg.SentryRefs — the refs extracted from this
+	// report's own (corroborating, when sentryCorroborated) message text —
+	// not merely whatever the model happened to emit.
+	enforceCorroboration(findings, sentryCorroborated, msg.SentryRefs)
 
 	recordID := generateInvestigationID()
 	saveInvestigationRecord(db, recordID, threadTS, msg.Channel, findings)
@@ -520,15 +574,16 @@ type ticketRequestOutcome struct {
 // sentryCorroborated follows the same rule as runTriggeredInvestigation's
 // (see its doc comment): true only when this request arrived from an
 // allowlisted monitoring bot, never from a human click/reaction or
-// human-pasted text. It gates a FRESH investigation's Findings.SentryIssueIDs
-// the same way — this path bypasses Decide entirely (an explicit human
-// request already IS the sign-off, so auto-file's confidence/corroboration
-// gate doesn't apply), but FileOrUpdate's ExternalKey/footer must still never
-// trust an unverified Sentry ID as the ticket's identity key. A REUSED saved
-// finding is left untouched here regardless of the current request's
-// corroboration — it was already gated correctly at the point it was
-// produced (by runTriggeredInvestigation or a prior investigateFromDigest),
-// and reusing it doesn't rerun that judgment.
+// human-pasted text. It gates both a FRESH investigation's
+// Findings.SentryIssueIDs and a REUSED saved finding's the same way — this
+// path bypasses Decide entirely (an explicit human request already IS the
+// sign-off, so auto-file's confidence/corroboration gate doesn't apply), but
+// FileOrUpdate's ExternalKey/footer must still never trust an unverified (or
+// no-longer-current-request-scoped) Sentry ID as the ticket's identity key.
+// See the enforceCorroboration call below, which re-applies unconditionally
+// to whichever findings value this function ends up with — fresh or reused —
+// against THIS request's own trustedRefs, never a reused record's own
+// (possibly stale, possibly differently-gated) history.
 func runTicketRequest(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
@@ -592,8 +647,10 @@ func runTicketRequest(
 	// whose saveInvestigationRecord call has no reliable relationship to
 	// THIS request's sentryCorroborated value. Never trust a persisted
 	// record's SentryIssueIDs as already-clean; always re-derive from the
-	// current request's own corroboration.
-	enforceCorroboration(findings, sentryCorroborated)
+	// current request's own corroboration AND intersect against msg.SentryRefs
+	// — the CURRENT request's own trusted refs, not whatever refs (if any)
+	// were in scope when the reused record was first produced.
+	enforceCorroboration(findings, sentryCorroborated, msg.SentryRefs)
 
 	fileResult, err := deps.ticketEngine.FileOrUpdate(ctx, *findings, msg.Channel, threadTS, recordID, src)
 	if err != nil {
@@ -849,9 +906,16 @@ func composeDigestProposalText(f investigation.Findings) string {
 // Decide, ExternalKey, FileOrUpdate, or the ticket footer — a digest message
 // with a non-allowlisted BotID (or no BotID, i.e. a human message the digest
 // batched) must never auto-file or dedup-key on an unverified Sentry ID.
+// When true, f.SentryIssueIDs is still intersected against the Sentry refs
+// found in msg.Text itself (digest.Message carries no pre-extracted
+// SentryRefs field the way islack.IncomingMessage does, so this re-derives
+// them here with the same islack.ExtractSentryRefs used everywhere else) —
+// a model-emitted ID that isn't actually present in the corroborating
+// message's own text must not survive, even on an otherwise-corroborated
+// thread.
 func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, db *state.DB, post digestPostFunc,
 	f investigation.Findings, msg digest.Message, sentryCorroborated bool) error {
-	enforceCorroboration(&f, sentryCorroborated)
+	enforceCorroboration(&f, sentryCorroborated, islack.ExtractSentryRefs(msg.Text))
 
 	investigationID := digestInvestigationID(db, msg.ThreadTS)
 	decision, fileResult, err := fileOrProposeFromFindings(ctx, ticketEngine, f, msg.Channel, msg.ThreadTS, investigationID, ticket.SourceDigest)
@@ -968,7 +1032,10 @@ func buildDigestTicketContextBlock(tickets []digest.TicketContext) string {
 // FileOrUpdate's identity key — the exact spoofing the corroboration rule
 // exists to prevent. (runTicketRequest also re-applies the clear
 // unconditionally on reuse as defense in depth, but the record must not be
-// tainted at the source either.)
+// tainted at the source either.) When true, findings.SentryIssueIDs is still
+// intersected against sentryRefs (the refs extracted from msg.Text) rather
+// than kept verbatim — see enforceCorroboration's doc comment for why
+// corroborated alone is not sufficient to trust arbitrary model output.
 func investigateFromDigest(
 	ctx context.Context,
 	resolver *config.Resolver,
@@ -995,6 +1062,13 @@ func investigateFromDigest(
 		timeout = 10 * time.Minute
 	}
 
+	// sentryRefs is the set of Sentry refs found in the digest message's own
+	// text — used both as investigation leads (req.SentryRefs) and, below, as
+	// enforceCorroboration's trustedRefs: the same extraction, not a second
+	// independent one, so "what the model was told" and "what's trusted"
+	// never drift apart.
+	sentryRefs := islack.ExtractSentryRefs(msg.Text)
+
 	req := investigation.Request{
 		Text:          msg.Text,
 		Category:      opp.Category,
@@ -1003,7 +1077,7 @@ func investigateFromDigest(
 		ChannelName:   msg.ChannelName,
 		Keywords:      opp.Keywords,
 		FilesHint:     opp.FilesHint,
-		SentryRefs:    islack.ExtractSentryRefs(msg.Text),
+		SentryRefs:    sentryRefs,
 		TicketContext: buildDigestTicketContextBlock(tickets),
 		Repo:          repo,
 		Timeout:       timeout,
@@ -1014,7 +1088,7 @@ func investigateFromDigest(
 	}
 
 	sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
-	enforceCorroboration(findings, sentryCorroborated)
+	enforceCorroboration(findings, sentryCorroborated, sentryRefs)
 
 	saveInvestigationRecord(db, generateInvestigationID(), msg.ThreadTS, msg.Channel, findings)
 
