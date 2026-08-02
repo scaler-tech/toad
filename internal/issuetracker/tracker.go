@@ -29,6 +29,7 @@ type IssueComment struct {
 // IssueStatus represents the current state and assignment of an issue.
 type IssueStatus struct {
 	State        string    // e.g. "In Progress", "Todo", "Done"
+	StateType    string    // Linear workflow state type: triage/backlog/unstarted/started/completed/canceled (empty if unknown/unsupported)
 	AssigneeName string    // display name of assignee, empty if unassigned
 	AssignedAt   time.Time // when the issue was last updated (proxy for assignment recency)
 	InternalID   string    // provider's internal UUID (needed for mutations)

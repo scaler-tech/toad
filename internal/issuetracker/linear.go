@@ -461,7 +461,7 @@ func (lt *LinearTracker) GetIssueStatus(ctx context.Context, ref *IssueRef) (*Is
 		issues(filter: $filter, first: 1) {
 			nodes {
 				id
-				state { name }
+				state { name type }
 				assignee { displayName }
 				updatedAt
 			}
@@ -486,6 +486,7 @@ func (lt *LinearTracker) GetIssueStatus(ctx context.Context, ref *IssueRef) (*Is
 				ID    string `json:"id"`
 				State struct {
 					Name string `json:"name"`
+					Type string `json:"type"`
 				} `json:"state"`
 				Assignee *struct {
 					DisplayName string `json:"displayName"`
@@ -505,6 +506,7 @@ func (lt *LinearTracker) GetIssueStatus(ctx context.Context, ref *IssueRef) (*Is
 	node := result.Issues.Nodes[0]
 	status := &IssueStatus{
 		State:      node.State.Name,
+		StateType:  node.State.Type,
 		InternalID: node.ID,
 		AssignedAt: node.UpdatedAt,
 	}

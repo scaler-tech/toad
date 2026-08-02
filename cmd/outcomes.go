@@ -15,13 +15,14 @@ import (
 // toad's tickets are landing. Visibility only — it never changes toad's
 // behavior based on what it finds.
 //
-// Outcomes are classified by classifyOutcome from the tracker's bare status
-// string: accepted = done; rejected = cancelled/duplicate; everything else
-// (including in-progress and assigned states) = unknown. Enriching this to
-// distinguish real acceptance (e.g. an assignee, or a state-type such as
-// Linear's "started") from an untouched backlog item would need
-// GetIssueStatus's richer data (assignee, state type) persisted beyond the
-// single status string ticket_index stores today — see ledger.
+// Outcomes are classified by classifyOutcome, which prefers the tracker's
+// state TYPE (Linear's triage/backlog/unstarted/started/completed/canceled)
+// over guessing from the bare status name: completed -> done, canceled ->
+// rejected, triage -> pending, backlog/unstarted/started -> accepted. Both
+// the status name and its state type are now persisted on ticket_index
+// (last_status, last_state_type) so this classification survives restarts.
+// Trackers that don't supply a state type fall back to name matching (see
+// classifyOutcome).
 //
 // It ticks on interval, and each tick delegates to pollOnce.
 func runOutcomePoller(ctx context.Context, db *state.DB, tracker issuetracker.Tracker, interval time.Duration) {
@@ -83,46 +84,66 @@ func pollOnce(ctx context.Context, db *state.DB, tracker issuetracker.Tracker, i
 			slog.Info("ticket outcome", "issue", e.IssueID, "from", e.LastStatus, "to", status.State)
 		}
 
-		if err := db.UpdateTicketStatus(e.ExternalKey, status.State); err != nil {
+		if err := db.UpdateTicketStatus(e.ExternalKey, status.State, status.StateType); err != nil {
 			slog.Debug("outcome poller: failed to persist ticket status", "issue", e.IssueID, "error", err)
 		}
 	}
 }
 
 // outcomeCounts buckets tracked tickets by a coarse classification of their
-// last known status, for the status dashboard. Visibility only — this has
-// no bearing on toad's behavior.
+// last known status (and state type, where known), for the status
+// dashboard. Visibility only — this has no bearing on toad's behavior.
 func outcomeCounts(db *state.DB) (map[string]int, error) {
 	entries, err := db.RecentTicketIndex(1000)
 	if err != nil {
 		return nil, err
 	}
-	counts := make(map[string]int, 4)
+	counts := make(map[string]int, 6)
 	for _, e := range entries {
-		counts[classifyOutcome(e.LastStatus)]++
+		counts[classifyOutcome(e.LastStatus, e.LastStateType)]++
 	}
 	return counts, nil
 }
 
-// classifyOutcome buckets a raw tracker status string into a coarse
-// outcome for the dashboard:
+// classifyOutcome buckets a raw tracker status (and, when available, its
+// Linear workflow state type) into a coarse outcome for the dashboard:
 //   - "filed": no status has been polled yet (ticket was just created)
-//   - "rejected": a terminal cancelled/duplicate state
-//   - "accepted": completed ("done")
-//   - "unknown": everything else, including in-progress and assigned
-//     states, todo, backlog, and any custom workflow state — the bare
-//     status string alone doesn't carry assignee or state-type data, so
-//     we can't distinguish "actively being worked" from "untouched" here;
-//     see the runOutcomePoller doc comment and ledger
-func classifyOutcome(status string) string {
+//   - "pending": state type "triage" — awaiting triage, not yet in a workflow
+//   - "accepted": state type "backlog", "unstarted", or "started" — queued
+//     or actively being worked
+//   - "done": state type "completed" (or, on name fallback, a "done" status)
+//   - "rejected": state type "canceled" (or, on name fallback, a
+//     cancelled/duplicate status)
+//   - "unknown": anything else, including custom workflow states when no
+//     state type is available to disambiguate them
+//
+// When stateType is empty (older persisted rows, or a tracker that doesn't
+// supply Linear-style state types) classification falls back to matching
+// the bare status name, preserving the pre-state-type behavior with one
+// rename: "done" used to bucket as "accepted" and now buckets as "done" to
+// line up with the type-based classification above.
+func classifyOutcome(status, stateType string) string {
 	if status == "" {
 		return "filed"
 	}
+
+	switch strings.ToLower(stateType) {
+	case "completed":
+		return "done"
+	case "canceled", "cancelled": //nolint:misspell // Linear uses British spelling
+		return "rejected"
+	case "triage":
+		return "pending"
+	case "backlog", "unstarted", "started":
+		return "accepted"
+	}
+
+	// No state type available — fall back to name matching.
 	switch strings.ToLower(status) {
 	case "cancelled", "canceled", "duplicate": //nolint:misspell // Linear uses British spelling
 		return "rejected"
 	case "done":
-		return "accepted"
+		return "done"
 	default:
 		return "unknown"
 	}

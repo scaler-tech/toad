@@ -981,6 +981,48 @@ func TestGetIssueStatus_Assigned(t *testing.T) {
 	}
 }
 
+// TestGetIssueStatus_WithStateType confirms the GraphQL response's
+// state.type field (Linear's stable workflow-state-type enum) is parsed
+// into IssueStatus.StateType alongside the existing state.name.
+func TestGetIssueStatus_WithStateType(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issues": map[string]any{
+					"nodes": []map[string]any{
+						{
+							"id":        "uuid-789",
+							"state":     map[string]any{"name": "In Progress", "type": "started"},
+							"assignee":  map[string]any{"displayName": "Jane Doe"},
+							"updatedAt": "2026-03-01T12:00:00Z",
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lt := &LinearTracker{
+		apiToken:   "token",
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+
+	status, err := lt.GetIssueStatus(context.Background(), &IssueRef{ID: "PLF-3"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status == nil {
+		t.Fatal("expected non-nil status")
+	}
+	if status.State != "In Progress" {
+		t.Errorf("expected state 'In Progress', got %q", status.State)
+	}
+	if status.StateType != "started" {
+		t.Errorf("expected state type 'started', got %q", status.StateType)
+	}
+}
+
 func TestGetIssueStatus_Unassigned(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
