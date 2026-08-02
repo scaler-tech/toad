@@ -31,25 +31,18 @@ type slackTemplateData struct {
 type repoTemplateData struct {
 	Name          string
 	Path          string
-	TestCommand   string
-	LintCommand   string
 	DefaultBranch string
-	AutoMerge     bool
-	PRLabels      []string
 	Primary       bool
 }
 
 type limitsTemplateData struct {
-	MaxConcurrent   int
-	MaxTurns        int
-	TimeoutMinutes  int
-	MaxFilesChanged int
-	MaxRetries      int
+	MaxConcurrent  int
+	TimeoutMinutes int
+	MaxRetries     int
 }
 
 type triageTemplateData struct {
-	Model     string
-	AutoSpawn bool
+	Model string
 }
 
 type agentTemplateData struct {
@@ -108,18 +101,7 @@ repos:
 {{ range $i, $r := .Repos }}    - name: "{{ $r.Name }}"
       path: "{{ $r.Path }}"
 {{ if $r.Primary }}      primary: true
-{{ end }}{{ if $r.TestCommand }}      test_command: "{{ $r.TestCommand }}"
-{{ end }}{{ if $r.LintCommand }}      lint_command: "{{ $r.LintCommand }}"
 {{ end }}      default_branch: "{{ $r.DefaultBranch }}"
-      auto_merge: {{ $r.AutoMerge }}
-      # merge_bot_fixups: false    # Auto-merge bot-authored PRs targeting toad branches (e.g. CI style fixes)
-{{ if $r.PRLabels }}      pr_labels:
-{{ range $r.PRLabels }}        - "{{ . }}"
-{{ end }}{{ end }}      # Per-service validation for monorepos:
-      # services:
-      #   - path: "web-app"
-      #     test_command: "make test"
-      #     lint_command: "make stan && make cs"
       # Per-repo VCS override:
       # vcs:
       #   platform: "gitlab"
@@ -132,21 +114,15 @@ repos:
 # ──────────────────────────────────────────────
 limits:
   max_concurrent: {{ .Limits.MaxConcurrent }}
-  max_turns: {{ .Limits.MaxTurns }}
   timeout_minutes: {{ .Limits.TimeoutMinutes }}
-  max_files_changed: {{ .Limits.MaxFilesChanged }}
   max_retries: {{ .Limits.MaxRetries }}
-  # max_review_rounds: 3      # Max rounds of PR review fixes
-  # max_ci_fix_rounds: 2      # Max rounds of CI failure fixes
   # history_size: 50          # Max completed runs to keep in state
-  # worktree_ttl_hours: 24    # Auto-remove worktrees older than this (0 = disabled)
 
 # ──────────────────────────────────────────────
 # Triage — message classification
 # ──────────────────────────────────────────────
 triage:
   model: "{{ .Triage.Model }}"
-  auto_spawn: {{ .Triage.AutoSpawn }}
 
 # ──────────────────────────────────────────────
 # Intake — bot message allowlist
@@ -168,7 +144,6 @@ digest:
   # allowed_categories: ["bug"] # Categories eligible for auto-spawn
   # max_est_size: "medium"      # Maximum estimated fix size
   # investigate_timeout_secs: 600 # Investigation time limit (default: 10 min)
-  # investigate_max_turns: 25     # Investigation turn limit
   # comment_investigation: false  # Post investigation findings as Slack reply (dry_run only)
 
 # ──────────────────────────────────────────────

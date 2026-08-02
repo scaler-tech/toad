@@ -23,14 +23,8 @@ func TestDefaults(t *testing.T) {
 	if cfg.Limits.MaxConcurrent != 2 {
 		t.Errorf("default max_concurrent should be 2, got %d", cfg.Limits.MaxConcurrent)
 	}
-	if cfg.Limits.MaxTurns != 30 {
-		t.Errorf("default max_turns should be 30, got %d", cfg.Limits.MaxTurns)
-	}
 	if cfg.Limits.TimeoutMinutes != 10 {
 		t.Errorf("default timeout should be 10, got %d", cfg.Limits.TimeoutMinutes)
-	}
-	if cfg.Limits.MaxFilesChanged != 5 {
-		t.Errorf("default max_files should be 5, got %d", cfg.Limits.MaxFilesChanged)
 	}
 	if cfg.Limits.MaxRetries != 1 {
 		t.Errorf("default max_retries should be 1, got %d", cfg.Limits.MaxRetries)
@@ -485,6 +479,117 @@ personality:
 	}
 	if cfg.Slack.AppToken != "xapp-test" {
 		t.Errorf("expected slack.app_token to still load, got %q", cfg.Slack.AppToken)
+	}
+}
+
+// TestYAMLOverlay_RemovedKeysIgnored verifies that a config file containing
+// several keys deleted from Config/RepoConfig in the F-C config sweep (dead
+// tadpole/worktree-era fields: limits.max_turns, limits.max_files_changed,
+// limits.worktree_ttl_hours, triage.auto_spawn, digest.investigate_max_turns,
+// repos[].test_command/lint_command/auto_merge/pr_labels/services) still
+// loads without error — yaml.v3 silently ignores unknown keys during
+// unmarshal, so operators upgrading an old .toad.yaml don't hit a hard
+// failure at startup.
+func TestYAMLOverlay_RemovedKeysIgnored(t *testing.T) {
+	yamlContent := `
+slack:
+  app_token: xapp-test
+  bot_token: xoxb-test
+repos:
+  list:
+    - name: test-repo
+      path: /tmp/test-repo
+      primary: true
+      test_command: "go test ./..."
+      lint_command: "golangci-lint run"
+      auto_merge: true
+      merge_bot_fixups: true
+      pr_labels: ["toad"]
+      services:
+        - path: "web-app"
+          test_command: "make test"
+          lint_command: "make stan"
+limits:
+  max_turns: 30
+  max_files_changed: 5
+  max_review_rounds: 3
+  max_ci_fix_rounds: 2
+  review_bots: ["greptile[bot]"]
+  worktree_ttl_hours: 24
+triage:
+  auto_spawn: true
+digest:
+  investigate_max_turns: 25
+`
+	dir := t.TempDir()
+	yamlPath := dir + "/test.yaml"
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write test YAML: %v", err)
+	}
+
+	cfg := defaults()
+	if err := loadFile(cfg, yamlPath); err != nil {
+		t.Fatalf("expected config with removed keys to load without error, got: %v", err)
+	}
+	if cfg.Slack.AppToken != "xapp-test" {
+		t.Errorf("expected slack.app_token to still load, got %q", cfg.Slack.AppToken)
+	}
+	if len(cfg.Repos.List) != 1 || cfg.Repos.List[0].Name != "test-repo" {
+		t.Errorf("expected repos.list to still load, got %+v", cfg.Repos.List)
+	}
+}
+
+func TestValidate_TicketAutoFileConfidenceOutOfRange(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.Ticket.AutoFileConfidence = 85 // the "meant 0.85" typo
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error for auto_file_confidence=85")
+	}
+	if !strings.Contains(err.Error(), "auto_file_confidence") {
+		t.Errorf("expected error to mention auto_file_confidence, got: %v", err)
+	}
+}
+
+func TestValidate_TicketAutoFileConfidenceNegative(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.Ticket.AutoFileConfidence = -0.1
+	err := Validate(cfg)
+	if err == nil {
+		t.Error("expected error for negative auto_file_confidence")
+	}
+}
+
+func TestValidate_TicketAutoFileConfidenceValid(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.Ticket.AutoFileConfidence = 0.85
+	if err := Validate(cfg); err != nil {
+		t.Errorf("expected no error for valid auto_file_confidence, got: %v", err)
+	}
+}
+
+func TestValidate_MCPServerURLAndCommandMutuallyExclusive(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.Agent.MCPServers = map[string]MCPServerConfig{
+		"both": {
+			URL:     "https://example.com",
+			Command: "/usr/bin/cmd",
+		},
+	}
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error when MCP server has both url and command set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected error to mention mutual exclusivity, got: %v", err)
 	}
 }
 

@@ -46,44 +46,23 @@ type ReposConfig struct {
 }
 
 type RepoConfig struct {
-	Name           string          `yaml:"name"`
-	Path           string          `yaml:"path"`
-	Description    string          `yaml:"description"`
-	Primary        bool            `yaml:"primary"`
-	TestCommand    string          `yaml:"test_command"`
-	LintCommand    string          `yaml:"lint_command"`
-	DefaultBranch  string          `yaml:"default_branch"`
-	AutoMerge      bool            `yaml:"auto_merge"`
-	MergeBotFixups bool            `yaml:"merge_bot_fixups"`
-	PRLabels       []string        `yaml:"pr_labels"`
-	Services       []ServiceConfig `yaml:"services"`
-	VCS            *VCSConfig      `yaml:"vcs"` // optional, overrides global VCS config
-}
-
-// ServiceConfig maps a subdirectory to its specific lint/test commands.
-// When a tadpole changes files under Path, these commands run instead of the root ones.
-type ServiceConfig struct {
-	Path        string `yaml:"path"`         // e.g. "web-app", "esg-api"
-	TestCommand string `yaml:"test_command"` // e.g. "make test"
-	LintCommand string `yaml:"lint_command"` // e.g. "make stan && make cs"
+	Name          string     `yaml:"name"`
+	Path          string     `yaml:"path"`
+	Description   string     `yaml:"description"`
+	Primary       bool       `yaml:"primary"`
+	DefaultBranch string     `yaml:"default_branch"`
+	VCS           *VCSConfig `yaml:"vcs"` // optional, overrides global VCS config
 }
 
 type LimitsConfig struct {
-	MaxConcurrent    int      `yaml:"max_concurrent"`
-	MaxTurns         int      `yaml:"max_turns"`
-	TimeoutMinutes   int      `yaml:"timeout_minutes"`
-	MaxFilesChanged  int      `yaml:"max_files_changed"`
-	MaxRetries       int      `yaml:"max_retries"`
-	MaxReviewRounds  int      `yaml:"max_review_rounds"`
-	MaxCIFixRounds   int      `yaml:"max_ci_fix_rounds"`
-	HistorySize      int      `yaml:"history_size"`
-	ReviewBots       []string `yaml:"review_bots"`        // bot usernames whose PR comments can trigger fixes (e.g. "greptile[bot]")
-	WorktreeTTLHours int      `yaml:"worktree_ttl_hours"` // auto-remove worktrees older than this (0 = disabled)
+	MaxConcurrent  int `yaml:"max_concurrent"`
+	TimeoutMinutes int `yaml:"timeout_minutes"`
+	MaxRetries     int `yaml:"max_retries"`
+	HistorySize    int `yaml:"history_size"`
 }
 
 type TriageConfig struct {
-	Model     string `yaml:"model"`
-	AutoSpawn bool   `yaml:"auto_spawn"`
+	Model string `yaml:"model"`
 }
 
 type ClaudeConfig struct {
@@ -102,7 +81,6 @@ type DigestConfig struct {
 	MaxChunkSize           int      `yaml:"max_chunk_size"`           // default: 50
 	ChunkTimeoutSecs       int      `yaml:"chunk_timeout_secs"`       // default: 120
 	InvestigateTimeoutSecs int      `yaml:"investigate_timeout_secs"` // default: 600 (10 min)
-	InvestigateMaxTurns    int      `yaml:"investigate_max_turns"`    // default: 25
 	CommentInvestigation   bool     `yaml:"comment_investigation"`    // dry_run only: post findings as Slack reply
 	BotList                []string `yaml:"bot_list"`                 // only these bot IDs trigger outreach (empty = all bots)
 }
@@ -177,19 +155,13 @@ func defaults() *Config {
 			},
 		},
 		Limits: LimitsConfig{
-			MaxConcurrent:    2,
-			MaxTurns:         30,
-			TimeoutMinutes:   10,
-			MaxFilesChanged:  5,
-			MaxRetries:       1,
-			MaxReviewRounds:  3,
-			MaxCIFixRounds:   2,
-			HistorySize:      50,
-			WorktreeTTLHours: 24,
+			MaxConcurrent:  2,
+			TimeoutMinutes: 10,
+			MaxRetries:     1,
+			HistorySize:    50,
 		},
 		Triage: TriageConfig{
-			Model:     "haiku",
-			AutoSpawn: false,
+			Model: "haiku",
 		},
 		Claude: ClaudeConfig{}, // deprecated, kept for YAML backward compat
 		Digest: DigestConfig{
@@ -202,7 +174,6 @@ func defaults() *Config {
 			MaxChunkSize:           50,
 			ChunkTimeoutSecs:       120,
 			InvestigateTimeoutSecs: 600,
-			InvestigateMaxTurns:    25,
 		},
 		IssueTracker: IssueTrackerConfig{
 			Enabled:   false,
@@ -360,11 +331,24 @@ func Validate(cfg *Config) error {
 			return fmt.Errorf("issue_tracker.team_id is required when create_issues is enabled")
 		}
 	}
-	// Validate MCPServerConfig entries
+	// Validate MCPServerConfig entries (agent.mcp_servers — the outbound
+	// client config used to reach MCP servers from agent runs; distinct from
+	// the mcp: section, which configures toad's own inbound MCP server).
 	for name, mcp := range cfg.Agent.MCPServers {
 		if mcp.URL == "" && mcp.Command == "" {
 			return fmt.Errorf("agent.mcp_servers.%s: url or command required", name)
 		}
+		if mcp.URL != "" && mcp.Command != "" {
+			return fmt.Errorf("agent.mcp_servers.%s: url and command are mutually exclusive", name)
+		}
+	}
+	// AutoFileConfidence is a 0-1 fraction (e.g. 0.85), not a percentage — a
+	// value of 0 is left alone here since it's indistinguishable from "not
+	// set" once YAML unmarshal has run (Go's float64 zero value), so only a
+	// genuinely out-of-range nonzero value (e.g. the "85" typo for "0.85")
+	// is rejected.
+	if cfg.Ticket.AutoFileConfidence != 0 && (cfg.Ticket.AutoFileConfidence <= 0 || cfg.Ticket.AutoFileConfidence > 1) {
+		return fmt.Errorf("ticket.auto_file_confidence must be greater than 0 and at most 1 (e.g. 0.85), got %v", cfg.Ticket.AutoFileConfidence)
 	}
 	return nil
 }
