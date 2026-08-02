@@ -541,7 +541,7 @@ func TestInvestigateFromDigest_UnresolvableRepoReturnsError(t *testing.T) {
 	opp := digest.Opportunity{Summary: "fix it", Category: "bug", Confidence: 0.9}
 	msg := digest.Message{Channel: "C3", ThreadTS: "300.1", Text: "something broke"}
 
-	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, nil, 600, opp, msg, nil)
+	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, nil, 600, opp, msg, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error for an unresolvable repo")
 	}
@@ -575,7 +575,9 @@ func TestDigestFlow_AutoFiledTicketBacklinksInvestigation(t *testing.T) {
 	opp := digest.Opportunity{Summary: "fix refunds", Category: "bug", Confidence: 0.99, Repo: "svc"}
 	msg := digest.Message{Channel: "C9", ThreadTS: "900.1", ChannelName: "errors", Text: "users report double refunds", BotID: "B_SENTRY"}
 
-	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, db, 600, opp, msg, nil)
+	// B_SENTRY is allowlisted, so investigateFromDigest must NOT clear
+	// findings.SentryIssueIDs before saving the InvestigationRecord.
+	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, db, 600, opp, msg, nil, []string{"B_SENTRY"})
 	if err != nil {
 		t.Fatalf("investigateFromDigest: %v", err)
 	}
@@ -618,5 +620,118 @@ func TestDigestFlow_AutoFiledTicketBacklinksInvestigation(t *testing.T) {
 	}
 	if rec.ThreadTS != msg.ThreadTS {
 		t.Errorf("expected the resolved investigation's ThreadTS = %q, got %q", msg.ThreadTS, rec.ThreadTS)
+	}
+}
+
+// Fix 2 defense-in-depth regression (re-review finding: "live resurrection
+// gap"): a digest-batched, non-bot message that happens to reference a
+// Sentry ID must not have that ID survive from investigateFromDigest's
+// saved InvestigationRecord through to a later CTA click. Two layers are
+// exercised end to end here: (1) investigateFromDigest must clear
+// findings.SentryIssueIDs before saveInvestigationRecord when the digest
+// message isn't bot-corroborated, and (2) runTicketRequest must re-apply
+// the clear on a REUSED record regardless (a record could predate/bypass
+// layer 1, or arrive from a differently-gated path) — this test exercises
+// both by not disabling either layer, so a regression in just one would
+// still be caught by the other, but the assertions target the final
+// observable outcome: no sentry-keyed ticket_index row, only a thread-keyed
+// one.
+func TestDigestSaveThenCTAReuse_NonCorroboratedClearsSentryID(t *testing.T) {
+	db := newTestDB(t)
+	tracker := &ticketflowTrackerFake{}
+	ticketEngine := ticket.New(tracker, db, autoFileCfg(), nil)
+	resolver := newTestResolver(t)
+	investigateSem := make(chan struct{}, 1)
+
+	mockProvider := &agent.MockProvider{RunResult: &agent.RunResult{Result: highConfidenceSentryFindings}}
+	investRunner := investigation.NewRunner(mockProvider, "sonnet", "", nil, nil, nil)
+
+	opp := digest.Opportunity{Summary: "double refunds", Category: "bug", Confidence: 0.99, Repo: "svc"}
+	// No BotID: a human message the digest batched, not an allowlisted-bot
+	// report — even though its text pastes a Sentry-looking reference and
+	// the investigation's Findings (highConfidenceSentryFindings) surfaces
+	// sentry_issue_ids the same way a genuinely corroborated run would.
+	digestMsg := digest.Message{Channel: "C20", ThreadTS: "2000.1", ChannelName: "eng-alerts", Text: "hey saw BILLING-42 again, users report double refunds"}
+
+	// B_SENTRY is allowlisted, but digestMsg.BotID is empty, so this report
+	// stays non-corroborated regardless.
+	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, db, 600, opp, digestMsg, nil, []string{"B_SENTRY"})
+	if err != nil {
+		t.Fatalf("investigateFromDigest: %v", err)
+	}
+	if findings.SentryIssueIDs != nil {
+		t.Fatalf("expected investigateFromDigest to clear SentryIssueIDs for a non-corroborated digest message, got %+v", findings.SentryIssueIDs)
+	}
+	if len(mockProvider.RunCalls) != 1 {
+		t.Fatalf("expected exactly 1 investigation agent Run call from investigateFromDigest, got %d", len(mockProvider.RunCalls))
+	}
+
+	// A human later clicks the CTA on the same thread; reuseRecentInvestigation
+	// (inside runTicketRequest) picks up the record investigateFromDigest just
+	// saved instead of running a fresh investigation.
+	ctaMsg := &islack.IncomingMessage{Channel: digestMsg.Channel, Timestamp: digestMsg.ThreadTS}
+	outcome := runTicketRequest(context.Background(), ctaMsg, nil, newTestStateManager(t, db), tracker, resolver,
+		investRunner, ticketEngine, investigateSem, "eng-alerts", ctaMsg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
+	if outcome.Err != nil {
+		t.Fatalf("unexpected error filing via CTA: %v", outcome.Err)
+	}
+	if len(mockProvider.RunCalls) != 1 {
+		t.Errorf("expected the CTA click to reuse the saved investigation (no second Run call), got %d total", len(mockProvider.RunCalls))
+	}
+
+	if entry, err := db.GetTicketIndex("sentry:BILLING-42"); err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	} else if entry != nil {
+		t.Errorf("expected no ticket_index row keyed by the unverified sentry ID, got %+v", entry)
+	}
+
+	threadKey := "thread:" + ctaMsg.Channel + ":" + ctaMsg.ThreadTS()
+	entry, err := db.GetTicketIndex(threadKey)
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatalf("expected a ticket_index row keyed by thread %q, got none", threadKey)
+	}
+}
+
+// Inverse of the above: an allowlisted-bot-sourced digest message's Sentry
+// ID DOES survive into the saved record (layer 1 keeps it), and DOES drive
+// a sentry-keyed ticket when later filed via a corroborated CTA request
+// (layer 2 doesn't strip what's genuinely corroborated).
+func TestDigestSaveThenCTAReuse_CorroboratedKeepsSentryID(t *testing.T) {
+	db := newTestDB(t)
+	tracker := &ticketflowTrackerFake{}
+	ticketEngine := ticket.New(tracker, db, autoFileCfg(), nil)
+	resolver := newTestResolver(t)
+	investigateSem := make(chan struct{}, 1)
+
+	mockProvider := &agent.MockProvider{RunResult: &agent.RunResult{Result: highConfidenceSentryFindings}}
+	investRunner := investigation.NewRunner(mockProvider, "sonnet", "", nil, nil, nil)
+
+	opp := digest.Opportunity{Summary: "double refunds", Category: "bug", Confidence: 0.99, Repo: "svc"}
+	digestMsg := digest.Message{Channel: "C21", ThreadTS: "2100.1", ChannelName: "eng-alerts", Text: "double refunds", BotID: "B_SENTRY"}
+
+	findings, err := investigateFromDigest(context.Background(), resolver, investRunner, investigateSem, db, 600, opp, digestMsg, nil, []string{"B_SENTRY"})
+	if err != nil {
+		t.Fatalf("investigateFromDigest: %v", err)
+	}
+	if len(findings.SentryIssueIDs) == 0 {
+		t.Fatal("expected investigateFromDigest to keep SentryIssueIDs for an allowlisted-bot-sourced message")
+	}
+
+	ctaMsg := &islack.IncomingMessage{Channel: digestMsg.Channel, Timestamp: digestMsg.ThreadTS, IsBot: true, BotID: "B_SENTRY"}
+	outcome := runTicketRequest(context.Background(), ctaMsg, nil, newTestStateManager(t, db), tracker, resolver,
+		investRunner, ticketEngine, investigateSem, "eng-alerts", ctaMsg.ThreadTS(), ticket.SourceCTA, true /* sentryCorroborated */)
+	if outcome.Err != nil {
+		t.Fatalf("unexpected error filing via CTA: %v", outcome.Err)
+	}
+
+	entry, err := db.GetTicketIndex("sentry:BILLING-42")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected a ticket_index row keyed sentry:BILLING-42 for a corroborated report, got none")
 	}
 }

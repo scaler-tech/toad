@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -533,12 +534,22 @@ func runTicketRequest(
 		if err != nil {
 			return ticketRequestOutcome{Err: fmt.Errorf("investigation failed: %w", err)}
 		}
-		if !sentryCorroborated {
-			f.SentryIssueIDs = nil
-		}
 		findings = f
 		recordID = generateInvestigationID()
 		saveInvestigationRecord(db, recordID, threadTS, msg.Channel, findings)
+	}
+
+	// Re-apply the corroboration clear here, unconditionally, on the FINAL
+	// findings value — whether it just came from a fresh investigation above
+	// or was reused from a saved record. A reused record may predate
+	// corroboration filtering, or may have been saved by a different path
+	// with different (or missing) gating at save time — e.g. investigateFromDigest,
+	// whose saveInvestigationRecord call has no reliable relationship to
+	// THIS request's sentryCorroborated value. Never trust a persisted
+	// record's SentryIssueIDs as already-clean; always re-derive from the
+	// current request's own corroboration.
+	if !sentryCorroborated {
+		findings.SentryIssueIDs = nil
 	}
 
 	fileResult, err := ticketEngine.FileOrUpdate(ctx, *findings, msg.Channel, threadTS, recordID, src)
@@ -941,6 +952,21 @@ func buildDigestTicketContextBlock(tickets []digest.TicketContext) string {
 // hard-coded investigationID=""), unlike every Slack-thread-originated
 // ticket. proposeFromDigest (this file) reads it back via
 // digestInvestigationID.
+//
+// Fix 2 (security) hardening: sentryCorroborated is computed here from
+// msg.BotID against botAllowlist (cfg.Intake.BotAllowlist, passed in by the
+// root.go closure that wires this as digest.EngineOpts.Investigate) using
+// the same rule as everywhere else in this file — true only when the digest
+// message came from an allowlisted monitoring bot. When false,
+// findings.SentryIssueIDs is cleared BEFORE saveInvestigationRecord, not
+// just at the point some later consumer happens to use it: a persisted
+// InvestigationRecord is later reused verbatim by runTicketRequest's CTA
+// path (reuseRecentInvestigation), so an uncleared record here would let a
+// non-corroborated Sentry ID survive to a subsequent CTA click and drive
+// FileOrUpdate's identity key — the exact spoofing the corroboration rule
+// exists to prevent. (runTicketRequest also re-applies the clear
+// unconditionally on reuse as defense in depth, but the record must not be
+// tainted at the source either.)
 func investigateFromDigest(
 	ctx context.Context,
 	resolver *config.Resolver,
@@ -951,6 +977,7 @@ func investigateFromDigest(
 	opp digest.Opportunity,
 	msg digest.Message,
 	tickets []digest.TicketContext,
+	botAllowlist []string,
 ) (*investigation.Findings, error) {
 	repo := resolver.Resolve(opp.Repo, opp.FilesHint)
 	if repo == nil {
@@ -982,6 +1009,11 @@ func investigateFromDigest(
 	findings, err := runInvestigation(ctx, investRunner, investigateSem, req)
 	if err != nil {
 		return nil, err
+	}
+
+	sentryCorroborated := msg.BotID != "" && slices.Contains(botAllowlist, msg.BotID)
+	if !sentryCorroborated {
+		findings.SentryIssueIDs = nil
 	}
 
 	saveInvestigationRecord(db, generateInvestigationID(), msg.ThreadTS, msg.Channel, findings)

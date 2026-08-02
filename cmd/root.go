@@ -333,7 +333,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 				}
 			},
 			Investigate: func(ctx context.Context, opp digest.Opportunity, msg digest.Message, tickets []digest.TicketContext) (*investigation.Findings, error) {
-				return investigateFromDigest(ctx, resolver, investRunner, investigateSem, stateDB, cfg.Digest.InvestigateTimeoutSecs, opp, msg, tickets)
+				return investigateFromDigest(ctx, resolver, investRunner, investigateSem, stateDB, cfg.Digest.InvestigateTimeoutSecs, opp, msg, tickets, cfg.Intake.BotAllowlist)
 			},
 			React: func(channel, timestamp, emoji string) {
 				slackClient.React(channel, timestamp, emoji)
