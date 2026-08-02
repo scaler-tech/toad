@@ -235,10 +235,6 @@ func migrate(db *sql.DB) error {
 
 	// Numbered schema migrations. Each step runs only if the current
 	// schema_version is less than the migration's version number.
-	type migration struct {
-		version int
-		sql     string
-	}
 	migrations := []migration{
 		{1, `ALTER TABLE digest_opportunities ADD COLUMN dismissed BOOLEAN NOT NULL DEFAULT FALSE;
 		     ALTER TABLE digest_opportunities ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''`},
@@ -302,15 +298,68 @@ func migrate(db *sql.DB) error {
 	if err == nil {
 		_, _ = fmt.Sscanf(versionStr, "%d", &currentVersion)
 	} else {
-		// No schema_version row. Check if a column from the last migration
-		// exists — if so, the old ad-hoc migrations already ran everything.
+		// No schema_version row. Check if a column from the old ad-hoc
+		// migration code (pre-dating schema_version tracking entirely)
+		// exists — if so, this DB is at least at the v8-era schema.
+		//
+		// This probe only proves "at least v8-era" — it must NOT be read as
+		// "every migration, including ones added after schema_version
+		// tracking began, already ran". Freeze to the literal 8, not
+		// len(migrations): the previous code set currentVersion =
+		// len(migrations), which silently skipped every migration added
+		// after this probe was written (v9 through today's v12) for any DB
+		// that predates schema_version tracking. Concretely: a DB created in
+		// the v8-era window (2026-03-09 through 2026-03-11, before
+		// schema_version rows were introduced) would skip v11 entirely —
+		// no expires_at column, mcp_tokens left in plaintext — and fail at
+		// runtime with a "no such column" error the first time
+		// SaveMCPToken/ValidateMCPToken ran against it. Freezing to 8 lets
+		// migrations 9-12 (and any future ones) run for these DBs like any
+		// other pre-versioned upgrade path.
 		var colExists int
 		_ = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('pr_watches') WHERE name = 'original_summary'`).Scan(&colExists)
 		if colExists > 0 {
-			currentVersion = len(migrations)
+			currentVersion = 8
 		}
 	}
 
+	currentVersion, err = applyMigrations(db, migrations, currentVersion)
+	if err != nil {
+		return err
+	}
+
+	// Persist the schema version so future runs skip completed migrations.
+	if _, err := db.Exec(`INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)`,
+		fmt.Sprintf("%d", currentVersion)); err != nil {
+		return fmt.Errorf("updating schema_version: %w", err)
+	}
+
+	return nil
+}
+
+// migration is a single numbered schema step: sql runs (split on ";") only
+// when the DB's current schema version is below version.
+type migration struct {
+	version int
+	sql     string
+}
+
+// applyMigrations runs every migration whose version exceeds currentVersion,
+// in order, and returns the resulting version. Split out from migrate() so
+// tests can exercise the apply/error-handling loop against a synthetic
+// migrations slice without needing a real pre-versioned database fixture for
+// every scenario (see db_test.go's genuine-failure test).
+//
+// A statement failing with isBenignMigrationError (the change it makes
+// already exists) is logged and treated as a no-op continue — expected when
+// currentVersion undercounts what already physically ran (e.g. the
+// pre-versioned-DB probe in migrate(), which can only prove a lower bound).
+// Any other error aborts immediately, returning the LAST successfully
+// completed version (not m.version) and the error — the caller must not
+// persist a version past the migration that actually failed, so a later
+// startup retries it instead of silently running against a half-applied
+// schema.
+func applyMigrations(db *sql.DB, migrations []migration, currentVersion int) (int, error) {
 	for _, m := range migrations {
 		if currentVersion >= m.version {
 			continue
@@ -321,19 +370,34 @@ func migrate(db *sql.DB) error {
 				continue
 			}
 			if _, err := db.Exec(stmt); err != nil {
-				slog.Warn("migration: failed to run statement", "version", m.version, "error", err)
+				if !isBenignMigrationError(err) {
+					return currentVersion, fmt.Errorf("migration %d: statement failed: %w", m.version, err)
+				}
+				// Benign: the change this statement makes already exists
+				// (e.g. a duplicate ALTER TABLE ADD COLUMN against a schema
+				// that already has it — expected when currentVersion was
+				// derived from the pre-versioned-DB probe above, which can
+				// under- but never over-estimate how much already ran).
+				slog.Warn("migration: statement already applied, continuing", "version", m.version, "error", err)
 			}
 		}
 		currentVersion = m.version
 	}
+	return currentVersion, nil
+}
 
-	// Persist the schema version so future runs skip completed migrations.
-	if _, err := db.Exec(`INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_version', ?)`,
-		fmt.Sprintf("%d", currentVersion)); err != nil {
-		return fmt.Errorf("updating schema_version: %w", err)
-	}
-
-	return nil
+// isBenignMigrationError reports whether err from a migration statement
+// means "the change this statement makes already exists" — SQLite's
+// "duplicate column name" (a re-run ALTER TABLE ADD COLUMN) or
+// "already exists" (a re-run CREATE TABLE/INDEX without an IF NOT EXISTS
+// guard) — as opposed to a genuine failure (bad SQL, a missing table, a
+// locked/corrupt DB, etc.). Only the former should let migrate() continue
+// and still advance/persist the schema version; the latter must abort the
+// whole migration and leave schema_version unpersisted so the next startup
+// retries rather than silently running with a half-applied schema.
+func isBenignMigrationError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "already exists")
 }
 
 // SaveThreadMemory stores triage + response context for a thread.

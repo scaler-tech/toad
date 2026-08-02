@@ -970,6 +970,222 @@ func TestDB_MigrationV11_ForcesTokenRotation(t *testing.T) {
 	}
 }
 
+// TestDB_PreVersionedDB_ProbeFreezesToV8AndRunsLaterMigrations exercises the
+// fix to migrate()'s pre-versioned-DB fallback: a real 2026-03-09..11-era DB
+// (created before schema_version tracking existed at all) has
+// pr_watches.original_summary — the v8-era ad-hoc marker this probe checks —
+// but predates every migration added after schema_version tracking began:
+// v9's runs.claim_scope, v10's ticket_index/investigations tables, v11's
+// mcp_tokens hardening, v12's metrics_hourly/duration_ms.
+//
+// Before this fix, the probe set currentVersion = len(migrations) whenever
+// it fired. Because len(migrations) is evaluated against the CURRENT
+// (ever-growing) migrations slice, not whatever count existed when this
+// fallback was originally written, that unconditionally jumped such a DB
+// straight to "fully migrated" — silently skipping v9 through v12 forever,
+// even though none of them ever ran. Concretely, this meant a DB from that
+// window would never get mcp_tokens.expires_at or the plaintext-token wipe,
+// and would hit a runtime "no such column" error the first time
+// SaveMCPToken/ValidateMCPToken ran against it.
+//
+// This seeds a genuine pre-v9 physical schema (no schema_version row at
+// all — the ad-hoc-migration-era condition) with a legacy plaintext mcp
+// token, migrates it via the real probe path, and asserts v9, v11, and v12
+// all actually ran rather than being skipped.
+func TestDB_PreVersionedDB_ProbeFreezesToV8AndRunsLaterMigrations(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("opening raw fixture db: %v", err)
+	}
+	defer rawDB.Close()
+
+	// Genuine v8-era physical schema: pr_watches carries the probe's marker
+	// column (original_summary), but runs.claim_scope (v9) and
+	// mcp_tokens.expires_at (v11) do not exist yet, and there is no
+	// schema_version row anywhere (the ad-hoc code predates that tracking).
+	if _, err := rawDB.Exec(`
+		CREATE TABLE pr_watches (
+			pr_number            INTEGER PRIMARY KEY,
+			pr_url               TEXT NOT NULL,
+			branch               TEXT NOT NULL,
+			run_id               TEXT NOT NULL,
+			original_summary     TEXT DEFAULT '',
+			original_description TEXT DEFAULT ''
+		);
+		CREATE TABLE runs (
+			id            TEXT PRIMARY KEY,
+			status        TEXT NOT NULL,
+			slack_channel TEXT,
+			slack_thread  TEXT,
+			branch        TEXT,
+			worktree_path TEXT,
+			task          TEXT,
+			repo_name     TEXT DEFAULT '',
+			started_at    DATETIME NOT NULL,
+			result_json   TEXT,
+			updated_at    DATETIME NOT NULL
+		);
+		CREATE TABLE settings (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+		CREATE TABLE mcp_tokens (
+			token         TEXT PRIMARY KEY,
+			slack_user_id TEXT NOT NULL,
+			slack_user    TEXT NOT NULL,
+			role          TEXT NOT NULL DEFAULT 'user',
+			created_at    DATETIME NOT NULL,
+			last_used_at  DATETIME
+		);
+	`); err != nil {
+		t.Fatalf("creating v8-era fixture schema: %v", err)
+	}
+	if _, err := rawDB.Exec(
+		`INSERT INTO mcp_tokens (token, slack_user_id, slack_user, role, created_at) VALUES (?, ?, ?, ?, ?)`,
+		"plaintext-legacy-token", "U1", "alice", "user", time.Now(),
+	); err != nil {
+		t.Fatalf("seeding legacy plaintext token: %v", err)
+	}
+
+	// Confirm the fixture genuinely predates v9/v11 and carries no
+	// schema_version row, so migrate() takes the pre-versioned-DB probe path.
+	if cols := tableColumns(t, rawDB, "runs"); cols["claim_scope"] {
+		t.Fatal("fixture bug: runs already has claim_scope before migrate")
+	}
+	if cols := tableColumns(t, rawDB, "mcp_tokens"); cols["expires_at"] {
+		t.Fatal("fixture bug: mcp_tokens already has expires_at before migrate")
+	}
+	var versionRowCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM settings WHERE key = 'schema_version'`).Scan(&versionRowCount); err != nil {
+		t.Fatalf("checking schema_version row: %v", err)
+	}
+	if versionRowCount != 0 {
+		t.Fatal("fixture bug: schema_version row already present before migrate")
+	}
+
+	if err := migrate(rawDB); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// v9 ran: runs.claim_scope exists.
+	if cols := tableColumns(t, rawDB, "runs"); !cols["claim_scope"] {
+		t.Error("expected runs.claim_scope to exist after migrate (v9 must not be skipped)")
+	}
+	// v11 ran: mcp_tokens was force-rotated (wiped) and expires_at exists.
+	var tokenCount int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM mcp_tokens`).Scan(&tokenCount); err != nil {
+		t.Fatalf("counting mcp_tokens: %v", err)
+	}
+	if tokenCount != 0 {
+		t.Errorf("expected v11 to wipe mcp_tokens (not be skipped), found %d rows", tokenCount)
+	}
+	if cols := tableColumns(t, rawDB, "mcp_tokens"); !cols["expires_at"] {
+		t.Error("expected mcp_tokens.expires_at to exist after migrate (v11 must not be skipped)")
+	}
+	// v12 ran: metrics_hourly exists and investigations.duration_ms exists.
+	var metricsTableCount int
+	if err := rawDB.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='metrics_hourly'`,
+	).Scan(&metricsTableCount); err != nil {
+		t.Fatalf("checking metrics_hourly existence: %v", err)
+	}
+	if metricsTableCount == 0 {
+		t.Error("expected metrics_hourly to exist after migrate (v12 must not be skipped)")
+	}
+	if cols := tableColumns(t, rawDB, "investigations"); !cols["duration_ms"] {
+		t.Error("expected investigations.duration_ms to exist after migrate (v12 must not be skipped)")
+	}
+
+	var version string
+	if err := rawDB.QueryRow(`SELECT value FROM settings WHERE key = 'schema_version'`).Scan(&version); err != nil {
+		t.Fatalf("reading schema_version: %v", err)
+	}
+	if version != "12" {
+		t.Errorf("schema_version after migrate: got %q, want %q", version, "12")
+	}
+}
+
+// TestApplyMigrations_GenuineFailureDoesNotAdvanceVersion is the "otherwise
+// return the error without persisting the new version" half of the
+// migration-robustness fix: a statement failing for a reason OTHER than
+// "the change already exists" (isBenignMigrationError) must abort the whole
+// migration run, leaving the returned version at the last one that actually
+// completed — not the failing migration's version, and not any migration
+// after it. Exercised directly against applyMigrations with a synthetic
+// migrations slice (per the migrations slice being a fixed, package-internal
+// list inside migrate() otherwise) rather than trying to make one of the
+// real migrations fail for a non-benign reason.
+func TestApplyMigrations_GenuineFailureDoesNotAdvanceVersion(t *testing.T) {
+	rawDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("opening raw db: %v", err)
+	}
+	defer rawDB.Close()
+
+	migrations := []migration{
+		{1, `CREATE TABLE t1 (id INTEGER PRIMARY KEY)`},
+		// Genuine failure: ALTER on a table that doesn't exist. SQLite's
+		// error here ("no such table: t_missing") is neither "duplicate
+		// column name" nor "already exists", so this must abort rather than
+		// being logged-and-skipped.
+		{2, `ALTER TABLE t_missing ADD COLUMN x TEXT`},
+		{3, `CREATE TABLE t3 (id INTEGER PRIMARY KEY)`},
+	}
+
+	version, err := applyMigrations(rawDB, migrations, 0)
+	if err == nil {
+		t.Fatal("expected an error from the genuinely failing migration statement")
+	}
+	if version != 1 {
+		t.Errorf("expected the returned version to stay at 1 (the last migration that actually completed), got %d", version)
+	}
+
+	var t1Count int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='t1'`).Scan(&t1Count); err != nil {
+		t.Fatalf("checking t1 existence: %v", err)
+	}
+	if t1Count == 0 {
+		t.Error("expected migration 1 to have run before the failure")
+	}
+	var t3Count int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='t3'`).Scan(&t3Count); err != nil {
+		t.Fatalf("checking t3 existence: %v", err)
+	}
+	if t3Count != 0 {
+		t.Error("expected migration 3 to NOT have run after an earlier genuine failure")
+	}
+}
+
+// TestIsBenignMigrationError pins the exact classification
+// isBenignMigrationError relies on: SQLite's "duplicate column name" and
+// "already exists" mean the change a migration statement makes is already
+// present (safe to log-and-continue), while anything else is a genuine
+// failure that must abort the migration.
+func TestIsBenignMigrationError(t *testing.T) {
+	cases := []struct {
+		name   string
+		errMsg string
+		want   bool
+	}{
+		{"duplicate column", "duplicate column name: expires_at", true},
+		{"table already exists", "table ticket_index already exists", true},
+		{"index already exists", "index idx_invest_thread already exists", true},
+		{"no such table", "no such table: t_missing", false},
+		{"syntax error", `near "FROM": syntax error`, false},
+		{"database locked", "database is locked", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isBenignMigrationError(fmt.Errorf("%s", tc.errMsg)); got != tc.want {
+				t.Errorf("isBenignMigrationError(%q) = %v, want %v", tc.errMsg, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDB_Migrate_SecondCallOnFreshDBIsNoOp confirms migrate() can be safely
 // re-invoked on a DB that OpenDBAt already fully migrated (e.g. a daemon
 // restart) without erroring. Because a fresh DB's base schema already
