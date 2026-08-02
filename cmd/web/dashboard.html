@@ -75,7 +75,7 @@
   .card .delta b{color:var(--ink);font-weight:600}
 
   /* pipeline */
-  .pipe{display:grid;grid-template-columns:1fr 40px 1fr 40px 1fr 40px 1fr 40px 1fr;align-items:stretch;margin-bottom:16px}
+  .pipe{display:grid;grid-template-columns:1fr 48px 1fr 48px 1fr 48px 1fr 48px 1fr;align-items:stretch;margin-bottom:16px}
   .stage{background:var(--surface);border-radius:6px;padding:12px 16px;box-shadow:var(--sh-raised);border:none;text-align:left;font-family:var(--font);color:var(--ink)}
   button.stage{cursor:pointer}
   button.stage:hover{outline:1px solid var(--ink)}
@@ -191,7 +191,7 @@
   .rstep .dot{width:16px;text-align:center;flex-shrink:0}
   .rstep .detail{margin-left:auto;font-size:11px;color:var(--muted);font-family:var(--mono)}
 
-  #tip{position:fixed;z-index:80;background:var(--ink);color:#fff;font-size:12px;border-radius:4px;padding:6px 8px;pointer-events:none;opacity:0;transition:opacity .15s;white-space:nowrap;font-variant-numeric:tabular-nums}
+  #tip{position:fixed;z-index:80;background:var(--ink);color:#fff;font-size:12px;border-radius:4px;padding:6px 8px;pointer-events:none;opacity:0;transition:opacity .15s;max-width:320px;font-variant-numeric:tabular-nums}
   #tip b{font-weight:600}
   .section-title{font-size:20px;font-weight:700;margin:8px 0 16px}
   .subnote{font-size:12px;color:var(--muted)}
@@ -500,11 +500,17 @@
     const gateCount = inRange.filter(r=>r.feasible).length;
     const filedCount = agg.filed||0;
     const vals=[intake, triageTotal, investCount, gateCount, filedCount];
-    const loss=[
-      Math.max(intake-triageTotal,0)+" filtered at triage (not yet wired — see note)",
-      Math.max(triageTotal-investCount,0)+" not investigated / answered as Q&A",
-      Math.max(investCount-gateCount,0)+" infeasible",
-      Math.max(gateCount-filedCount,0)+" awaiting ticket / dismissed"
+    const lossN=[
+      Math.max(intake-triageTotal,0),
+      Math.max(triageTotal-investCount,0),
+      Math.max(investCount-gateCount,0),
+      Math.max(gateCount-filedCount,0)
+    ];
+    const lossDesc=[
+      "filtered at triage (not yet wired — see note)",
+      "not investigated / answered as Q&A",
+      "infeasible",
+      "awaiting ticket / dismissed"
     ];
     return STAGES.map((s,i)=>{
       let extra="";
@@ -518,7 +524,7 @@
       const tipExtra = i===0 ? " · not yet wired, see System tab" : (i===1 ? " · since daemon start, not range-scoped" : "");
       const cell=`<${nav?"button":"div"} class="stage${i===3?" gate":""}" ${nav?`data-nav="${nav}"`:""} data-tip="<b>${s[0]}</b> · ${vals[i]} ${s[1]}${tipExtra}${nav?" · click to open":""}">
         <div class="n">${num(vals[i])}</div><div class="l">${s[0]}</div><div class="s">${s[1]}</div>${extra}</${nav?"button":"div"}>`;
-      return i<STAGES.length-1?cell+`<div class="arr"><span class="a">→</span><span class="loss">− ${loss[i]}</span></div>`:cell;
+      return i<STAGES.length-1?cell+`<div class="arr" data-tip="− ${lossN[i]} ${esc(lossDesc[i])}"><span class="a">→</span><span class="loss">− ${num(lossN[i])}</span></div>`:cell;
     }).join("");
   }
 
@@ -854,7 +860,7 @@
       g.addEventListener("mouseleave",hideTip);
       if(g.dataset.nav) g.addEventListener("click",()=>gotoTab(g.dataset.nav));
     });
-    $$(".split").forEach(g=>{g.addEventListener("mousemove",e=>showTip(g.dataset.tip,e.clientX,e.clientY));g.addEventListener("mouseleave",hideTip)});
+    $$(".split, .arr[data-tip]").forEach(g=>{g.addEventListener("mousemove",e=>showTip(g.dataset.tip,e.clientX,e.clientY));g.addEventListener("mouseleave",hideTip)});
 
     renderStatTiles(d);
     renderOutcomes(d);
