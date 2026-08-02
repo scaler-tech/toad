@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -17,10 +18,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/scaler-tech/toad/internal/config"
+	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/toadpath"
 	"github.com/scaler-tech/toad/internal/update"
-	"github.com/scaler-tech/toad/internal/vcs"
 )
 
 var statusPort int
@@ -51,10 +52,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(dashboardHTML))
-	})
-	mux.HandleFunc("/kiosk", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(kioskHTML))
 	})
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/x-icon")
@@ -118,29 +115,20 @@ func runStatus(cmd *cobra.Command, args []string) error {
 type apiResponse struct {
 	Daemon             *apiDaemon          `json:"daemon"`
 	Integrations       []apiIntegration    `json:"integrations"`
-	Stats              *state.Stats        `json:"stats"`
-	MergeStats         *apiMergeStats      `json:"merge_stats,omitempty"`
-	Active             []apiRun            `json:"active"`
-	History            []apiRun            `json:"history"`
 	Opportunities      []apiOpportunity    `json:"opportunities"`
 	DigestCounts       *state.DigestCounts `json:"digest_counts,omitempty"`
 	OutcomeCounts      map[string]int      `json:"outcome_counts,omitempty"`
 	Config             *apiConfig          `json:"config,omitempty"`
 	CCUsage            *apiCCUsage         `json:"cc_usage,omitempty"`
-	PRNoun             string              `json:"pr_noun"`
+	Investigations     []apiInvestigation  `json:"investigations"`
+	Tickets            []apiTicket         `json:"tickets"`
+	Aggregates         *apiAggregates      `json:"aggregates,omitempty"`
+	Series             *apiSeries          `json:"series,omitempty"`
 	AutoUpdate         bool                `json:"auto_update"`
 	AutoRestarting     bool                `json:"auto_restarting,omitempty"`
 	AutoRestartPID     int                 `json:"auto_restart_pid,omitempty"`
 	AutoRestartStarted int64               `json:"auto_restart_started,omitempty"`
 	Now                int64               `json:"now"`
-}
-
-type apiMergeStats struct {
-	PRsCreated int     `json:"prs_created"`
-	PRsMerged  int     `json:"prs_merged"`
-	PRsClosed  int     `json:"prs_closed"`
-	PRsOpen    int     `json:"prs_open"`
-	MergeRate  float64 `json:"merge_rate"` // -1 if no completed PRs
 }
 
 type apiOpportunity struct {
@@ -190,19 +178,14 @@ type apiDaemon struct {
 	DigestSpawns     int64            `json:"digest_spawns"`
 	UpdateAvailable  bool             `json:"update_available,omitempty"`
 	LatestVersion    string           `json:"latest_version,omitempty"`
-}
 
-type apiRun struct {
-	ID           string  `json:"id"`
-	Status       string  `json:"status"`
-	Branch       string  `json:"branch"`
-	Task         string  `json:"task"`
-	RepoName     string  `json:"repo_name,omitempty"`
-	StartedAt    int64   `json:"started_at"`
-	Duration     float64 `json:"duration_s,omitempty"`
-	FilesChanged int     `json:"files_changed,omitempty"`
-	PRUrl        string  `json:"pr_url,omitempty"`
-	Error        string  `json:"error,omitempty"`
+	// Concurrency gauges for the dashboard's "Live now" card. Zero/omitted
+	// until the daemon's investigate/ribbit semaphore call sites (owned by
+	// another lane) are wired to populate the matching DaemonStats fields.
+	InvestigateSlots    int `json:"investigate_slots,omitempty"`
+	InvestigateInFlight int `json:"investigate_in_flight,omitempty"`
+	RibbitSlots         int `json:"ribbit_slots,omitempty"`
+	RibbitInFlight      int `json:"ribbit_in_flight,omitempty"`
 }
 
 type apiConfigRepo struct {
@@ -213,7 +196,6 @@ type apiConfigRepo struct {
 type apiConfig struct {
 	Repos          []apiConfigRepo `json:"repos"`
 	MaxConcurrent  int             `json:"max_concurrent"`
-	MaxRetries     int             `json:"max_retries"`
 	TimeoutMinutes int             `json:"timeout_minutes"`
 	DigestEnabled  bool            `json:"digest_enabled"`
 	DigestDryRun   bool            `json:"digest_dry_run"`
@@ -243,49 +225,194 @@ type ccExtra struct {
 	Utilization  float64 `json:"utilization"`
 }
 
-func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
-	// Resolve PR noun once at construction time.
-	prNoun := "PR"
-	if cfg != nil {
-		primaryRepo := config.PrimaryRepo(cfg.Repos.List)
-		resolved := config.ResolvedVCS(primaryRepo, cfg.VCS)
-		if p, err := vcs.NewProvider(vcs.ProviderConfig{Platform: resolved.Platform}); err == nil {
-			prNoun = p.PRNoun()
+// apiInvestigationTicket is the tracking ticket filed for an investigation
+// (if any), embedded inline so the dashboard drawer doesn't need a second
+// round-trip to resolve it.
+type apiInvestigationTicket struct {
+	IssueID       string `json:"issue_id"`
+	IssueURL      string `json:"issue_url,omitempty"`
+	Source        string `json:"source,omitempty"`
+	LastStatus    string `json:"last_status,omitempty"`
+	LastStateType string `json:"last_state_type,omitempty"`
+}
+
+// apiInvestigation is a row in the dashboard's Investigations tab. Findings
+// carries the full findings JSON verbatim (root_cause, evidence, scope,
+// non_goals, acceptance_criteria, etc.) so the drawer can render every
+// section without a second fetch.
+type apiInvestigation struct {
+	ID             string                  `json:"id"`
+	ThreadTS       string                  `json:"thread_ts,omitempty"`
+	Channel        string                  `json:"channel,omitempty"`
+	Title          string                  `json:"title"`
+	Repo           string                  `json:"repo,omitempty"`
+	Confidence     float64                 `json:"confidence"`
+	Feasible       bool                    `json:"feasible"`
+	SentryIssueIDs []string                `json:"sentry_issue_ids,omitempty"`
+	Stale          bool                    `json:"stale,omitempty"`
+	DurationMs     int64                   `json:"duration_ms,omitempty"`
+	CreatedAt      int64                   `json:"created_at"`
+	Findings       json.RawMessage         `json:"findings,omitempty"`
+	Ticket         *apiInvestigationTicket `json:"ticket,omitempty"`
+}
+
+// apiTicket is a row in the dashboard's Tickets tab, mapped from
+// state.TicketIndexEntry.
+type apiTicket struct {
+	Key           string `json:"key"`
+	IssueID       string `json:"issue_id"`
+	IssueURL      string `json:"issue_url,omitempty"`
+	Source        string `json:"source,omitempty"`
+	LastStatus    string `json:"last_status,omitempty"`
+	LastStateType string `json:"last_state_type,omitempty"`
+	CreatedAt     int64  `json:"created_at"`
+	LastSeenAt    int64  `json:"last_seen_at"`
+}
+
+// apiRangeAggregate summarizes investigation/filing volume over a fixed
+// lookback window (today, 7 days, 30 days).
+type apiRangeAggregate struct {
+	Investigations int            `json:"investigations"`
+	Filed          int            `json:"filed"`
+	FiledBySource  map[string]int `json:"filed_by_source"`
+}
+
+type apiAggregates struct {
+	Today apiRangeAggregate `json:"today"`
+	Week  apiRangeAggregate `json:"week"`
+	Month apiRangeAggregate `json:"month"`
+}
+
+// apiSeries holds the dashboard's trend sparklines. Invest/Filed series are
+// derived directly from investigations/ticket_index created_at timestamps;
+// Intake/QA come from the generic metrics_hourly counters (state.MetricSeries),
+// which are empty until a caller starts incrementing them — an empty series
+// is a valid, expected state, not an error.
+type apiSeries struct {
+	InvestHourly []int `json:"invest_hourly"`
+	InvestDaily  []int `json:"invest_daily"`
+	FiledHourly  []int `json:"filed_hourly"`
+	FiledDaily   []int `json:"filed_daily"`
+	IntakeHourly []int `json:"intake_hourly"`
+	IntakeDaily  []int `json:"intake_daily"`
+	QAHourly     []int `json:"qa_hourly"`
+	QADaily      []int `json:"qa_daily"`
+}
+
+// dbQueryTimeout bounds the ad-hoc timestamp-bucketing queries the dashboard
+// payload builder runs directly against the DB (below), separate from the
+// state package's own dbTimeout since these can scan more rows.
+const dbQueryTimeout = 5 * time.Second
+
+// fetchTimestamps returns every created_at value from `table` no older than
+// since. table is always one of a small set of literal names controlled by
+// this file, never user input. Returns nil (not an error) on any query
+// failure so callers degrade to empty series/aggregates.
+func fetchTimestamps(db *state.DB, table string, since time.Time) []time.Time {
+	ctx, cancel := context.WithTimeout(context.Background(), dbQueryTimeout)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT created_at FROM %s WHERE created_at >= ?", table), since) //nolint:gosec // table is a fixed literal, never user input
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []time.Time
+	for rows.Next() {
+		var t time.Time
+		if err := rows.Scan(&t); err != nil {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// ticketFilingRow is a minimal projection of a ticket_index row used to
+// build both the source-filed aggregates and the filed-tickets series.
+type ticketFilingRow struct {
+	createdAt time.Time
+	source    string
+}
+
+func fetchTicketFilings(db *state.DB, since time.Time) []ticketFilingRow {
+	ctx, cancel := context.WithTimeout(context.Background(), dbQueryTimeout)
+	defer cancel()
+	rows, err := db.QueryContext(ctx, "SELECT created_at, COALESCE(source,'') FROM ticket_index WHERE created_at >= ?", since)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var out []ticketFilingRow
+	for rows.Next() {
+		var r ticketFilingRow
+		if err := rows.Scan(&r.createdAt, &r.source); err != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// hourlySeriesFromTimestamps buckets times into the last `hours` UTC-hour
+// buckets ending at now, zero-filled the same way as state.MetricSeries.
+func hourlySeriesFromTimestamps(times []time.Time, hours int, now time.Time) []int {
+	series := make([]int, hours)
+	counts := make(map[string]int, len(times))
+	for _, t := range times {
+		counts[t.UTC().Format("2006-01-02T15")]++
+	}
+	for i := 0; i < hours; i++ {
+		hour := now.UTC().Add(-time.Duration(hours-1-i) * time.Hour)
+		series[i] = counts[hour.Format("2006-01-02T15")]
+	}
+	return series
+}
+
+// dailySeriesFromTimestamps buckets times into the last `days` UTC-day
+// buckets ending at now, zero-filled.
+func dailySeriesFromTimestamps(times []time.Time, days int, now time.Time) []int {
+	series := make([]int, days)
+	counts := make(map[string]int, len(times))
+	for _, t := range times {
+		counts[t.UTC().Format("2006-01-02")]++
+	}
+	for i := 0; i < days; i++ {
+		day := now.UTC().AddDate(0, 0, -(days - 1 - i))
+		series[i] = counts[day.Format("2006-01-02")]
+	}
+	return series
+}
+
+// buildRangeAggregate summarizes investigation/filing volume no older than
+// since, from the widest-window fetches the caller already made.
+func buildRangeAggregate(investTimes []time.Time, filings []ticketFilingRow, since time.Time) apiRangeAggregate {
+	agg := apiRangeAggregate{FiledBySource: map[string]int{}}
+	for _, t := range investTimes {
+		if !t.Before(since) {
+			agg.Investigations++
 		}
 	}
+	for _, f := range filings {
+		if !f.createdAt.Before(since) {
+			agg.Filed++
+			src := f.source
+			if src == "" {
+				src = "unknown"
+			}
+			agg.FiledBySource[src]++
+		}
+	}
+	return agg
+}
 
+func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		stats, err := db.Stats()
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-
-		activeRuns, err := db.ActiveRuns()
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-
-		historyRuns, err := db.History(20)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-
-		opportunities, err := db.RecentDigestOpportunities(20)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
+		now := time.Now()
+		resp := apiResponse{Now: now.Unix()}
 
 		daemonStats, _ := db.ReadDaemonStats()
-
-		now := time.Now()
-		resp := apiResponse{
-			Stats: stats,
-			Now:   now.Unix(),
-		}
 
 		// Daemon status — running if heartbeat within last 30s
 		daemon := &apiDaemon{Version: Version}
@@ -311,6 +438,10 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 			daemon.DigestProcessed = daemonStats.DigestProcessed
 			daemon.DigestOpps = daemonStats.DigestOpps
 			daemon.DigestSpawns = daemonStats.DigestSpawns
+			daemon.InvestigateSlots = daemonStats.InvestigateSlots
+			daemon.InvestigateInFlight = daemonStats.InvestigateInFlight
+			daemon.RibbitSlots = daemonStats.RibbitSlots
+			daemon.RibbitInFlight = daemonStats.RibbitInFlight
 		}
 		if info := checkVersion(); info != nil && info.Available {
 			daemon.UpdateAvailable = true
@@ -392,35 +523,11 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 
 		resp.Integrations = integrations
 
-		for _, r := range activeRuns {
-			resp.Active = append(resp.Active, apiRun{
-				ID:        r.ID,
-				Status:    r.Status,
-				Branch:    r.Branch,
-				Task:      r.Task,
-				RepoName:  r.RepoName,
-				StartedAt: r.StartedAt.Unix(),
-			})
+		opportunities, err := db.RecentDigestOpportunities(20)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
 		}
-
-		for _, r := range historyRuns {
-			hr := apiRun{
-				ID:        r.ID,
-				Status:    r.Status,
-				Branch:    r.Branch,
-				Task:      r.Task,
-				RepoName:  r.RepoName,
-				StartedAt: r.StartedAt.Unix(),
-			}
-			if r.Result != nil {
-				hr.Duration = r.Result.Duration.Seconds()
-				hr.FilesChanged = r.Result.FilesChanged
-				hr.PRUrl = r.Result.PRUrl
-				hr.Error = r.Result.Error
-			}
-			resp.History = append(resp.History, hr)
-		}
-
 		for _, o := range opportunities {
 			resp.Opportunities = append(resp.Opportunities, apiOpportunity{
 				Summary:       o.Summary,
@@ -446,27 +553,16 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 			resp.OutcomeCounts = oc
 		}
 
-		if ms, err := db.MergeStats(); err == nil {
-			resp.MergeStats = &apiMergeStats{
-				PRsCreated: ms.PRsCreated,
-				PRsMerged:  ms.PRsMerged,
-				PRsClosed:  ms.PRsClosed,
-				PRsOpen:    ms.PRsOpen,
-				MergeRate:  ms.MergeRate(),
-			}
-		}
-
 		if cfg != nil {
 			ac := &apiConfig{
 				MaxConcurrent:  cfg.Limits.MaxConcurrent,
-				MaxRetries:     cfg.Limits.MaxRetries,
 				TimeoutMinutes: cfg.Limits.TimeoutMinutes,
 				DigestEnabled:  cfg.Digest.Enabled,
 				DigestDryRun:   cfg.Digest.DryRun,
 				DigestComment:  cfg.Digest.CommentInvestigation,
 			}
-			for _, r := range cfg.Repos.List {
-				ac.Repos = append(ac.Repos, apiConfigRepo{Name: r.Name, Path: r.Path})
+			for _, rp := range cfg.Repos.List {
+				ac.Repos = append(ac.Repos, apiConfigRepo{Name: rp.Name, Path: rp.Path})
 			}
 			if cfg.Digest.Enabled {
 				ac.DigestInterval = cfg.Digest.BatchMinutes
@@ -482,7 +578,6 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 
 		resp.CCUsage = fetchCCUsage()
 
-		resp.PRNoun = prNoun
 		if v, _ := db.GetSetting("auto_update"); v == "1" {
 			resp.AutoUpdate = true
 		}
@@ -491,6 +586,92 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 		resp.AutoRestartPID = autoRestartPID
 		resp.AutoRestartStarted = autoRestartStarted
 		versionMu.Unlock()
+
+		// --- Investigations tab ---
+		investigations, err := db.RecentInvestigations(50)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		resp.Investigations = make([]apiInvestigation, 0, len(investigations))
+		for _, rec := range investigations {
+			var findings investigation.Findings
+			_ = json.Unmarshal([]byte(rec.FindingsJSON), &findings)
+
+			ai := apiInvestigation{
+				ID:             rec.ID,
+				ThreadTS:       rec.ThreadTS,
+				Channel:        rec.Channel,
+				Title:          findings.Title,
+				Repo:           rec.Repo,
+				Confidence:     findings.Confidence,
+				Feasible:       findings.Feasible,
+				SentryIssueIDs: findings.SentryIssueIDs,
+				Stale:          strings.Contains(findings.Reasoning, staleCaveat),
+				DurationMs:     rec.DurationMs,
+				CreatedAt:      rec.CreatedAt.Unix(),
+				Findings:       json.RawMessage(rec.FindingsJSON),
+			}
+			if ticket, err := db.TicketForInvestigation(rec.ID); err == nil && ticket != nil {
+				ai.Ticket = &apiInvestigationTicket{
+					IssueID:       ticket.IssueID,
+					IssueURL:      ticket.IssueURL,
+					Source:        ticket.Source,
+					LastStatus:    ticket.LastStatus,
+					LastStateType: ticket.LastStateType,
+				}
+			}
+			resp.Investigations = append(resp.Investigations, ai)
+		}
+
+		// --- Tickets tab ---
+		ticketEntries, err := db.RecentTicketIndex(50)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		resp.Tickets = make([]apiTicket, 0, len(ticketEntries))
+		for _, e := range ticketEntries {
+			resp.Tickets = append(resp.Tickets, apiTicket{
+				Key:           e.ExternalKey,
+				IssueID:       e.IssueID,
+				IssueURL:      e.IssueURL,
+				Source:        e.Source,
+				LastStatus:    e.LastStatus,
+				LastStateType: e.LastStateType,
+				CreatedAt:     e.CreatedAt.Unix(),
+				LastSeenAt:    e.LastSeenAt.Unix(),
+			})
+		}
+
+		// --- Aggregates + series (today/7d/30d) ---
+		monthStart := now.AddDate(0, 0, -30)
+		investTimes := fetchTimestamps(db, "investigations", monthStart)
+		filings := fetchTicketFilings(db, monthStart)
+
+		todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		weekStart := now.AddDate(0, 0, -7)
+
+		resp.Aggregates = &apiAggregates{
+			Today: buildRangeAggregate(investTimes, filings, todayStart),
+			Week:  buildRangeAggregate(investTimes, filings, weekStart),
+			Month: buildRangeAggregate(investTimes, filings, monthStart),
+		}
+
+		filedTimes := make([]time.Time, len(filings))
+		for i, f := range filings {
+			filedTimes[i] = f.createdAt
+		}
+		resp.Series = &apiSeries{
+			InvestHourly: hourlySeriesFromTimestamps(investTimes, 24, now),
+			InvestDaily:  dailySeriesFromTimestamps(investTimes, 30, now),
+			FiledHourly:  hourlySeriesFromTimestamps(filedTimes, 24, now),
+			FiledDaily:   dailySeriesFromTimestamps(filedTimes, 30, now),
+			IntakeHourly: db.MetricSeries("intake", 24, now),
+			IntakeDaily:  db.MetricSeriesDaily("intake", 30, now),
+			QAHourly:     db.MetricSeries("qa", 24, now),
+			QADaily:      db.MetricSeriesDaily("qa", 30, now),
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)

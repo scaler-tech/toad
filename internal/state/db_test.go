@@ -21,178 +21,6 @@ func openTestDB(t *testing.T) *DB {
 	return db
 }
 
-func TestDB_SaveAndGetByThread(t *testing.T) {
-	db := openTestDB(t)
-	run := &Run{
-		ID:            "run-1",
-		Status:        "running",
-		SlackChannel:  "C123",
-		SlackThreadTS: "1234.5678",
-		Branch:        "fix-bug",
-		Task:          "fix the bug",
-		StartedAt:     time.Now(),
-	}
-	if err := db.SaveRun(run); err != nil {
-		t.Fatalf("save run: %v", err)
-	}
-
-	got, err := db.GetByThread("1234.5678")
-	if err != nil {
-		t.Fatalf("get by thread: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected to find run by thread")
-	}
-	if got.ID != "run-1" {
-		t.Errorf("got ID %q, want %q", got.ID, "run-1")
-	}
-	if got.Task != "fix the bug" {
-		t.Errorf("got Task %q, want %q", got.Task, "fix the bug")
-	}
-}
-
-func TestDB_GetByThread_NotFound(t *testing.T) {
-	db := openTestDB(t)
-	got, err := db.GetByThread("nonexistent")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != nil {
-		t.Errorf("expected nil, got %v", got)
-	}
-}
-
-func TestDB_GetByThread_SkipsCompleted(t *testing.T) {
-	db := openTestDB(t)
-	run := &Run{
-		ID:            "run-1",
-		Status:        "running",
-		SlackThreadTS: "1234.5678",
-		StartedAt:     time.Now(),
-	}
-	if err := db.SaveRun(run); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.CompleteRun("run-1", &RunResult{Success: true}); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := db.GetByThread("1234.5678")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != nil {
-		t.Error("completed run should not be returned by GetByThread")
-	}
-}
-
-func TestDB_UpdateStatus(t *testing.T) {
-	db := openTestDB(t)
-	run := &Run{ID: "run-1", Status: "starting", StartedAt: time.Now()}
-	if err := db.SaveRun(run); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := db.UpdateStatus("run-1", "running"); err != nil {
-		t.Fatal(err)
-	}
-
-	runs, err := db.ActiveRuns()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(runs) != 1 || runs[0].Status != "running" {
-		t.Errorf("expected status 'running', got %v", runs)
-	}
-}
-
-func TestDB_CompleteRun(t *testing.T) {
-	db := openTestDB(t)
-	run := &Run{ID: "run-1", Status: "running", StartedAt: time.Now()}
-	if err := db.SaveRun(run); err != nil {
-		t.Fatal(err)
-	}
-
-	result := &RunResult{Success: true, PRUrl: "https://github.com/pr/1", FilesChanged: 3}
-	if err := db.CompleteRun("run-1", result); err != nil {
-		t.Fatal(err)
-	}
-
-	// Should not appear in active
-	active, _ := db.ActiveRuns()
-	if len(active) != 0 {
-		t.Error("completed run should not be active")
-	}
-
-	// Should appear in history
-	history, _ := db.History(10)
-	if len(history) != 1 {
-		t.Fatalf("expected 1 history entry, got %d", len(history))
-	}
-	if history[0].Status != "done" {
-		t.Errorf("expected 'done', got %q", history[0].Status)
-	}
-	if history[0].Result == nil || history[0].Result.PRUrl != "https://github.com/pr/1" {
-		t.Error("result should be preserved")
-	}
-}
-
-func TestDB_CompleteRun_Failure(t *testing.T) {
-	db := openTestDB(t)
-	run := &Run{ID: "run-1", Status: "running", StartedAt: time.Now()}
-	db.SaveRun(run)
-
-	db.CompleteRun("run-1", &RunResult{Success: false, Error: "tests failed"})
-
-	history, _ := db.History(10)
-	if len(history) != 1 || history[0].Status != "failed" {
-		t.Error("failed run should have status 'failed'")
-	}
-}
-
-func TestDB_ActiveRuns(t *testing.T) {
-	db := openTestDB(t)
-	db.SaveRun(&Run{ID: "run-1", Status: "running", StartedAt: time.Now()})
-	db.SaveRun(&Run{ID: "run-2", Status: "validating", StartedAt: time.Now()})
-	db.SaveRun(&Run{ID: "run-3", Status: "done", StartedAt: time.Now()})
-
-	active, err := db.ActiveRuns()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(active) != 2 {
-		t.Errorf("expected 2 active runs, got %d", len(active))
-	}
-}
-
-func TestDB_History(t *testing.T) {
-	db := openTestDB(t)
-	for i := 0; i < 5; i++ {
-		run := &Run{ID: fmt.Sprintf("run-%d", i), Status: "done", StartedAt: time.Now()}
-		db.SaveRun(run)
-	}
-
-	history, err := db.History(3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(history) != 3 {
-		t.Errorf("expected 3 history entries, got %d", len(history))
-	}
-}
-
-func TestDB_HasWorktree(t *testing.T) {
-	db := openTestDB(t)
-	db.SaveRun(&Run{ID: "run-1", Status: "running", WorktreePath: "/tmp/wt-1", StartedAt: time.Now()})
-
-	if !db.HasWorktree("/tmp/wt-1") {
-		t.Error("should find active worktree")
-	}
-	if db.HasWorktree("/tmp/wt-nonexistent") {
-		t.Error("should not find nonexistent worktree")
-	}
-}
-
 func TestDB_ThreadMemory(t *testing.T) {
 	db := openTestDB(t)
 
@@ -250,84 +78,30 @@ func TestDB_PruneThreadMemory(t *testing.T) {
 	}
 }
 
-func TestDB_Stats(t *testing.T) {
+func TestDB_ThreadMemoryCount(t *testing.T) {
 	db := openTestDB(t)
 
-	// Create some completed runs with results
-	for i := 0; i < 3; i++ {
-		run := &Run{
-			ID:        fmt.Sprintf("done-%d", i),
-			Status:    "running",
-			Branch:    fmt.Sprintf("fix-%d", i),
-			Task:      fmt.Sprintf("task %d", i),
-			StartedAt: time.Now(),
-		}
-		if err := db.SaveRun(run); err != nil {
-			t.Fatal(err)
-		}
-		if err := db.CompleteRun(run.ID, &RunResult{
-			Success:  true,
-			PRUrl:    fmt.Sprintf("https://github.com/pr/%d", i),
-			Duration: 3 * time.Minute,
-			Cost:     0.50,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Add failed runs
-	for i := 0; i < 2; i++ {
-		run := &Run{
-			ID:        fmt.Sprintf("fail-%d", i),
-			Status:    "running",
-			StartedAt: time.Now(),
-		}
-		if err := db.SaveRun(run); err != nil {
-			t.Fatal(err)
-		}
-		if err := db.CompleteRun(run.ID, &RunResult{
-			Success:  false,
-			Error:    "tests failed",
-			Duration: 2 * time.Minute,
-			Cost:     0.25,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Add an active run (should not count)
-	db.SaveRun(&Run{ID: "active-1", Status: "running", StartedAt: time.Now()})
-
-	// Add thread memories
 	db.SaveThreadMemory("ts-1", "C1", "{}", "resp1")
 	db.SaveThreadMemory("ts-2", "C1", "{}", "resp2")
 	db.SaveThreadMemory("ts-3", "C2", "{}", "resp3")
 
-	stats, err := db.Stats()
+	count, err := db.ThreadMemoryCount()
 	if err != nil {
-		t.Fatalf("Stats(): %v", err)
+		t.Fatalf("ThreadMemoryCount(): %v", err)
 	}
+	if count != 3 {
+		t.Errorf("ThreadMemoryCount: got %d, want 3", count)
+	}
+}
 
-	if stats.TotalRuns != 5 {
-		t.Errorf("TotalRuns: got %d, want 5", stats.TotalRuns)
+func TestDB_ThreadMemoryCount_Empty(t *testing.T) {
+	db := openTestDB(t)
+	count, err := db.ThreadMemoryCount()
+	if err != nil {
+		t.Fatalf("ThreadMemoryCount(): %v", err)
 	}
-	if stats.Succeeded != 3 {
-		t.Errorf("Succeeded: got %d, want 3", stats.Succeeded)
-	}
-	if stats.Failed != 2 {
-		t.Errorf("Failed: got %d, want 2", stats.Failed)
-	}
-	// 3 * 0.50 + 2 * 0.25 = 2.00
-	if stats.TotalCost != 2.00 {
-		t.Errorf("TotalCost: got %.2f, want 2.00", stats.TotalCost)
-	}
-	// (3*3m + 2*2m) / 5 = 13m/5 = 2m36s
-	expectedAvg := (3*3*time.Minute + 2*2*time.Minute) / 5
-	if stats.AvgDuration != expectedAvg {
-		t.Errorf("AvgDuration: got %v, want %v", stats.AvgDuration, expectedAvg)
-	}
-	if stats.ThreadCount != 3 {
-		t.Errorf("ThreadCount: got %d, want 3", stats.ThreadCount)
+	if count != 0 {
+		t.Errorf("ThreadMemoryCount: got %d, want 0", count)
 	}
 }
 
@@ -682,46 +456,6 @@ func TestDB_StaleInvestigations(t *testing.T) {
 	}
 }
 
-func TestDB_Stats_EmptyDB(t *testing.T) {
-	db := openTestDB(t)
-
-	stats, err := db.Stats()
-	if err != nil {
-		t.Fatalf("Stats(): %v", err)
-	}
-	if stats.TotalRuns != 0 {
-		t.Errorf("TotalRuns: got %d, want 0", stats.TotalRuns)
-	}
-	if stats.AvgDuration != 0 {
-		t.Errorf("AvgDuration: got %v, want 0", stats.AvgDuration)
-	}
-}
-
-func TestDB_SaveRunWithResult(t *testing.T) {
-	db := openTestDB(t)
-	run := &Run{
-		ID:        "run-1",
-		Status:    "done",
-		StartedAt: time.Now(),
-		Result: &RunResult{
-			Success:      true,
-			PRUrl:        "https://github.com/pr/1",
-			FilesChanged: 2,
-		},
-	}
-	if err := db.SaveRun(run); err != nil {
-		t.Fatal(err)
-	}
-
-	history, _ := db.History(10)
-	if len(history) != 1 {
-		t.Fatal("expected 1 history entry")
-	}
-	if history[0].Result == nil || history[0].Result.PRUrl != "https://github.com/pr/1" {
-		t.Error("result should be preserved through save/load")
-	}
-}
-
 func TestDB_HasRecentOpportunity(t *testing.T) {
 	db := openTestDB(t)
 
@@ -919,65 +653,15 @@ func TestDB_GitHubSlackMapping_Remove(t *testing.T) {
 	}
 }
 
-func TestDB_MergeStats(t *testing.T) {
-	db := openTestDB(t)
-
-	// Empty DB — no PRs
-	stats, err := db.MergeStats()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.PRsCreated != 0 || stats.PRsMerged != 0 || stats.PRsClosed != 0 {
-		t.Errorf("empty DB: expected all zeros, got created=%d merged=%d closed=%d", stats.PRsCreated, stats.PRsMerged, stats.PRsClosed)
-	}
-	if rate := stats.MergeRate(); rate != -1 {
-		t.Errorf("empty DB: expected merge rate -1, got %.1f", rate)
-	}
-
-	// Create 3 PRs
-	db.SavePRWatch(1, "https://github.com/pr/1", "fix-a", "run-1", "C1", "ts-1", "/repos/test", "fix a", "")
-	db.SavePRWatch(2, "https://github.com/pr/2", "fix-b", "run-2", "C1", "ts-2", "/repos/test", "fix b", "")
-	db.SavePRWatch(3, "https://github.com/pr/3", "fix-c", "run-3", "C1", "ts-3", "/repos/test", "fix c", "")
-
-	stats, _ = db.MergeStats()
-	if stats.PRsCreated != 3 {
-		t.Errorf("expected 3 created, got %d", stats.PRsCreated)
-	}
-	if stats.PRsOpen != 3 {
-		t.Errorf("expected 3 open, got %d", stats.PRsOpen)
-	}
-
-	// Merge PR #1, close PR #2
-	db.ClosePRWatch(1, "MERGED")
-	db.ClosePRWatch(2, "CLOSED")
-
-	stats, _ = db.MergeStats()
-	if stats.PRsMerged != 1 {
-		t.Errorf("expected 1 merged, got %d", stats.PRsMerged)
-	}
-	if stats.PRsClosed != 1 {
-		t.Errorf("expected 1 closed, got %d", stats.PRsClosed)
-	}
-	if stats.PRsOpen != 1 {
-		t.Errorf("expected 1 open, got %d", stats.PRsOpen)
-	}
-
-	// Merge rate: 1 merged / (1 merged + 1 closed) = 50%
-	rate := stats.MergeRate()
-	if rate < 49.9 || rate > 50.1 {
-		t.Errorf("expected merge rate ~50%%, got %.1f%%", rate)
-	}
-}
-
-func TestDB_MigratesToSchemaVersion11(t *testing.T) {
+func TestDB_MigratesToSchemaVersion12(t *testing.T) {
 	db := openTestDB(t)
 
 	version, err := db.GetSetting("schema_version")
 	if err != nil {
 		t.Fatalf("GetSetting(schema_version): %v", err)
 	}
-	if version != "11" {
-		t.Errorf("schema_version: got %q, want %q", version, "11")
+	if version != "12" {
+		t.Errorf("schema_version: got %q, want %q", version, "12")
 	}
 
 	// Tables introduced in migration 10 must exist and be queryable.
@@ -994,6 +678,105 @@ func TestDB_MigratesToSchemaVersion11(t *testing.T) {
 	}
 	if _, err := db.db.Exec("SELECT external_key, last_state_type FROM ticket_index"); err != nil {
 		t.Errorf("ticket_index.last_state_type column not usable: %v", err)
+	}
+
+	// Table/column introduced in migration 12 must exist and be queryable.
+	if _, err := db.db.Exec("SELECT bucket, name, count FROM metrics_hourly"); err != nil {
+		t.Errorf("metrics_hourly table not usable: %v", err)
+	}
+	if _, err := db.db.Exec("SELECT id, duration_ms FROM investigations"); err != nil {
+		t.Errorf("investigations.duration_ms column not usable: %v", err)
+	}
+}
+
+// TestDB_MigrationV12_AddsMetricsAndDuration exercises the real upgrade
+// path for v12: a file-backed DB built with the genuine pre-v12 physical
+// schema (no metrics_hourly table, investigations with no duration_ms
+// column, schema_version explicitly at "11"), migrated via the package's
+// actual migration entry point. Mirrors the fixture-based pattern used by
+// TestDB_MigrationV11_ForcesTokenRotation for the same reason: a fresh
+// openTestDB already has both the table and column via the base schema
+// block, so a genuine pre-v12 fixture is needed to exercise the ALTER/CREATE
+// statements themselves.
+func TestDB_MigrationV12_AddsMetricsAndDuration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("opening raw fixture db: %v", err)
+	}
+	defer rawDB.Close()
+
+	// Genuine pre-v12 physical schema: investigations with no duration_ms,
+	// no metrics_hourly table at all.
+	if _, err := rawDB.Exec(`
+		CREATE TABLE investigations (
+			id            TEXT PRIMARY KEY,
+			thread_ts     TEXT,
+			channel       TEXT,
+			repo          TEXT,
+			findings_json TEXT NOT NULL,
+			created_at    DATETIME NOT NULL
+		);
+		CREATE TABLE settings (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+	`); err != nil {
+		t.Fatalf("creating pre-v12 fixture schema: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO settings (key, value) VALUES ('schema_version', '11')`); err != nil {
+		t.Fatalf("seeding schema_version=11: %v", err)
+	}
+	if _, err := rawDB.Exec(
+		`INSERT INTO investigations (id, thread_ts, channel, repo, findings_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"invest-1", "111.222", "C123", "app", `{"title":"x"}`, time.Now(),
+	); err != nil {
+		t.Fatalf("seeding pre-v12 investigations row: %v", err)
+	}
+
+	// Confirm the fixture genuinely predates v12 before migrating.
+	if cols := tableColumns(t, rawDB, "investigations"); cols["duration_ms"] {
+		t.Fatal("fixture bug: investigations already has duration_ms before migrate")
+	}
+	var metricsTableCount int
+	if err := rawDB.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='metrics_hourly'`,
+	).Scan(&metricsTableCount); err != nil {
+		t.Fatalf("checking metrics_hourly existence: %v", err)
+	}
+	if metricsTableCount != 0 {
+		t.Fatal("fixture bug: metrics_hourly already exists before migrate")
+	}
+
+	if err := migrate(rawDB); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	if cols := tableColumns(t, rawDB, "investigations"); !cols["duration_ms"] {
+		t.Error("expected investigations.duration_ms to exist after migrate")
+	}
+	var durationMs sql.NullInt64
+	if err := rawDB.QueryRow(
+		`SELECT duration_ms FROM investigations WHERE id = ?`, "invest-1",
+	).Scan(&durationMs); err != nil {
+		t.Fatalf("reading duration_ms on surviving row: %v", err)
+	}
+
+	if _, err := rawDB.Exec(
+		`INSERT INTO metrics_hourly (bucket, name, count) VALUES (?, ?, ?)`,
+		"2026-08-02T14", "intake", 3,
+	); err != nil {
+		t.Fatalf("inserting into metrics_hourly after migrate: %v", err)
+	}
+
+	var version string
+	if err := rawDB.QueryRow(`SELECT value FROM settings WHERE key = 'schema_version'`).Scan(&version); err != nil {
+		t.Fatalf("reading schema_version: %v", err)
+	}
+	if version != "12" {
+		t.Errorf("schema_version after migrate: got %q, want %q", version, "12")
 	}
 }
 
@@ -1051,6 +834,11 @@ func TestDB_MigrationV11_ForcesTokenRotation(t *testing.T) {
 	defer rawDB.Close()
 
 	// Genuine pre-v11 physical schema: no expires_at, no last_state_type.
+	// investigations is included (pre-v12, no duration_ms) purely so the
+	// unconditional base-schema block in migrate() treats it as already
+	// existing (CREATE TABLE IF NOT EXISTS is a no-op) rather than creating
+	// it fresh with duration_ms already baked in — which would make v12's
+	// own ALTER TABLE ADD COLUMN fail with "duplicate column name".
 	if _, err := rawDB.Exec(`
 		CREATE TABLE mcp_tokens (
 			token TEXT PRIMARY KEY,
@@ -1074,6 +862,14 @@ func TestDB_MigrationV11_ForcesTokenRotation(t *testing.T) {
 		CREATE TABLE settings (
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL
+		);
+		CREATE TABLE investigations (
+			id            TEXT PRIMARY KEY,
+			thread_ts     TEXT,
+			channel       TEXT,
+			repo          TEXT,
+			findings_json TEXT NOT NULL,
+			created_at    DATETIME NOT NULL
 		);
 	`); err != nil {
 		t.Fatalf("creating pre-v11 fixture schema: %v", err)
@@ -1169,20 +965,21 @@ func TestDB_MigrationV11_ForcesTokenRotation(t *testing.T) {
 	if err := rawDB.QueryRow(`SELECT value FROM settings WHERE key = 'schema_version'`).Scan(&version); err != nil {
 		t.Fatalf("reading schema_version: %v", err)
 	}
-	if version != "11" {
-		t.Errorf("schema_version after migrate: got %q, want %q", version, "11")
+	if version != "12" {
+		t.Errorf("schema_version after migrate: got %q, want %q", version, "12")
 	}
 }
 
 // TestDB_Migrate_SecondCallOnFreshDBIsNoOp confirms migrate() can be safely
 // re-invoked on a DB that OpenDBAt already fully migrated (e.g. a daemon
 // restart) without erroring. Because a fresh DB's base schema already
-// contains everything through v11 (see the v11 migration comment), this
+// contains everything through v12 (see the v11/v12 migration comments), this
 // exercises the schema_version gate short-circuiting every migration —
-// it does NOT exercise the v11 ALTER statements themselves on a genuine
-// pre-v11 schema; TestDB_MigrationV11_ForcesTokenRotation covers that.
+// it does NOT exercise the v11/v12 ALTER statements themselves on a genuine
+// pre-v11 schema; TestDB_MigrationV11_ForcesTokenRotation and
+// TestDB_MigrationV12_AddsMetricsAndDuration cover those.
 func TestDB_Migrate_SecondCallOnFreshDBIsNoOp(t *testing.T) {
-	db := openTestDB(t) // already migrated to v11 by OpenDBAt
+	db := openTestDB(t) // already migrated to v12 by OpenDBAt
 
 	if err := migrate(db.db); err != nil {
 		t.Fatalf("second migrate call should be a no-op, got error: %v", err)
@@ -1192,8 +989,8 @@ func TestDB_Migrate_SecondCallOnFreshDBIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSetting(schema_version): %v", err)
 	}
-	if version != "11" {
-		t.Errorf("schema_version after second migrate: got %q, want %q", version, "11")
+	if version != "12" {
+		t.Errorf("schema_version after second migrate: got %q, want %q", version, "12")
 	}
 }
 
@@ -1231,8 +1028,8 @@ func TestDB_MigrationIdempotent_ReopenFileBackedDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSetting(schema_version): %v", err)
 	}
-	if version != "11" {
-		t.Errorf("schema_version after reopen: got %q, want %q", version, "11")
+	if version != "12" {
+		t.Errorf("schema_version after reopen: got %q, want %q", version, "12")
 	}
 
 	entry, err := db2.GetTicketIndex("thread:C123:1722500000.000100")
@@ -1631,5 +1428,174 @@ func TestDB_FindInvestigationByTicket_NotFound(t *testing.T) {
 	}
 	if got != nil {
 		t.Errorf("expected nil, got %v", got)
+	}
+}
+
+func TestDB_TicketForInvestigation(t *testing.T) {
+	db := openTestDB(t)
+
+	rec := &InvestigationRecord{
+		ID:           "inv-1",
+		ThreadTS:     "1722500000.000100",
+		Channel:      "C123",
+		Repo:         "toad",
+		FindingsJSON: `{"summary":"nil pointer crash"}`,
+		CreatedAt:    time.Now(),
+	}
+	if err := db.SaveInvestigation(rec); err != nil {
+		t.Fatalf("SaveInvestigation: %v", err)
+	}
+	if err := db.UpsertTicketIndex(&TicketIndexEntry{
+		ExternalKey:     "thread:C123:1722500000.000100",
+		IssueID:         "SCL-1482",
+		IssueURL:        "https://linear.app/scl/issue/SCL-1482",
+		Source:          "auto",
+		InvestigationID: "inv-1",
+		CreatedAt:       time.Now(),
+		LastSeenAt:      time.Now(),
+	}); err != nil {
+		t.Fatalf("UpsertTicketIndex: %v", err)
+	}
+
+	got, err := db.TicketForInvestigation("inv-1")
+	if err != nil {
+		t.Fatalf("TicketForInvestigation: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected ticket resolved via investigation_id")
+	}
+	if got.IssueID != "SCL-1482" {
+		t.Errorf("IssueID: got %q, want %q", got.IssueID, "SCL-1482")
+	}
+}
+
+func TestDB_TicketForInvestigation_NotFound(t *testing.T) {
+	db := openTestDB(t)
+
+	got, err := db.TicketForInvestigation("inv-nonexistent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil, got %v", got)
+	}
+
+	got, err = db.TicketForInvestigation("")
+	if err != nil {
+		t.Fatalf("unexpected error for empty id: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil for empty investigation id, got %v", got)
+	}
+}
+
+func TestDB_RecentInvestigations(t *testing.T) {
+	db := openTestDB(t)
+
+	for i := 0; i < 3; i++ {
+		rec := &InvestigationRecord{
+			ID:           fmt.Sprintf("inv-%d", i),
+			ThreadTS:     fmt.Sprintf("ts-%d", i),
+			Channel:      "C123",
+			Repo:         "toad",
+			FindingsJSON: `{"title":"x"}`,
+			DurationMs:   int64(1000 * (i + 1)),
+			CreatedAt:    time.Now().Add(time.Duration(i) * time.Minute),
+		}
+		if err := db.SaveInvestigation(rec); err != nil {
+			t.Fatalf("SaveInvestigation: %v", err)
+		}
+	}
+
+	recs, err := db.RecentInvestigations(2)
+	if err != nil {
+		t.Fatalf("RecentInvestigations: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(recs))
+	}
+	// Newest first.
+	if recs[0].ID != "inv-2" {
+		t.Errorf("expected newest first (inv-2), got %q", recs[0].ID)
+	}
+	if recs[0].DurationMs != 3000 {
+		t.Errorf("DurationMs: got %d, want 3000", recs[0].DurationMs)
+	}
+}
+
+func TestDB_IncrementMetric_And_MetricSeries(t *testing.T) {
+	db := openTestDB(t)
+
+	now := time.Date(2026, 8, 2, 14, 30, 0, 0, time.UTC)
+	if err := db.IncrementMetric("intake", now); err != nil {
+		t.Fatalf("IncrementMetric: %v", err)
+	}
+	if err := db.IncrementMetric("intake", now); err != nil {
+		t.Fatalf("IncrementMetric: %v", err)
+	}
+	if err := db.IncrementMetric("intake", now.Add(-2*time.Hour)); err != nil {
+		t.Fatalf("IncrementMetric (2h ago): %v", err)
+	}
+
+	series := db.MetricSeries("intake", 4, now)
+	if len(series) != 4 {
+		t.Fatalf("expected series length 4, got %d", len(series))
+	}
+	// [now-3h, now-2h, now-1h, now] -> [0, 1, 0, 2]
+	want := []int{0, 1, 0, 2}
+	for i := range want {
+		if series[i] != want[i] {
+			t.Errorf("series[%d]: got %d, want %d (series=%v)", i, series[i], want[i], series)
+		}
+	}
+
+	// A different metric name has its own independent series.
+	other := db.MetricSeries("qa", 4, now)
+	for i, v := range other {
+		if v != 0 {
+			t.Errorf("unrelated metric series[%d]: got %d, want 0", i, v)
+		}
+	}
+}
+
+func TestDB_MetricSeries_EmptyTableDegradesGracefully(t *testing.T) {
+	db := openTestDB(t)
+	series := db.MetricSeries("nonexistent", 5, time.Now())
+	if len(series) != 5 {
+		t.Fatalf("expected zero-filled length-5 series, got %v", series)
+	}
+	for i, v := range series {
+		if v != 0 {
+			t.Errorf("series[%d]: got %d, want 0", i, v)
+		}
+	}
+}
+
+func TestDB_MetricSeriesDaily(t *testing.T) {
+	db := openTestDB(t)
+
+	now := time.Date(2026, 8, 2, 14, 0, 0, 0, time.UTC)
+	// Two events today, in different hours.
+	if err := db.IncrementMetric("filed", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.IncrementMetric("filed", now.Add(-3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// One event yesterday.
+	if err := db.IncrementMetric("filed", now.AddDate(0, 0, -1)); err != nil {
+		t.Fatal(err)
+	}
+
+	series := db.MetricSeriesDaily("filed", 3, now)
+	if len(series) != 3 {
+		t.Fatalf("expected series length 3, got %d", len(series))
+	}
+	// [2 days ago, yesterday, today] -> [0, 1, 2]
+	want := []int{0, 1, 2}
+	for i := range want {
+		if series[i] != want[i] {
+			t.Errorf("series[%d]: got %d, want %d (series=%v)", i, series[i], want[i], series)
+		}
 	}
 }

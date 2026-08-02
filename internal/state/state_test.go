@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 )
 
 func TestClaim(t *testing.T) {
@@ -39,91 +38,23 @@ func TestUnclaim(t *testing.T) {
 	}
 }
 
+// TestUnclaim_DoesNotRemoveTrackedRun exercises Unclaim's placeholder-only
+// removal semantics. The runs pipeline (which used to promote a claim's
+// placeholder "" runID to a real one via Manager.Track) was removed, so this
+// test writes directly to the unexported threads map — same package — to
+// simulate a "real" (non-placeholder) claim.
 func TestUnclaim_DoesNotRemoveTrackedRun(t *testing.T) {
 	m := NewManager()
-	m.Track(&Run{
-		ID:            "run-1",
-		SlackThreadTS: "thread-1",
-		StartedAt:     time.Now(),
-	})
+	m.Claim("thread-1")
+	m.threads["thread-1"][""] = "run-1"
 
-	// Unclaim should NOT remove a thread that has a real run tracked
+	// Unclaim should NOT remove a thread whose claim is no longer a placeholder.
 	m.Unclaim("thread-1")
 
 	// If the mapping had been removed, this claim would succeed; it must
-	// fail instead, proving the tracked run's exclusive claim is still held.
+	// fail instead, proving the non-placeholder claim is still held.
 	if m.Claim("thread-1") {
-		t.Fatal("unclaim should not remove a tracked run's thread mapping")
-	}
-}
-
-func TestUpdate(t *testing.T) {
-	m := NewManager()
-	m.Track(&Run{ID: "run-1", Status: "starting", StartedAt: time.Now()})
-	m.Update("run-1", "running")
-
-	runs := m.Active()
-	if len(runs) != 1 || runs[0].Status != "running" {
-		t.Errorf("expected status 'running', got %v", runs)
-	}
-}
-
-func TestComplete_Success(t *testing.T) {
-	m := NewManager()
-	m.Track(&Run{ID: "run-1", Status: "running", StartedAt: time.Now()})
-
-	m.Complete("run-1", &RunResult{Success: true, PRUrl: "https://github.com/pr/1"})
-
-	if len(m.Active()) != 0 {
-		t.Error("completed run should not be in active list")
-	}
-	history := m.History()
-	if len(history) != 1 {
-		t.Fatalf("expected 1 history entry, got %d", len(history))
-	}
-	if history[0].Status != "done" {
-		t.Errorf("expected status 'done', got %q", history[0].Status)
-	}
-}
-
-func TestComplete_Failure(t *testing.T) {
-	m := NewManager()
-	m.Track(&Run{ID: "run-1", Status: "running", StartedAt: time.Now()})
-
-	m.Complete("run-1", &RunResult{Success: false, Error: "tests failed"})
-
-	history := m.History()
-	if len(history) != 1 || history[0].Status != "failed" {
-		t.Errorf("expected failed status in history")
-	}
-}
-
-func TestHistoryCap(t *testing.T) {
-	m := NewManager()
-	for i := 0; i < 60; i++ {
-		id := fmt.Sprintf("run-%d", i)
-		m.Track(&Run{ID: id, Status: "running", StartedAt: time.Now()})
-		m.Complete(id, &RunResult{Success: true})
-	}
-
-	history := m.History()
-	if len(history) != 50 {
-		t.Errorf("history should be capped at 50, got %d", len(history))
-	}
-	// Oldest should be run-10 (0-9 evicted)
-	if history[0].ID != "run-10" {
-		t.Errorf("oldest entry should be run-10, got %s", history[0].ID)
-	}
-}
-
-func TestActive(t *testing.T) {
-	m := NewManager()
-	m.Track(&Run{ID: "run-1", Status: "running", StartedAt: time.Now()})
-	m.Track(&Run{ID: "run-2", Status: "starting", StartedAt: time.Now()})
-
-	active := m.Active()
-	if len(active) != 2 {
-		t.Errorf("expected 2 active runs, got %d", len(active))
+		t.Fatal("unclaim should not remove a non-placeholder thread mapping")
 	}
 }
 
@@ -136,59 +67,13 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			id := fmt.Sprintf("run-%d", i)
 			ts := fmt.Sprintf("thread-%d", i)
 			m.Claim(ts)
-			m.Track(&Run{ID: id, Status: "running", SlackThreadTS: ts, StartedAt: time.Now()})
-			m.Update(id, "validating")
-			m.Active()
-			m.Complete(id, &RunResult{Success: true})
-			m.History()
+			m.Unclaim(ts)
+			m.Claim(ts)
 		}(i)
 	}
 	wg.Wait()
-
-	if len(m.Active()) != 0 {
-		t.Errorf("all runs should be complete, got %d active", len(m.Active()))
-	}
-}
-
-func TestClaimReleasedAfterComplete(t *testing.T) {
-	m := NewManager()
-
-	// Claim and track a run
-	if !m.Claim("thread-1") {
-		t.Fatal("initial claim should succeed")
-	}
-	m.Track(&Run{ID: "run-1", Status: "running", SlackThreadTS: "thread-1", StartedAt: time.Now()})
-
-	// While running, claim should fail
-	if m.Claim("thread-1") {
-		t.Error("claim should fail while run is active")
-	}
-
-	// Complete the run
-	m.Complete("run-1", &RunResult{Success: true})
-
-	// Thread should now be reclaimable
-	if !m.Claim("thread-1") {
-		t.Error("claim should succeed after run completes")
-	}
-}
-
-func TestClaimReleasedAfterFailure(t *testing.T) {
-	m := NewManager()
-
-	if !m.Claim("thread-2") {
-		t.Fatal("initial claim should succeed")
-	}
-	m.Track(&Run{ID: "run-2", Status: "running", SlackThreadTS: "thread-2", StartedAt: time.Now()})
-	m.Complete("run-2", &RunResult{Success: false, Error: "test failure"})
-
-	// Thread should be reclaimable after failure too
-	if !m.Claim("thread-2") {
-		t.Error("claim should succeed after failed run")
-	}
 }
 
 // --- Scoped claim tests ---
@@ -233,22 +118,21 @@ func TestClaimScoped_ScopedBlocksExclusive(t *testing.T) {
 	}
 }
 
+// TestUnclaimScoped_OnlyRemovesPlaceholder covers the same placeholder-vs-
+// real-claim distinction as TestUnclaim_DoesNotRemoveTrackedRun, but for the
+// scoped variant. Direct map manipulation replaces the old Track call (see
+// that test's comment).
 func TestUnclaimScoped_OnlyRemovesPlaceholder(t *testing.T) {
 	m := NewManager()
-	// Claim and track a scoped run
+	// Claim a scoped run and simulate it being "real" (non-placeholder).
 	m.ClaimScoped("thread-1", "DAT-100")
-	m.Track(&Run{
-		ID:            "run-1",
-		SlackThreadTS: "thread-1",
-		ClaimScope:    "DAT-100",
-		StartedAt:     time.Now(),
-	})
+	m.threads["thread-1"]["DAT-100"] = "run-1"
 
 	// UnclaimScoped should NOT remove because it has a real runID — a
 	// subsequent claim of the same scope must still fail.
 	m.UnclaimScoped("thread-1", "DAT-100")
 	if m.ClaimScoped("thread-1", "DAT-100") {
-		t.Fatal("unclaim should not remove a tracked run's thread mapping")
+		t.Fatal("unclaim should not remove a non-placeholder thread mapping")
 	}
 
 	// But a placeholder should be removable
@@ -259,42 +143,8 @@ func TestUnclaimScoped_OnlyRemovesPlaceholder(t *testing.T) {
 	if !m.ClaimScoped("thread-1", "DAT-200") {
 		t.Fatal("expected DAT-200 to be reclaimable after its placeholder was unclaimed")
 	}
-	// ... while DAT-100 still can't be, since run-1's tracked claim survived.
+	// ... while DAT-100 still can't be, since its non-placeholder claim survived.
 	if m.ClaimScoped("thread-1", "DAT-100") {
-		t.Error("expected DAT-100 to remain held by the tracked run")
-	}
-}
-
-func TestComplete_ScopedReleasesOnlyItsScope(t *testing.T) {
-	m := NewManager()
-	m.ClaimScoped("thread-1", "DAT-100")
-	m.Track(&Run{
-		ID:            "run-1",
-		Status:        "running",
-		SlackThreadTS: "thread-1",
-		ClaimScope:    "DAT-100",
-		StartedAt:     time.Now(),
-	})
-	m.ClaimScoped("thread-1", "DAT-200")
-	m.Track(&Run{
-		ID:            "run-2",
-		Status:        "running",
-		SlackThreadTS: "thread-1",
-		ClaimScope:    "DAT-200",
-		StartedAt:     time.Now(),
-	})
-
-	// Complete run-1 (DAT-100)
-	m.Complete("run-1", &RunResult{Success: true})
-
-	// DAT-200 should still be active — its scope must still be held, i.e.
-	// unclaimable, since run-2 is untouched by completing run-1.
-	if m.ClaimScoped("thread-1", "DAT-200") {
-		t.Error("expected DAT-200 to still be held by run-2 after completing only run-1")
-	}
-
-	// DAT-100 should be reclaimable
-	if !m.ClaimScoped("thread-1", "DAT-100") {
-		t.Error("DAT-100 should be reclaimable after completion")
+		t.Error("expected DAT-100 to remain held")
 	}
 }
