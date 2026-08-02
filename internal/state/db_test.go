@@ -965,15 +965,15 @@ func TestDB_MergeStats(t *testing.T) {
 	}
 }
 
-func TestDB_MigratesToSchemaVersion10(t *testing.T) {
+func TestDB_MigratesToSchemaVersion11(t *testing.T) {
 	db := openTestDB(t)
 
 	version, err := db.GetSetting("schema_version")
 	if err != nil {
 		t.Fatalf("GetSetting(schema_version): %v", err)
 	}
-	if version != "10" {
-		t.Errorf("schema_version: got %q, want %q", version, "10")
+	if version != "11" {
+		t.Errorf("schema_version: got %q, want %q", version, "11")
 	}
 
 	// Tables introduced in migration 10 must exist and be queryable.
@@ -982,6 +982,74 @@ func TestDB_MigratesToSchemaVersion10(t *testing.T) {
 	}
 	if _, err := db.db.Exec("SELECT id, thread_ts, channel, repo, findings_json, created_at FROM investigations"); err != nil {
 		t.Errorf("investigations table not usable: %v", err)
+	}
+
+	// Columns introduced in migration 11 must exist and be queryable.
+	if _, err := db.db.Exec("SELECT token, expires_at FROM mcp_tokens"); err != nil {
+		t.Errorf("mcp_tokens.expires_at column not usable: %v", err)
+	}
+	if _, err := db.db.Exec("SELECT external_key, last_state_type FROM ticket_index"); err != nil {
+		t.Errorf("ticket_index.last_state_type column not usable: %v", err)
+	}
+}
+
+// TestDB_MigrationV11_ForcesTokenRotation exercises the upgrade path for a
+// DB that's already at schema_version 10 (the realistic case: an existing
+// production DB with a live plaintext mcp_tokens row). Re-running migrate on
+// the underlying *sql.DB should apply v11 and wipe the row, since plaintext
+// tokens can't be rehashed in place — see the v11 migration comment.
+func TestDB_MigrationV11_ForcesTokenRotation(t *testing.T) {
+	db := openTestDB(t)
+
+	if _, err := db.db.Exec(
+		`INSERT INTO mcp_tokens (token, slack_user_id, slack_user, role, created_at) VALUES (?, ?, ?, ?, ?)`,
+		"plaintext-legacy-token", "U1", "alice", "user", time.Now(),
+	); err != nil {
+		t.Fatalf("seeding legacy plaintext token: %v", err)
+	}
+	if _, err := db.db.Exec(`UPDATE settings SET value = '10' WHERE key = 'schema_version'`); err != nil {
+		t.Fatalf("resetting schema_version to 10: %v", err)
+	}
+
+	if err := migrate(db.db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var count int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM mcp_tokens`).Scan(&count); err != nil {
+		t.Fatalf("counting mcp_tokens: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected v11 migration to wipe mcp_tokens, found %d rows", count)
+	}
+
+	version, err := db.GetSetting("schema_version")
+	if err != nil {
+		t.Fatalf("GetSetting(schema_version): %v", err)
+	}
+	if version != "11" {
+		t.Errorf("schema_version after migrate: got %q, want %q", version, "11")
+	}
+}
+
+// TestDB_MigrationV11_Idempotent confirms that migrate can be safely
+// re-invoked on an already-migrated DB (e.g. daemon restart) without
+// erroring — the ALTER TABLE ADD COLUMN statements in v11 would fail if
+// re-run, so this depends on the schema_version gate actually skipping
+// already-applied migrations.
+func TestDB_MigrationV11_Idempotent(t *testing.T) {
+	db := openTestDB(t) // already migrated to v11 by OpenDBAt
+
+	if err := migrate(db.db); err != nil {
+		t.Fatalf("second migrate call should be a no-op, got error: %v", err)
+	}
+
+	version, err := db.GetSetting("schema_version")
+	if err != nil {
+		t.Fatalf("GetSetting(schema_version): %v", err)
+	}
+	if version != "11" {
+		t.Errorf("schema_version after second migrate: got %q, want %q", version, "11")
 	}
 }
 
@@ -1019,8 +1087,8 @@ func TestDB_MigrationIdempotent_ReopenFileBackedDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSetting(schema_version): %v", err)
 	}
-	if version != "10" {
-		t.Errorf("schema_version after reopen: got %q, want %q", version, "10")
+	if version != "11" {
+		t.Errorf("schema_version after reopen: got %q, want %q", version, "11")
 	}
 
 	entry, err := db2.GetTicketIndex("thread:C123:1722500000.000100")
@@ -1257,7 +1325,7 @@ func TestDB_UpdateTicketStatus(t *testing.T) {
 		t.Fatalf("UpsertTicketIndex: %v", err)
 	}
 
-	if err := db.UpdateTicketStatus("sentry:BILLING-2291", "in_progress"); err != nil {
+	if err := db.UpdateTicketStatus("sentry:BILLING-2291", "in_progress", "started"); err != nil {
 		t.Fatalf("UpdateTicketStatus: %v", err)
 	}
 
@@ -1270,6 +1338,9 @@ func TestDB_UpdateTicketStatus(t *testing.T) {
 	}
 	if entry.LastStatus != "in_progress" {
 		t.Errorf("LastStatus: got %q, want %q", entry.LastStatus, "in_progress")
+	}
+	if entry.LastStateType != "started" {
+		t.Errorf("LastStateType: got %q, want %q", entry.LastStateType, "started")
 	}
 	if entry.StatusCheckedAt.IsZero() {
 		t.Error("expected StatusCheckedAt to be set")

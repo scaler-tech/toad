@@ -56,6 +56,18 @@ func New(cfg config.MCPConfig, db TokenValidator) *Server {
 	}
 }
 
+// isLoopbackHost reports whether host resolves only to the local machine.
+// An empty host means net/http binds all interfaces, so it is treated as
+// non-loopback (the most exposed case, not the safest).
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
 // Start begins listening. Blocks until ctx is canceled.
 func (s *Server) Start(ctx context.Context) error {
 	handler := gomcp.NewStreamableHTTPHandler(
@@ -77,6 +89,11 @@ func (s *Server) Start(ctx context.Context) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	if !isLoopbackHost(s.cfg.Host) && !s.cfg.TLS {
+		slog.Warn("MCP server is binding a non-loopback interface without TLS; bearer tokens will be sent in plaintext over the network",
+			"host", s.cfg.Host, "port", s.cfg.Port)
+	}
+
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -86,8 +103,14 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	slog.Info("MCP server listening", "port", s.cfg.Port)
-	err := s.httpSrv.ListenAndServe()
+	var err error
+	if s.cfg.TLS {
+		slog.Info("MCP server listening (TLS)", "port", s.cfg.Port)
+		err = s.httpSrv.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
+	} else {
+		slog.Info("MCP server listening", "port", s.cfg.Port)
+		err = s.httpSrv.ListenAndServe()
+	}
 	if err == http.ErrServerClosed {
 		return nil
 	}

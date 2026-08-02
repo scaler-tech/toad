@@ -17,6 +17,31 @@ func (m *mockDB) ValidateMCPToken(token string) (*state.MCPToken, error) {
 	return m.tokens[token], nil
 }
 
+// TestIsLoopbackHost covers the bind-warning classification: loopback
+// values suppress the plaintext-bearer-over-the-network warning, everything
+// else (including "" — which net/http binds as all interfaces) does not.
+func TestIsLoopbackHost(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"localhost", true},
+		{"127.0.0.1", true},
+		{"::1", true},
+		{"", false}, // empty host binds all interfaces — treat as non-loopback
+		{"0.0.0.0", false},
+		{"192.168.1.5", false},
+		{"my-host.internal", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			if got := isLoopbackHost(tt.host); got != tt.want {
+				t.Errorf("isLoopbackHost(%q) = %v, want %v", tt.host, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAuthMiddleware(t *testing.T) {
 	db := &mockDB{tokens: map[string]*state.MCPToken{
 		"toad_valid": {
