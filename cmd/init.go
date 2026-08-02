@@ -593,7 +593,6 @@ func (m *wizardModel) writeConfig() error {
 		Limits: limitsTemplateData{
 			MaxConcurrent:  2,
 			TimeoutMinutes: 10,
-			MaxRetries:     1,
 		},
 		Triage: triageTemplateData{
 			Model: triageModels[m.triageModel],

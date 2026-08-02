@@ -1,6 +1,10 @@
 # Agent Providers
 
-Toad uses a `Provider` interface to interact with coding agents. The agent handles code generation, investigation, triage classification, and Q&A — all through `Run()` calls with different permission levels.
+Toad uses a `Provider` interface to interact with coding agents. In toad v2 the
+agent no longer writes code or ships PRs (tadpole coding was dropped) — it's
+used for read-only work: triage classification, investigation, Q&A (ribbit),
+and digest analysis, all through `Run()` calls with different permission
+levels.
 
 ## Current Providers
 
@@ -27,7 +31,7 @@ type Provider interface {
 }
 ```
 
-**`Run`** executes the agent with a prompt and returns the result text. All 8 callsites in Toad use this — from 1-turn triage classification to 30-turn coding sessions.
+**`Run`** executes the agent with a prompt and returns the result text. Callsites in Toad v2: triage classification, digest analysis, ribbit Q&A, and investigation — all short, bounded-turn reasoning tasks now that coding runs are gone.
 
 **`Resume`** continues a previous session by ID. Used for investigations that hit max turns. Providers without session support return `ErrResumeNotSupported`.
 
@@ -37,9 +41,9 @@ type Provider interface {
 
 | Level | Claude Code mapping | Purpose |
 |-------|-------------------|---------|
-| `PermissionNone` | No tool flags | Text-only reasoning (triage, digest, reviewer) |
+| `PermissionNone` | No tool flags | Text-only reasoning (triage, digest analysis) |
 | `PermissionReadOnly` | `--allowedTools Read,Glob,Grep` | Read-only codebase access (ribbit, investigation) |
-| `PermissionFull` | `--dangerously-skip-permissions` | Full read/write (tadpole coding runs) |
+| `PermissionFull` | `--dangerously-skip-permissions` | Full read/write; defined but currently unused — no v2 flow writes code |
 
 ### RunOpts → CLI Args
 
@@ -120,7 +124,7 @@ Prompts throughout the codebase reference Claude Code-specific tool names:
 "use Glob to find files, Grep to search content, Read to examine code"
 ```
 
-These appear in: triage, ribbit, tadpole, digest, reviewer, and investigation prompts in `cmd/root.go`. A new provider with different tool names (e.g., Codex uses `read_file`, `search`) would need either:
+These appear in: triage, ribbit, digest, and investigation prompts in `cmd/root.go`. A new provider with different tool names (e.g., Codex uses `read_file`, `search`) would need either:
 - A prompt template system with per-provider tool name mappings
 - Generic wording that doesn't reference specific tools (less effective)
 

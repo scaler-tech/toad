@@ -452,7 +452,6 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 		if cfg != nil {
 			ac := &apiConfig{
 				MaxConcurrent:  cfg.Limits.MaxConcurrent,
-				MaxRetries:     cfg.Limits.MaxRetries,
 				TimeoutMinutes: cfg.Limits.TimeoutMinutes,
 				DigestEnabled:  cfg.Digest.Enabled,
 				DigestDryRun:   cfg.Digest.DryRun,

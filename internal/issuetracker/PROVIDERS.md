@@ -1,6 +1,6 @@
 # Issue Tracker Providers
 
-Toad uses a `Tracker` interface to link opportunities and tadpole PRs to external issue trackers. The integration is lightweight — extract references from messages, optionally create new issues.
+Toad uses a `Tracker` interface to link opportunities to external issue trackers. In toad v2 this is the primary output of the investigation flow — investigations file Linear tickets rather than coding a fix — but the interface itself stays lightweight: extract references from messages, optionally create new issues.
 
 ## Current Providers
 
@@ -101,6 +101,6 @@ See `linear_test.go` for the pattern. Key test areas:
 
 ## Implementation Notes
 
-- The `IssueRef.BranchPrefix()` method lowercases the issue ID for branch naming (e.g., `PLF-3125` → `plf-3125`). This works across providers.
+- The `IssueRef.BranchPrefix()` method lowercases the issue ID for branch naming (e.g., `PLF-3125` → `plf-3125`). This is a holdover from the v1 tadpole workflow (branches were named after the linked issue); v2's investigation flow doesn't create branches, but the method is cheap to keep for any future coding-agent workflow that wants issue-derived branch names.
 - Linear's `ExtractIssueRef` filters common false positives (HTTP, JSON, UTF, etc.) to avoid matching uppercase acronyms as issue IDs. New providers with similar ID formats should do the same.
 - The tracker is optional — Toad works fine without it. When disabled, `NewTracker` returns `NoopTracker`.
