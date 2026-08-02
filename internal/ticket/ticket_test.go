@@ -564,3 +564,29 @@ func TestFileOrUpdate_CreateIssueErrorPropagates(t *testing.T) {
 		t.Errorf("expected no ticket index entry to be created on a CreateIssue failure, got %+v", entry)
 	}
 }
+
+func TestFileOrUpdate_PassesRequestedTeamAndProject(t *testing.T) {
+	tracker := &fakeTracker{nextID: "ANA-7"}
+	store := newFakeStore()
+	e := New(tracker, store, config.TicketConfig{}, fixedPermalink("https://slack.example.com/x"))
+
+	f := investigation.Findings{
+		Problem:       "Cost page uses unreliable cost-based metrics.",
+		LinearTeam:    "ANA",
+		LinearProject: "Biome",
+	}
+
+	if _, err := e.FileOrUpdate(context.Background(), f, "C123", "1722.0002", "inv-2", SourceCTA); err != nil {
+		t.Fatalf("FileOrUpdate() error = %v", err)
+	}
+	if len(tracker.createCalls) != 1 {
+		t.Fatalf("CreateIssue calls = %d, want 1", len(tracker.createCalls))
+	}
+	created := tracker.createCalls[0]
+	if created.Team != "ANA" {
+		t.Errorf("Team = %q, want the findings' explicitly requested team passed verbatim", created.Team)
+	}
+	if created.Project != "Biome" {
+		t.Errorf("Project = %q, want the findings' explicitly requested project passed verbatim", created.Project)
+	}
+}

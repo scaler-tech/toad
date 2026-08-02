@@ -266,3 +266,26 @@ func TestExtractFilePaths(t *testing.T) {
 		t.Errorf("expected exactly %d matched paths, got %v", len(want), paths)
 	}
 }
+
+func TestParseFindings_LinearDestinationFields(t *testing.T) {
+	raw := `{"feasible": true, "title": "t", "problem": "p", "root_cause": "r", "evidence": [], "scope": [], "non_goals": [], "acceptance_criteria": [], "confidence": 0.5, "repo": "biome", "sentry_issue_ids": [], "issue_id": "", "linear_team": "ANA", "linear_project": "Biome", "files_found": [], "reasoning": "x"}`
+	f, err := ParseFindings(raw)
+	if err != nil {
+		t.Fatalf("ParseFindings() error = %v", err)
+	}
+	if f.LinearTeam != "ANA" {
+		t.Errorf("LinearTeam = %q, want ANA", f.LinearTeam)
+	}
+	if f.LinearProject != "Biome" {
+		t.Errorf("LinearProject = %q, want Biome", f.LinearProject)
+	}
+}
+
+func TestPrompt_InstructsLinearDestinationExtraction(t *testing.T) {
+	p := buildPrompt(Request{Text: "create a ticket in the Biome project"})
+	for _, want := range []string{`"linear_team"`, `"linear_project"`, "explicitly names a Linear team or project"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+}

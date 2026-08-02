@@ -114,6 +114,15 @@ type CreateIssueOpts struct {
 	Category    string   // "bug" or "feature"
 	StateID     string   // optional Linear workflow state UUID
 	Labels      []string // extra label IDs beyond bug/feature mapping
+
+	// Team optionally overrides the configured default team; a key ("ANA"),
+	// name ("Analytics"), or UUID. Project optionally names a project to
+	// attach the issue to, resolved within the effective team. Both resolve
+	// against the tracker's existing teams/projects with warn-and-fallback:
+	// an unknown Team files to the default team, an unknown Project files
+	// with no project — resolution failures never block issue creation.
+	Team    string
+	Project string
 }
 
 // NoopTracker is a no-op implementation that returns nil for everything.

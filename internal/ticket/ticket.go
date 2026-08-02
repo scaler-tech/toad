@@ -249,6 +249,8 @@ func (e *Engine) file(ctx context.Context, f investigation.Findings, key, invest
 		Description: ComposeBody(f, permalink, investigationID),
 		Category:    category,
 		StateID:     e.cfg.TriageStateID,
+		Team:        f.LinearTeam,
+		Project:     f.LinearProject,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating issue for %s: %w", key, err)

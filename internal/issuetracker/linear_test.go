@@ -1303,3 +1303,164 @@ func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	return base.RoundTrip(req)
 }
+
+// projectAwareServer fakes the two GraphQL calls CreateIssue can make when a
+// project/team override is present: a "projects" query for the effective
+// team, a "teams" query for overrides, and the issueCreate mutation. It
+// records the mutation variables and counts projects queries.
+func projectAwareServer(t *testing.T, projects map[string]string, teams map[string][2]string, capturedVars *map[string]any, projectQueries *int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+
+		switch {
+		case strings.Contains(payload.Query, "projects(first:"):
+			if projectQueries != nil {
+				*projectQueries++
+			}
+			var nodes []map[string]any
+			for id, name := range projects {
+				nodes = append(nodes, map[string]any{"id": id, "name": name})
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"team": map[string]any{"projects": map[string]any{"nodes": nodes}}},
+			})
+		case strings.Contains(payload.Query, "teams { nodes"):
+			var nodes []map[string]any
+			for id, keyName := range teams {
+				nodes = append(nodes, map[string]any{"id": id, "key": keyName[0], "name": keyName[1]})
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"teams": map[string]any{"nodes": nodes}},
+			})
+		default: // issueCreate
+			if capturedVars != nil {
+				*capturedVars = payload.Variables
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"issueCreate": map[string]any{
+					"success": true,
+					"issue":   map[string]any{"identifier": "PLF-99", "url": "https://linear.app/x/issue/PLF-99", "title": "t"},
+				}},
+			})
+		}
+	}))
+}
+
+const testTeamUUID = "00000000-0000-0000-0000-000000000123"
+
+func projectTestTracker(srv *httptest.Server) *LinearTracker {
+	return &LinearTracker{
+		apiToken:   "test-token",
+		teamID:     testTeamUUID,
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+}
+
+func TestCreateIssue_ProjectResolvedAndAttached(t *testing.T) {
+	var vars map[string]any
+	srv := projectAwareServer(t, map[string]string{
+		"proj-biome": "Biome",
+		"proj-other": "Platform Cleanup",
+	}, nil, &vars, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	if _, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Project: "biome"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if vars["projectId"] != "proj-biome" {
+		t.Errorf("projectId = %v, want proj-biome (case-insensitive exact match)", vars["projectId"])
+	}
+}
+
+func TestCreateIssue_UnknownProjectFilesWithoutProject(t *testing.T) {
+	var vars map[string]any
+	srv := projectAwareServer(t, map[string]string{"proj-other": "Platform Cleanup"}, nil, &vars, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	ref, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Project: "nonexistent"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v (resolution failure must not block creation)", err)
+	}
+	if ref == nil {
+		t.Fatal("expected issue ref despite unresolved project")
+		return
+	}
+	if _, ok := vars["projectId"]; ok {
+		t.Errorf("projectId = %v, want absent when the project cannot be resolved", vars["projectId"])
+	}
+}
+
+func TestCreateIssue_AmbiguousPartialProjectFilesWithoutProject(t *testing.T) {
+	var vars map[string]any
+	srv := projectAwareServer(t, map[string]string{
+		"proj-a": "Billing Revamp",
+		"proj-b": "Billing Cleanup",
+	}, nil, &vars, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	if _, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Project: "Billing"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := vars["projectId"]; ok {
+		t.Errorf("projectId = %v, want absent for an ambiguous partial match", vars["projectId"])
+	}
+}
+
+func TestCreateIssue_TeamOverrideByKeyAndName(t *testing.T) {
+	teams := map[string][2]string{
+		"team-ana": {"ANA", "Analytics"},
+		"team-plf": {"PLF", "Growth Platform"},
+	}
+	for _, override := range []string{"ana", "Analytics"} {
+		var vars map[string]any
+		srv := projectAwareServer(t, nil, teams, &vars, nil)
+		lt := projectTestTracker(srv)
+		if _, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Team: override}); err != nil {
+			srv.Close()
+			t.Fatalf("override %q: unexpected error: %v", override, err)
+		}
+		if vars["teamId"] != "team-ana" {
+			t.Errorf("override %q: teamId = %v, want team-ana", override, vars["teamId"])
+		}
+		srv.Close()
+	}
+}
+
+func TestCreateIssue_UnknownTeamOverrideFallsBackToDefault(t *testing.T) {
+	var vars map[string]any
+	srv := projectAwareServer(t, nil, map[string][2]string{"team-plf": {"PLF", "Growth Platform"}}, &vars, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	if _, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Team: "NOPE"}); err != nil {
+		t.Fatalf("unexpected error: %v (unknown override must fall back, not fail)", err)
+	}
+	if vars["teamId"] != testTeamUUID {
+		t.Errorf("teamId = %v, want the configured default team", vars["teamId"])
+	}
+}
+
+func TestCreateIssue_ProjectResolutionCached(t *testing.T) {
+	var vars map[string]any
+	queries := 0
+	srv := projectAwareServer(t, map[string]string{"proj-biome": "Biome"}, nil, &vars, &queries)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	for i := 0; i < 2; i++ {
+		if _, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Project: "Biome"}); err != nil {
+			t.Fatalf("call %d: unexpected error: %v", i, err)
+		}
+	}
+	if queries != 1 {
+		t.Errorf("projects queries = %d, want 1 (second call must hit the cache)", queries)
+	}
+}

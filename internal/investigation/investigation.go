@@ -24,9 +24,21 @@ type Findings struct {
 	Confidence         float64    `json:"confidence"`
 	Repo               string     `json:"repo"`
 	SentryIssueIDs     []string   `json:"sentry_issue_ids"`
-	IssueID            string     `json:"issue_id"`    // existing Linear ref, if any
-	FilesFound         []string   `json:"files_found"` // from extractFilePaths
-	Reasoning          string     `json:"reasoning"`   // Slack-postable prose
+	IssueID            string     `json:"issue_id"` // existing Linear ref, if any
+
+	// LinearTeam and LinearProject carry a filing destination the reporter
+	// EXPLICITLY named in the request ("file this in the ANA team", "create
+	// a ticket in the Biome project"); both are empty otherwise. They are
+	// model output and therefore untrusted — but they can only ever narrow
+	// WHERE a ticket lands: the Linear client resolves them against the
+	// workspace's existing teams/projects and falls back to the configured
+	// defaults when resolution fails. They never influence WHETHER a ticket
+	// is filed (the corroboration/CTA gates run on other fields entirely).
+	LinearTeam    string `json:"linear_team"`
+	LinearProject string `json:"linear_project"`
+
+	FilesFound []string `json:"files_found"` // from extractFilePaths
+	Reasoning  string   `json:"reasoning"`   // Slack-postable prose
 
 	// RepoSyncFailed is set by Runner.Run itself when the pre-investigation
 	// repo sync failed, so the investigation proceeded against a possibly-

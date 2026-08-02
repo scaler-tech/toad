@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +55,15 @@ type LinearTracker struct {
 	// only ever read/written under teamIDMu.
 	teamIDMu       sync.Mutex
 	resolvedTeamID string
+
+	// resolvedTeams / resolvedProjects cache successful override
+	// resolutions for the tracker's lifetime, under teamIDMu with the same
+	// success-only policy as resolvedTeamID: failures are never cached, so
+	// one transient error doesn't wedge later attempts. Keys: resolvedTeams
+	// by lower-cased team key/name; resolvedProjects by teamID + "\x00" +
+	// lower-cased project name.
+	resolvedTeams    map[string]string
+	resolvedProjects map[string]string
 }
 
 // NewLinearTracker creates a Linear tracker from config.
@@ -357,6 +367,118 @@ func (lt *LinearTracker) resolveTeamID(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("linear team key %q not found", lt.teamID)
 }
 
+// resolveTeamOverride resolves an explicitly requested team — a key
+// ("ANA"), a display name ("Analytics"), or a UUID — to its UUID. Matching
+// is case-insensitive on both key and name. Successful resolutions are
+// cached under teamIDMu for the tracker's lifetime; failures are not.
+func (lt *LinearTracker) resolveTeamOverride(ctx context.Context, team string) (string, error) {
+	if uuidRe.MatchString(team) {
+		return team, nil
+	}
+
+	cacheKey := strings.ToLower(team)
+	lt.teamIDMu.Lock()
+	defer lt.teamIDMu.Unlock()
+	if id, ok := lt.resolvedTeams[cacheKey]; ok {
+		return id, nil
+	}
+
+	data, err := lt.doGraphQL(ctx, `{ teams { nodes { id key name } } }`, nil)
+	if err != nil {
+		return "", fmt.Errorf("fetching teams: %w", err)
+	}
+
+	var result struct {
+		Teams struct {
+			Nodes []struct {
+				ID   string `json:"id"`
+				Key  string `json:"key"`
+				Name string `json:"name"`
+			} `json:"nodes"`
+		} `json:"teams"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parsing teams response: %w", err)
+	}
+
+	for _, t := range result.Teams.Nodes {
+		if strings.EqualFold(t.Key, team) || strings.EqualFold(t.Name, team) {
+			if lt.resolvedTeams == nil {
+				lt.resolvedTeams = make(map[string]string)
+			}
+			lt.resolvedTeams[cacheKey] = t.ID
+			return t.ID, nil
+		}
+	}
+	return "", fmt.Errorf("linear team %q not found", team)
+}
+
+// resolveProjectID resolves a project name to its UUID within the given
+// team. An exact (case-insensitive) name match wins; otherwise a
+// case-insensitive substring match is accepted only when it is unambiguous.
+// Successful resolutions are cached under teamIDMu for the tracker's
+// lifetime; failures are not.
+func (lt *LinearTracker) resolveProjectID(ctx context.Context, teamID, name string) (string, error) {
+	if uuidRe.MatchString(name) {
+		return name, nil
+	}
+
+	cacheKey := teamID + "\x00" + strings.ToLower(name)
+	lt.teamIDMu.Lock()
+	defer lt.teamIDMu.Unlock()
+	if id, ok := lt.resolvedProjects[cacheKey]; ok {
+		return id, nil
+	}
+
+	data, err := lt.doGraphQL(ctx,
+		`query($teamId: String!) { team(id: $teamId) { projects(first: 250) { nodes { id name } } } }`,
+		map[string]any{"teamId": teamID},
+	)
+	if err != nil {
+		return "", fmt.Errorf("fetching projects: %w", err)
+	}
+
+	var result struct {
+		Team struct {
+			Projects struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"projects"`
+		} `json:"team"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parsing projects response: %w", err)
+	}
+
+	var partial []string
+	lower := strings.ToLower(name)
+	for _, p := range result.Team.Projects.Nodes {
+		if strings.EqualFold(p.Name, name) {
+			if lt.resolvedProjects == nil {
+				lt.resolvedProjects = make(map[string]string)
+			}
+			lt.resolvedProjects[cacheKey] = p.ID
+			return p.ID, nil
+		}
+		if strings.Contains(strings.ToLower(p.Name), lower) {
+			partial = append(partial, p.ID)
+		}
+	}
+	if len(partial) == 1 {
+		if lt.resolvedProjects == nil {
+			lt.resolvedProjects = make(map[string]string)
+		}
+		lt.resolvedProjects[cacheKey] = partial[0]
+		return partial[0], nil
+	}
+	if len(partial) > 1 {
+		return "", fmt.Errorf("linear project %q is ambiguous (%d partial matches)", name, len(partial))
+	}
+	return "", fmt.Errorf("linear project %q not found", name)
+}
+
 // CreateIssue creates a new Linear issue via the GraphQL API.
 func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) (*IssueRef, error) {
 	if lt.apiToken == "" {
@@ -370,6 +492,16 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 	teamID, err := lt.resolveTeamID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolving team ID: %w", err)
+	}
+
+	// An explicitly requested team overrides the configured default —
+	// warn-and-fallback, never block creation on a bad hint.
+	if opts.Team != "" {
+		if id, terr := lt.resolveTeamOverride(ctx, opts.Team); terr != nil {
+			slog.Warn("requested Linear team not resolved, filing to default team", "team", opts.Team, "error", terr)
+		} else {
+			teamID = id
+		}
 	}
 
 	// Build label IDs based on category, then merge in any extra labels.
@@ -397,9 +529,16 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 	if opts.StateID != "" {
 		variables["stateId"] = opts.StateID
 	}
+	if opts.Project != "" {
+		if pid, perr := lt.resolveProjectID(ctx, teamID, opts.Project); perr != nil {
+			slog.Warn("requested Linear project not resolved, filing without project", "project", opts.Project, "error", perr)
+		} else {
+			variables["projectId"] = pid
+		}
+	}
 
-	query := `mutation IssueCreate($title: String!, $description: String, $teamId: String!, $labelIds: [String!], $stateId: String) {
-		issueCreate(input: { title: $title, description: $description, teamId: $teamId, labelIds: $labelIds, stateId: $stateId }) {
+	query := `mutation IssueCreate($title: String!, $description: String, $teamId: String!, $labelIds: [String!], $stateId: String, $projectId: String) {
+		issueCreate(input: { title: $title, description: $description, teamId: $teamId, labelIds: $labelIds, stateId: $stateId, projectId: $projectId }) {
 			success
 			issue {
 				id
