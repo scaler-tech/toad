@@ -334,7 +334,6 @@ func TestFileOrUpdate_ConcurrentSameKeySerializes(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(n)
 	for i := 0; i < n; i++ {
-		i := i
 		go func() {
 			defer wg.Done()
 			results[i], errs[i] = e.FileOrUpdate(context.Background(), f, "C1", "1.0", "inv-1", SourceAuto)

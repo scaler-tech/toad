@@ -113,7 +113,7 @@ func outcomeCounts(db *state.DB) (map[string]int, error) {
 //     or actively being worked
 //   - "done": state type "completed" (or, on name fallback, a "done" status)
 //   - "rejected": state type "canceled" (or, on name fallback, a
-//     cancelled/duplicate status)
+//     canceled/duplicate status, either spelling)
 //   - "unknown": anything else, including custom workflow states when no
 //     state type is available to disambiguate them
 //

@@ -275,7 +275,7 @@ func TestSyncAll_CallsSyncerForEveryRepoAndTracksFailures(t *testing.T) {
 func TestSyncRepos_ExitsOnCtxDone(t *testing.T) {
 	var calls int
 	var mu sync.Mutex
-	syncer := func(_ context.Context, _ config.RepoConfig) error {
+	syncer := func(_ context.Context, _ config.RepoConfig) error { //nolint:unparam // signature fixed by syncRepos' syncer parameter
 		mu.Lock()
 		calls++
 		mu.Unlock()
@@ -290,7 +290,7 @@ func TestSyncRepos_ExitsOnCtxDone(t *testing.T) {
 	}()
 
 	// Let the immediate startup sync (and likely at least one ticker fire)
-	// happen before cancelling.
+	// happen before canceling.
 	time.Sleep(30 * time.Millisecond)
 	cancel()
 

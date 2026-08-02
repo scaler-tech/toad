@@ -240,9 +240,9 @@ func handleTriggered(
 
 	daemonCounters.triages.Add(1)
 	switch result.Category {
-	case "bug":
+	case categoryBug:
 		daemonCounters.triageBug.Add(1)
-	case "feature":
+	case categoryFeature:
 		daemonCounters.triageFeature.Add(1)
 	case "question":
 		daemonCounters.triageQuestion.Add(1)
@@ -272,7 +272,7 @@ func handleTriggered(
 	// investigation gate before a ticket is filed or proposed. An infeasible
 	// (or errored) investigation falls through to the unchanged ribbit path
 	// below — v1 semantics.
-	if (result.Category == "bug" || result.Category == "feature") && result.Confidence >= 0.5 {
+	if (result.Category == categoryBug || result.Category == categoryFeature) && result.Confidence >= 0.5 {
 		if !deps.stateManager.Claim(threadTS) {
 			slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
 			return
@@ -347,7 +347,7 @@ func handleTriggered(
 	incrementMetric(deps.stateManager.DB(), "qa")
 	// See ReplyWithOptionalCTA's doc comment: the button is suppressed when
 	// the tracker can't actually create issues.
-	showCTA := (result.Category == "bug" || result.Category == "feature") && deps.ticketEngine.ShouldCreateIssues()
+	showCTA := (result.Category == categoryBug || result.Category == categoryFeature) && deps.ticketEngine.ShouldCreateIssues()
 	if _, err := slackClient.ReplyWithOptionalCTA(msg.Channel, msg.ThreadTS(), resp.Text, showCTA); err != nil {
 		slog.Warn("ribbit reply failed", "error", err)
 	}
@@ -372,7 +372,7 @@ func handlePassive(
 		return
 	}
 
-	if !result.Actionable || result.Confidence <= 0.8 || result.Category != "bug" {
+	if !result.Actionable || result.Confidence <= 0.8 || result.Category != categoryBug {
 		slog.Debug("handler: triage not actionable, ignoring", "actionable", result.Actionable, "confidence", result.Confidence, "category", result.Category)
 		return
 	}

@@ -222,8 +222,7 @@ func (m wizardModel) forwardToActiveInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.repoNameInput, cmd = m.repoNameInput.Update(msg)
 		}
 	case stepAdvanced:
-		switch m.advSection {
-		case 0: // triggers
+		if m.advSection == 0 { // triggers
 			switch m.advCursor {
 			case 0:
 				m.channelsInput, cmd = m.channelsInput.Update(msg)
@@ -533,8 +532,7 @@ func (m *wizardModel) blurAllAdvanced() {
 }
 
 func (m *wizardModel) focusAdvancedField() {
-	switch m.advSection {
-	case 0: // triggers
+	if m.advSection == 0 { // triggers
 		switch m.advCursor {
 		case 0:
 			m.channelsInput.Focus()

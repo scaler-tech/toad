@@ -11,6 +11,7 @@
 // status calls. Keeping the decision functions Slack-client-free is what
 // lets ticketflow_test.go exercise them directly with a fake tracker and an
 // in-memory state DB.
+
 package cmd
 
 import (
@@ -33,6 +34,13 @@ import (
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/ticket"
 	"github.com/scaler-tech/toad/internal/triage"
+)
+
+// Triage categories emitted by internal/triage's classifier; the prompt
+// pins the category vocabulary to exactly bug/feature/question/other.
+const (
+	categoryBug     = "bug"
+	categoryFeature = "feature"
 )
 
 // flowDeps bundles the six dependencies shared by every investigate-and-file
@@ -782,9 +790,9 @@ func runBotIntake(
 
 	daemonCounters.triages.Add(1)
 	switch result.Category {
-	case "bug":
+	case categoryBug:
 		daemonCounters.triageBug.Add(1)
-	case "feature":
+	case categoryFeature:
 		daemonCounters.triageFeature.Add(1)
 	case "question":
 		daemonCounters.triageQuestion.Add(1)
@@ -792,7 +800,7 @@ func runBotIntake(
 		daemonCounters.triageOther.Add(1)
 	}
 
-	if !result.Actionable || result.Confidence < 0.5 || (result.Category != "bug" && result.Category != "feature") {
+	if !result.Actionable || result.Confidence < 0.5 || (result.Category != categoryBug && result.Category != categoryFeature) {
 		slog.Debug("bot intake: not an actionable bug/feature, dropping",
 			"actionable", result.Actionable, "category", result.Category, "confidence", result.Confidence, "bot_id", msg.BotID)
 		return nil

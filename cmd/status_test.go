@@ -361,6 +361,7 @@ func TestSyncWarningFor(t *testing.T) {
 	got := syncWarningFor(repoSync)
 	if got == nil {
 		t.Fatal("expected a warning, got nil")
+		return
 	}
 	if got.Repo != "newer-failure" {
 		t.Errorf("expected the more recently checked failure to win, got repo=%q", got.Repo)

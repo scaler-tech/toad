@@ -66,25 +66,25 @@ func TestClassify_ProviderError(t *testing.T) {
 }
 
 func TestTriagePrompt_ContainsSentryRule(t *testing.T) {
-	if !containsString(triagePrompt, "Sentry") {
+	if !strings.Contains(triagePrompt, "Sentry") {
 		t.Error("triagePrompt should mention Sentry monitoring bot rule")
 	}
-	if !containsString(triagePrompt, "error/stack trace") {
+	if !strings.Contains(triagePrompt, "error/stack trace") {
 		t.Error("triagePrompt should mention error/stack trace for Sentry rule")
 	}
 }
 
 func TestTriagePrompt_ContainsEscalateRule(t *testing.T) {
-	if !containsString(triagePrompt, "escalate") {
+	if !strings.Contains(triagePrompt, "escalate") {
 		t.Error("triagePrompt should mention escalate rule")
 	}
-	if !containsString(triagePrompt, "create/file a ticket") {
+	if !strings.Contains(triagePrompt, "create/file a ticket") {
 		t.Error("triagePrompt should mention creating/filing a ticket in escalate rule")
 	}
 }
 
 func TestTriagePrompt_ContainsEscalateInTemplate(t *testing.T) {
-	if !containsString(triagePrompt, `"escalate":`) {
+	if !strings.Contains(triagePrompt, `"escalate":`) {
 		t.Error("triagePrompt JSON template should include escalate field")
 	}
 }
@@ -109,9 +109,4 @@ func TestParseResult_DefaultsEscalateFalse(t *testing.T) {
 	if result.Escalate {
 		t.Error("expected escalate=false by default, got true")
 	}
-}
-
-// Helper function
-func containsString(s, substr string) bool {
-	return strings.Contains(s, substr)
 }

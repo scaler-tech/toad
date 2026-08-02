@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1172,7 +1173,7 @@ type scanner interface {
 
 func scanTicketIndex(row *sql.Row) (*TicketIndexEntry, error) {
 	e, err := scanTicketIndexRow(row)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

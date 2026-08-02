@@ -171,6 +171,7 @@ func TestRun_ParsesFindingsFromAgentResult(t *testing.T) {
 	}
 	if findings == nil {
 		t.Fatal("expected non-nil findings")
+		return
 	}
 	if !findings.Feasible {
 		t.Error("expected feasible=true")

@@ -77,6 +77,7 @@ func TestPollOnce_StatusChangePersists(t *testing.T) {
 	}
 	if entry == nil {
 		t.Fatal("expected ticket index entry to exist")
+		return
 	}
 	if entry.LastStatus != "Done" {
 		t.Errorf("LastStatus = %q, want %q", entry.LastStatus, "Done")
@@ -236,7 +237,7 @@ func TestRunOutcomePoller_ExitsOnCtxDone(t *testing.T) {
 		close(done)
 	}()
 
-	// Let the ticker fire at least once before cancelling, so we know we're
+	// Let the ticker fire at least once before canceling, so we know we're
 	// exercising the running loop and not just a goroutine that never
 	// started its select.
 	time.Sleep(30 * time.Millisecond)
@@ -266,7 +267,7 @@ func TestClassifyOutcome(t *testing.T) {
 		// Type-based classification (takes precedence when present).
 		{"completed type", "Done", "completed", "done"},
 		{"canceled type (American spelling)", "Canceled", "canceled", "rejected"},
-		{"cancelled type (British spelling)", "Cancelled", "cancelled", "rejected"},
+		{"cancelled type (British spelling)", "Cancelled", "cancelled", "rejected"}, //nolint:misspell // deliberately testing the British spelling
 		{"triage type", "Needs Triage", "triage", "pending"},
 		{"backlog type", "Backlog", "backlog", "accepted"},
 		{"unstarted type", "Todo", "unstarted", "accepted"},
@@ -279,7 +280,7 @@ func TestClassifyOutcome(t *testing.T) {
 
 		// Name-matching fallback (empty type).
 		{"name fallback: done", "Done", "", "done"},
-		{"name fallback: cancelled", "Cancelled", "", "rejected"},
+		{"name fallback: cancelled", "Cancelled", "", "rejected"}, //nolint:misspell // deliberately testing the British spelling
 		{"name fallback: canceled", "Canceled", "", "rejected"},
 		{"name fallback: duplicate", "Duplicate", "", "rejected"},
 		{"name fallback: unmatched status is unknown", "In Progress", "", "unknown"},
@@ -317,6 +318,7 @@ func TestPollOnce_PersistsStateType(t *testing.T) {
 	}
 	if entry == nil {
 		t.Fatal("expected ticket index entry to exist")
+		return
 	}
 	if entry.LastStatus != "In Progress" {
 		t.Errorf("LastStatus = %q, want %q", entry.LastStatus, "In Progress")

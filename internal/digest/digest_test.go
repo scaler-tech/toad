@@ -202,47 +202,47 @@ func TestBuildChunks_LargeAndSmallChannels(t *testing.T) {
 // scanner over '['/']' — digest.parseOpportunities' own bracket-matching
 // case, now that the digest package no longer keeps a byte-for-byte
 // duplicate of that scanning logic (see internal/investigation/parse.go).
-func findMatchingBracket(s string, pos int) int {
-	return investigation.FindMatchingDelimiter(s, pos, '[', ']')
+func findMatchingBracket(s string) int {
+	return investigation.FindMatchingDelimiter(s, 0, '[', ']')
 }
 
 func TestFindMatchingBracket_Simple(t *testing.T) {
-	idx := findMatchingBracket(`[]`, 0)
+	idx := findMatchingBracket(`[]`)
 	if idx != 1 {
 		t.Errorf("expected 1, got %d", idx)
 	}
 }
 
 func TestFindMatchingBracket_WithContent(t *testing.T) {
-	idx := findMatchingBracket(`[{"a":1}]`, 0)
+	idx := findMatchingBracket(`[{"a":1}]`)
 	if idx != 8 {
 		t.Errorf("expected 8, got %d", idx)
 	}
 }
 
 func TestFindMatchingBracket_Nested(t *testing.T) {
-	idx := findMatchingBracket(`[[1,2],[3,4]]`, 0)
+	idx := findMatchingBracket(`[[1,2],[3,4]]`)
 	if idx != 12 {
 		t.Errorf("expected 12, got %d", idx)
 	}
 }
 
 func TestFindMatchingBracket_BracketsInString(t *testing.T) {
-	idx := findMatchingBracket(`["[]"]`, 0)
+	idx := findMatchingBracket(`["[]"]`)
 	if idx != 5 {
 		t.Errorf("expected 5, got %d", idx)
 	}
 }
 
 func TestFindMatchingBracket_EscapedQuotes(t *testing.T) {
-	idx := findMatchingBracket(`["val\"ue"]`, 0)
+	idx := findMatchingBracket(`["val\"ue"]`)
 	if idx != 10 {
 		t.Errorf("expected 10, got %d", idx)
 	}
 }
 
 func TestFindMatchingBracket_NoMatch(t *testing.T) {
-	idx := findMatchingBracket(`[unclosed`, 0)
+	idx := findMatchingBracket(`[unclosed`)
 	if idx != -1 {
 		t.Errorf("expected -1, got %d", idx)
 	}

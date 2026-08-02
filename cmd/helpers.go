@@ -221,7 +221,7 @@ func SyncRepoNow(ctx context.Context, repo config.RepoConfig) error {
 	branchOut, err := branchCmd.Output()
 	if err != nil {
 		// Detached HEAD or unreadable — nothing more we can safely do.
-		return nil
+		return nil //nolint:nilerr // deliberate: skip sync rather than fail the investigation
 	}
 	currentBranch := strings.TrimSpace(string(branchOut))
 	if currentBranch == repo.DefaultBranch {
