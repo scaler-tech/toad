@@ -265,7 +265,7 @@ This is Toad King: passive batch analysis of channel traffic that feeds the same
 issue_tracker:
   enabled: false
   provider: linear
-  api_token: ${TOAD_LINEAR_API_TOKEN}
+  # api_token: ""    # or leave unset and use TOAD_LINEAR_API_TOKEN instead (recommended)
   team_id: ""
   create_issues: false
   # bug_label_id: ""
@@ -275,6 +275,8 @@ issue_tracker:
 ```
 
 This is the tracker connection itself; `ticket.auto_file` above is the separate gate on top of it. Both `enabled` and `create_issues` must be true for toad to be capable of filing anything — see the troubleshooting note below on what happens if they aren't.
+
+Prefer the `TOAD_LINEAR_API_TOKEN` environment variable over the `api_token` YAML key — it keeps the token out of a config file that might get committed or copied around. If you do set `api_token` directly in `.toad.yaml`, `chmod 0600` the file (owner read/write only) since it then holds a live credential in plain text.
 
 ### `vcs`
 
@@ -327,7 +329,7 @@ mcp:
 | *(name you choose via `agent.fallback_api_key_env`)* | — | Typically `ANTHROPIC_API_KEY`. Holds the API key toad retries with when the Claude subscription seat is throttled. |
 | *(name you choose via `agent.mcp_servers.<name>.auth_token_env`)* | — | e.g. `TOAD_SENTRY_MCP_TOKEN` for a Sentry MCP entry. Holds the bearer token sent to that MCP server. |
 
-Environment variables always win over both config files. You can also reference them from YAML with `${VAR}` syntax (e.g. `api_token: ${TOAD_LINEAR_API_TOKEN}`).
+Environment variables always win over both config files — set one of the above and the matching config key can be left unset. There's no `${VAR}` expansion inside `.toad.yaml` itself; a value like `${TOAD_LINEAR_API_TOKEN}` written into the YAML would be used literally, not substituted. Use the environment variable directly (unset in YAML), or write the plain value into YAML.
 
 ---
 
