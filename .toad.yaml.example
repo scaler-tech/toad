@@ -8,11 +8,11 @@ slack:
   app_token: "xapp-1-..."
   bot_token: "xoxb-..."
 
-  # Channels to monitor (use channel IDs, not names).
+  # Channels to monitor (use channel names, not IDs).
   # Leave empty to auto-join and monitor all public channels.
   channels: []
   # channels:
-  #   - "C0123456789"
+  #   - "engineering"
 
   # What triggers toad
   triggers:

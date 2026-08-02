@@ -76,14 +76,14 @@ slack:
   app_token: "{{ .Slack.AppToken }}"
   bot_token: "{{ .Slack.BotToken }}"
 {{ if .Slack.Channels }}
-  # Channels to monitor (use channel IDs, not names)
+  # Channels to monitor (use channel names, not IDs)
   channels:
 {{ range .Slack.Channels }}    - "{{ . }}"
 {{ end }}{{ else }}
-  # Channels to monitor (use channel IDs, not names)
+  # Channels to monitor (use channel names, not IDs)
   # Leave empty to auto-join all public channels on startup
   # channels:
-  #   - "C0123456789"
+  #   - "engineering"
 {{ end }}
   # What triggers Toad
   triggers:
