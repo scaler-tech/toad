@@ -758,7 +758,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 				if !gate.Done && e.notify != nil {
 					e.notify(msg.Channel, threadTS,
 						fmt.Sprintf(":clipboard: %s is assigned to %s — I posted my findings as a comment on the ticket. "+
-							"Say `@toad fix this` if you'd like me to open a PR.",
+							"Say `@toad fix this` if you'd like me to investigate anyway.",
 							issueRef.ID, gate.Status.AssigneeName))
 				}
 				if e.unclaim != nil {
