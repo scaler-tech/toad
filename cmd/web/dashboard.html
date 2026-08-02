@@ -3,1272 +3,1155 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>toad dashboard</title>
+<title>toad · monitor</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
 <style>
   :root {
-    --bg: #0d1117;
-    --surface: #161b22;
-    --border: #30363d;
-    --text: #e6edf3;
-    --dim: #7d8590;
-    --green: #4CAF50;
-    --red: #FF5252;
-    --amber: #FFC107;
-    --blue: #58a6ff;
-    --purple: #bc8cff;
-    --accent: #58a6ff;
+    color-scheme: light;
+    --bg:#ffffff; --surface:#f3f4f6; --ink:#000000; --muted:#646464;
+    --accent:#c92e00; --border:#d1d5dc;
+    --ok:#00c11f; --okd:#037e50; --warn:#d6a406; --bad:#e23704;
+    --cat-a:#2aa8df; --cat-b:#6961e4; --cat-c:#fd8f01; --cat-d:#037e50; /* sources: auto/cta/digest/escalation */
+    --spark:#2aa8df; /* single uniform hue for all single-series trends */
+    --font:"Scaler","Helvetica Neue",Helvetica,Arial,sans-serif;
+    --mono:"SFMono-Regular",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sh-raised:rgba(0,0,0,.1) 0 1px 3px 0, rgba(0,0,0,.1) 0 1px 2px -1px;
+    --sh-float:rgba(0,0,0,.1) 0 10px 15px -3px, rgba(0,0,0,.1) 0 4px 6px -4px;
   }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    padding: 24px;
-    max-width: 1200px;
-    margin: 0 auto;
-  }
+  *{box-sizing:border-box}
+  html,body{background:var(--bg);color:var(--ink)}
+  body{font-family:var(--font);font-size:14px;line-height:1.5;margin:0;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1280px;margin:0 auto;padding:0 24px 56px}
 
-  /* Header */
-  header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 20px;
-  }
-  header h1 { font-size: 20px; font-weight: 600; }
-  .header-right { display: flex; align-items: center; gap: 10px; }
-  .header-sep { width: 1px; height: 20px; background: var(--border); margin: 0 2px; }
-  .header-group { display: flex; align-items: center; gap: 6px; }
-  .daemon-badge {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 12px; font-weight: 500;
-    padding: 3px 10px; border-radius: 12px;
-  }
-  .daemon-badge.online { background: rgba(76,175,80,0.15); color: var(--green); }
-  .daemon-badge.offline { background: rgba(255,82,82,0.15); color: var(--red); }
-  .daemon-badge .indicator {
-    width: 7px; height: 7px; border-radius: 50%; background: currentColor;
-  }
-  .daemon-badge.online .indicator { animation: pulse 2s ease-in-out infinite; }
-  .refresh-info { color: var(--dim); font-size: 12px; width: 58px; text-align: right; font-variant-numeric: tabular-nums; }
-  .update-badge {
-    display: none; font-size: 12px; font-weight: 500;
-    padding: 3px 10px; border-radius: 12px;
-    background: rgba(255,193,7,0.15); color: var(--amber);
-  }
-  .action-btn {
-    font-size: 12px; font-weight: 500;
-    padding: 4px 12px; border-radius: 6px;
-    border: 1px solid var(--border); background: var(--surface);
-    color: var(--text); cursor: pointer;
-    transition: background 0.15s, border-color 0.15s;
-  }
-  .action-btn:hover { border-color: var(--accent); background: rgba(88,166,255,0.1); }
-  .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .action-btn.danger { border-color: var(--amber); color: var(--amber); }
-  .action-btn.danger:hover { background: rgba(255,193,7,0.1); }
-  .icon-btn {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 28px; height: 28px; padding: 0; border-radius: 6px;
-    border: 1px solid var(--border); background: var(--surface);
-    color: var(--muted); cursor: pointer;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
-    position: relative;
-  }
-  .icon-btn:hover { border-color: var(--accent); background: rgba(88,166,255,0.1); color: var(--text); }
-  .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .icon-btn.danger { border-color: var(--amber); color: var(--amber); }
-  .icon-btn.danger:hover { background: rgba(255,193,7,0.1); }
-  .icon-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  .icon-btn .tooltip {
-    position: absolute; top: calc(100% + 6px); left: 50%; transform: translateX(-50%);
-    background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
-    padding: 4px 8px; font-size: 11px; color: var(--text); white-space: nowrap;
-    opacity: 0; pointer-events: none; transition: opacity 0.15s;
-  }
-  .icon-btn:hover .tooltip { opacity: 1; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .icon-btn.spinning svg { animation: spin 1s linear infinite; }
-  .toggle-wrap {
-    display: inline-flex; align-items: center; gap: 8px;
-    cursor: pointer; user-select: none;
-  }
-  .toggle-track {
-    position: relative; width: 32px; height: 18px;
-    background: #3a3a3e; border-radius: 9px;
-    transition: background 0.15s;
-  }
-  .toggle-thumb {
-    position: absolute; top: 2px; left: 2px;
-    width: 14px; height: 14px; border-radius: 50%;
-    background: #8a8a8f; transition: transform 0.15s, background 0.15s;
-  }
-  .toggle-wrap.active .toggle-track { background: rgba(76,175,80,0.25); }
-  .toggle-wrap.active .toggle-thumb { transform: translateX(14px); background: var(--green); }
-  .toggle-wrap .toggle-text { font-size: 12px; font-weight: 500; color: #8a8a8f; transition: color 0.15s; }
-  .toggle-wrap.active .toggle-text { color: var(--green); }
-  .toggle-wrap:hover .toggle-text { color: #aaa; }
-  .toggle-wrap.active:hover .toggle-text { color: var(--green); }
-  .version-mismatch {
-    font-size: 11px; color: var(--amber);
-    padding: 2px 8px; border-radius: 10px;
-    background: rgba(255,193,7,0.1);
-  }
-  /* Dev mode info grid */
-  .dev-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
-  .dev-label { font-size: 12px; color: var(--dim); }
-  .dev-value { font-size: 12px; font-family: monospace; color: var(--text); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Modal overlay */
-  .modal-overlay {
-    display: none; position: fixed; inset: 0;
-    background: rgba(0,0,0,0.6); z-index: 100;
-    justify-content: center; align-items: center;
-  }
-  .modal-overlay.visible { display: flex; }
-  .modal {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 12px; padding: 24px; min-width: 420px; max-width: 560px;
-  }
-  .modal h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
-  .modal .modal-footer { text-align: right; margin-top: 16px; }
-  .modal .modal-footer .action-btn { margin-left: 8px; }
-  /* Restart checklist steps */
-  .restart-steps { display: flex; flex-direction: column; gap: 10px; }
-  .restart-step {
-    display: flex; align-items: center; gap: 10px;
-    font-size: 13px; color: #5a5a5f; transition: color 0.2s;
-  }
-  .restart-step.active { color: var(--text); }
-  .restart-step.done { color: var(--green); }
-  .restart-step.error { color: var(--red); }
-  .restart-step-icon {
-    width: 18px; height: 18px; display: flex;
-    align-items: center; justify-content: center; flex-shrink: 0;
-  }
-  .restart-step-icon .dot {
-    width: 6px; height: 6px; border-radius: 50%; background: #3a3a3e;
-  }
-  .restart-step.active .dot {
-    background: var(--green);
-    box-shadow: 0 0 6px rgba(76,175,80,0.5);
-    animation: stepPulse 1s ease-in-out infinite;
-  }
-  .restart-step.done .dot, .restart-step.error .dot { display: none; }
-  .restart-step-icon .check { display: none; font-size: 13px; }
-  .restart-step.done .check { display: inline; color: var(--green); }
-  .restart-step.error .check { display: inline; color: var(--red); }
-  .restart-step .step-detail {
-    font-size: 11px; color: var(--dim); margin-left: auto;
-    font-family: monospace; white-space: nowrap;
-  }
-  @keyframes stepPulse {
-    0%,100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.5; transform: scale(1.3); }
-  }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  .topbar{display:flex;align-items:center;gap:16px;padding:16px 0;border-bottom:1px solid var(--ink)}
+  .wordmark{font-weight:700;font-size:16px}
+  .topbar .app{color:var(--muted);font-size:13px}
+  .topbar .spacer{margin-left:auto}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;border:1px solid var(--border);border-radius:4px;padding:4px 8px;background:var(--bg)}
+  .chip .dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+  .chip .idot{width:7px;height:7px;border-radius:50%}
+  .chip.offline .dot{background:var(--bad)}
 
-  /* Integrations row */
-  .integrations {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 16px;
-    flex-wrap: wrap;
-  }
-  .integration-pill {
-    display: inline-flex; align-items: center; gap: 5px;
-    font-size: 12px; font-weight: 500;
-    padding: 3px 10px; border-radius: 12px;
-    background: var(--surface); border: 1px solid var(--border);
-  }
-  .integration-pill .dot {
-    width: 6px; height: 6px; border-radius: 50%;
-  }
-  .integration-pill.enabled .dot { background: var(--green); }
-  .integration-pill.enabled { color: var(--text); }
-  .integration-pill.disabled .dot { background: var(--dim); }
-  .integration-pill.disabled { color: var(--dim); }
-  .integration-pill.dry-run .dot { background: var(--amber); }
-  .integration-pill.dry-run { color: var(--amber); }
+  /* attention strip — present only when something needs attention */
+  .alerts{display:flex;flex-direction:column;gap:8px;margin:16px 0 0}
+  .alert{display:flex;align-items:center;gap:10px;background:var(--surface);border-left:3px solid var(--warn);border-radius:6px;padding:10px 14px;font-size:13px}
+  .alert.update{border-left-color:var(--accent)}
+  .alert b{font-weight:600}
+  .alert .spacer{margin-left:auto}
+  .alert button{font-family:var(--font);font-size:12px;font-weight:500;border-radius:6px;padding:6px 12px;cursor:pointer;border:1px solid var(--border);background:var(--bg)}
+  .alert button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .alert button:hover{opacity:.9}
+  .alert .dismiss{border:none;background:none;color:var(--muted);font-size:14px;padding:2px 6px;cursor:pointer}
 
-  /* Stats cards */
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(6, 1fr);
-    gap: 10px;
-    margin-bottom: 20px;
-  }
-  .stat-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 14px 12px;
-    text-align: center;
-  }
-  .stat-card .label {
-    color: var(--dim); font-size: 11px;
-    text-transform: uppercase; letter-spacing: 0.5px;
-  }
-  .stat-card .value {
-    font-size: 26px; font-weight: 700;
-    color: var(--green); margin-top: 2px;
-  }
-  .stat-card .sub {
-    font-size: 11px; color: var(--dim); margin-top: 2px;
-  }
+  .nav{display:flex;gap:4px;padding:12px 0 0}
+  .nav button{font-family:var(--font);font-size:13px;font-weight:500;color:var(--muted);background:none;border:none;border-radius:6px;padding:8px 12px;cursor:pointer}
+  .nav button:hover{color:var(--ink)}
+  .nav button.active{color:var(--accent);background:var(--surface)}
+  .nav button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .filters{display:flex;align-items:center;gap:12px;padding:12px 0 20px;flex-wrap:wrap}
+  .seg{display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+  .seg button{font-family:var(--font);font-size:12px;font-weight:500;padding:6px 12px;border:none;background:var(--bg);color:var(--muted);cursor:pointer}
+  .seg button+button{border-left:1px solid var(--border)}
+  .seg button.active{background:var(--ink);color:#fff}
+  .filters .note{font-size:12px;color:var(--muted)}
+  .toggle{display:inline-flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none}
+  .toggle .tk{width:28px;height:16px;border-radius:8px;background:var(--border);position:relative;transition:background .2s ease-out}
+  .toggle .tk::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#fff;transition:left .2s ease-out}
+  .toggle.on .tk{background:var(--ink)}
+  .toggle.on .tk::after{left:14px}
 
-  /* Two-column grid */
-  .two-col {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-    margin-bottom: 20px;
-    align-items: stretch;
-  }
-  .two-col > section { display: flex; flex-direction: column; }
-  .two-col > section .info-panel { flex: 1; }
+  .grid{display:grid;gap:16px}
+  .cols-4{grid-template-columns:repeat(4,1fr)}
+  .cols-3{grid-template-columns:repeat(3,1fr)}
+  .cols-2{grid-template-columns:1fr 1fr}
+  section.tab{padding-bottom:16px}
+  .card{background:var(--surface);border-radius:6px;padding:16px;box-shadow:var(--sh-raised)}
+  .card h3{font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+  .card .big{font-size:28px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+  .card .delta{font-size:12px;color:var(--muted);margin-top:2px;min-height:16px}
+  .card .delta b{color:var(--ink);font-weight:600}
 
-  /* Section */
-  section { margin-bottom: 20px; }
-  section h2 {
-    font-size: 13px; font-weight: 600;
-    color: var(--green);
-    margin-bottom: 8px;
-    display: flex; align-items: center; gap: 6px;
-    text-transform: uppercase; letter-spacing: 0.5px;
-  }
-  section h2 .count {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 10px; padding: 1px 7px;
-    font-size: 11px; color: var(--dim);
-  }
+  /* pipeline */
+  .pipe{display:grid;grid-template-columns:1fr 40px 1fr 40px 1fr 40px 1fr 40px 1fr;align-items:stretch;margin-bottom:16px}
+  .stage{background:var(--surface);border-radius:6px;padding:12px 16px;box-shadow:var(--sh-raised);border:none;text-align:left;font-family:var(--font);color:var(--ink)}
+  button.stage{cursor:pointer}
+  button.stage:hover{outline:1px solid var(--ink)}
+  button.stage:focus-visible{outline:2px solid var(--accent)}
+  .stage .n{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+  .stage .l{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+  .stage .s{font-size:11px;color:var(--muted);margin-top:2px}
+  .stage.gate{border-top:2px solid var(--accent)}
+  .pipe .arr{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
+  .pipe .arr .a{color:var(--border);font-size:14px;line-height:1}
+  .pipe .arr .loss{font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .split{display:flex;height:6px;border-radius:3px;overflow:hidden;margin-top:8px;background:#fff}
+  .split i{display:block;height:100%}
+  .split-legend{font-size:10px;color:var(--muted);margin-top:4px}
 
-  /* Tables */
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th {
-    text-align: left; color: var(--dim); font-weight: 500;
-    font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
-    padding: 7px 10px; border-bottom: 1px solid var(--border);
-  }
-  td {
-    padding: 7px 10px;
-    border-bottom: 1px solid var(--border);
-    vertical-align: top;
-    white-space: nowrap;
-  }
-  td.ellipsis {
-    max-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  tr:last-child td { border-bottom: none; }
-  #opps-wrap td { vertical-align: middle; }
-  #opps-wrap td:nth-child(2) { vertical-align: top; }
-  .table-wrap {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; overflow: hidden;
-  }
+  .spark{margin-top:8px;min-height:44px}
+  .spark .nodata{font-size:11px;color:var(--muted);padding:14px 0}
+  svg text{font-family:var(--font)}
+  .bar-label{font-size:11px;fill:var(--ink);font-weight:600}
+  .bar-sub{font-size:11px;fill:var(--muted)}
+  .legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px}
+  .legend span{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+  .legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .chart-head{display:flex;align-items:baseline;gap:8px}
+  .chart-head .spacer{margin-left:auto}
+  .linkbtn{font-family:var(--font);background:none;border:none;font-size:12px;color:var(--muted);cursor:pointer;text-decoration:underline;padding:0}
+  .linkbtn:hover{color:var(--ink)}
+  table.data{width:100%;border-collapse:collapse;margin-top:8px}
+  table.data th{text-align:left;padding:6px 10px;font-weight:500;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+  table.data td{padding:8px 10px;border-bottom:1px solid var(--border);font-size:13px;font-variant-numeric:tabular-nums}
+  table.data tr.rowbtn{cursor:pointer}
+  table.data tr.rowbtn:hover td{background:#fff}
+  .num{text-align:right}
+  .mono{font-family:var(--mono);font-size:12px}
+  .empty{color:var(--muted);padding:16px;text-align:center;font-size:13px}
 
-  /* Info panels */
-  .info-panel {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; padding: 14px 16px;
-  }
-  .info-row {
-    display: flex; justify-content: space-between;
-    padding: 4px 0; font-size: 13px;
-  }
-  .info-row .lbl { color: var(--dim); }
-  .info-row .val { font-weight: 500; }
-  .info-row .val.green { color: var(--green); }
-  .info-row .val.amber { color: var(--amber); }
-  .info-row .val.red { color: var(--red); }
-  .info-row .val.purple { color: var(--purple); }
+  .src{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500}
+  .src i{width:9px;height:9px;border-radius:3px;display:inline-block}
+  .state{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:500;border-radius:4px;padding:2px 8px;background:#fff;border:1px solid var(--border)}
+  .state.ok{color:var(--okd)} .state.warn{color:#a37f05} .state.bad{color:var(--bad)} .state.neutral{color:var(--muted)}
 
-  /* Status badges */
-  .badge {
-    display: inline-flex; align-items: center; gap: 4px;
-    font-size: 12px; font-weight: 500;
-    padding: 2px 8px; border-radius: 12px;
-  }
-  .badge-running { background: rgba(255,193,7,0.15); color: var(--amber); }
-  .badge-validating { background: rgba(255,193,7,0.15); color: var(--amber); }
-  .badge-shipping { background: rgba(76,175,80,0.15); color: var(--green); }
-  .badge-starting { background: rgba(125,133,144,0.15); color: var(--dim); }
-  .badge-done { background: rgba(76,175,80,0.15); color: var(--green); }
-  .badge-commented { background: rgba(88,166,255,0.12); color: var(--blue); }
-  .badge-failed { background: rgba(255,82,82,0.15); color: var(--red); }
-  .badge .spinner {
-    width: 10px; height: 10px;
-    border: 2px solid transparent; border-top-color: currentColor;
-    border-radius: 50%; animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  .meter{height:8px;border-radius:4px;background:#fff;border:1px solid var(--border);overflow:hidden;margin-top:6px}
+  .meter i{display:block;height:100%;background:var(--ink);border-radius:4px 0 0 4px}
+  .kv{display:flex;justify-content:space-between;gap:12px;font-size:13px;padding:6px 0;border-bottom:1px solid var(--border)}
+  .kv:last-child{border-bottom:none}
+  .kv b{font-weight:600;font-variant-numeric:tabular-nums;text-align:right}
+  .kv .val-mono{font-family:var(--mono);font-size:12px;text-align:right;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
-  /* Links */
-  a { color: var(--blue); text-decoration: none; }
-  a:hover { text-decoration: underline; }
+  .feed{margin:0;padding:0;list-style:none}
+  .feed li{display:flex;gap:10px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px}
+  .feed li:last-child{border-bottom:none}
+  .feed .t{color:var(--muted);font-size:12px;min-width:46px;font-variant-numeric:tabular-nums}
+  .feed .kind{display:inline-flex;align-items:center;gap:5px;min-width:104px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+  .feed .kind i{width:8px;height:8px;border-radius:3px}
+  .feed .what b{font-weight:600}
+  .feed a{color:var(--ink)}
+  .feed .jump{font-size:12px;color:var(--muted);margin-left:6px;text-decoration:underline;cursor:pointer;border:none;background:none;font-family:var(--font);padding:0}
 
-  /* Empty state */
-  .empty { color: var(--dim); padding: 16px; text-align: center; font-size: 13px; }
+  /* drawer */
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.6);opacity:0;pointer-events:none;transition:opacity .2s ease-out;z-index:20}
+  .scrim.open{opacity:1;pointer-events:auto}
+  .drawer{position:fixed;top:0;right:-540px;width:520px;max-width:94vw;height:100%;background:var(--bg);box-shadow:var(--sh-float);z-index:50;transition:right .3s ease-out;overflow-y:auto}
+  .drawer.open{right:0}
+  .drawer .inner{padding:24px}
+  .drawer h2{font-size:18px;font-weight:700;margin:0 0 4px;line-height:1.3;padding-right:64px}
+  .drawer .meta{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 12px}
+  .drawer .links{display:flex;gap:8px;margin:0 0 16px;flex-wrap:wrap}
+  .drawer .links a{font-size:12px;font-weight:500;border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--ink);text-decoration:none;background:var(--bg)}
+  .drawer .links a:hover{border-color:var(--ink)}
+  .drawer h4{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:16px 0 6px}
+  .drawer p,.drawer li{font-size:13px;margin:0}
+  .drawer ul{margin:0;padding-left:18px}
+  .drawer ul.checks{list-style:none;padding:0}
+  .drawer ul.checks li{padding:2px 0}
+  .drawer ul.checks li::before{content:"\2610 ";color:var(--muted)}
+  .drawer .ev{font-family:var(--mono);font-size:12px;background:var(--surface);border-radius:4px;padding:2px 6px}
+  .drawer .conf{display:flex;align-items:center;gap:10px}
+  .drawer .close{position:absolute;top:16px;right:16px;background:none;border:1px solid var(--border);border-radius:6px;font-size:12px;font-family:var(--font);padding:6px 10px;cursor:pointer}
+  .drawer .close:hover{border-color:var(--ink)}
+  .gate-verdict{border-radius:6px;padding:10px 12px;font-size:13px;background:var(--surface)}
+  .gate-verdict.auto{border-left:3px solid var(--cat-a)}
+  .gate-verdict.propose{border-left:3px solid var(--accent)}
+  .gate-verdict.none{border-left:3px solid var(--border)}
+  .stale-note{font-size:12px;color:#a37f05;margin-top:8px}
 
-  /* Error bar */
-  .error-bar {
-    background: rgba(255,82,82,0.1); border: 1px solid var(--red);
-    border-radius: 6px; padding: 8px 12px;
-    color: var(--red); font-size: 13px;
-    margin-bottom: 16px; display: none;
+  /* system tab */
+  .conf-group{margin-bottom:4px}
+  .conf-group summary{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);cursor:pointer;padding:8px 0}
+  .danger-zone{border:1px solid var(--border);border-radius:6px;padding:12px 16px;margin-top:12px}
+  .danger-zone h4{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--bad);margin:0 0 8px}
+  .btnrow{display:flex;gap:8px;flex-wrap:wrap}
+  .btn{font-family:var(--font);font-size:12px;font-weight:500;border:1px solid var(--border);border-radius:6px;padding:8px 14px;background:var(--bg);cursor:pointer}
+  .btn:hover{border-color:var(--ink)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.danger{color:var(--bad);border-color:var(--bad)}
+  .btn.danger:hover{background:var(--bad);color:#fff}
+  .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  /* modal */
+  .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:70}
+  .modal.open{display:flex}
+  .modal .box{background:var(--surface);border-radius:8px;padding:24px;max-width:440px;width:90vw;box-shadow:rgba(0,0,0,.1) 0 20px 25px -5px, rgba(0,0,0,.1) 0 8px 10px -6px}
+  .modal h3{margin:0 0 8px;font-size:16px}
+  .modal p{font-size:13px;color:var(--muted);margin:0 0 14px}
+
+  /* restart step checklist (inside the generic modal) */
+  .rsteps{display:flex;flex-direction:column;gap:10px;margin-bottom:14px}
+  .rstep{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted)}
+  .rstep.active{color:var(--ink)}
+  .rstep.done{color:var(--okd)}
+  .rstep.error{color:var(--bad)}
+  .rstep .dot{width:16px;text-align:center;flex-shrink:0}
+  .rstep .detail{margin-left:auto;font-size:11px;color:var(--muted);font-family:var(--mono)}
+
+  #tip{position:fixed;z-index:80;background:var(--ink);color:#fff;font-size:12px;border-radius:4px;padding:6px 8px;pointer-events:none;opacity:0;transition:opacity .15s;white-space:nowrap;font-variant-numeric:tabular-nums}
+  #tip b{font-weight:600}
+  .section-title{font-size:20px;font-weight:700;margin:8px 0 16px}
+  .subnote{font-size:12px;color:var(--muted)}
+
+  @media (max-width:960px){
+    .cols-4{grid-template-columns:1fr 1fr}.cols-3,.cols-2{grid-template-columns:1fr}
+    .pipe{grid-template-columns:1fr;gap:8px}.pipe .arr{display:none}
   }
-
-  .mono {
-    font-family: "SF Mono","Fira Code","Fira Mono",Menlo,Consolas,monospace;
-    font-size: 12px;
+  @media (max-width:960px){
+    .wrap{overflow-x:hidden}
+    .table-scroll{overflow-x:auto}
   }
-
-  /* Toggle buttons for expand/collapse */
-  .toggle-row {
-    text-align: center; padding: 8px;
-    cursor: pointer; color: var(--blue);
-    font-size: 12px; font-weight: 500;
-    border-top: 1px solid var(--border);
-  }
-  .toggle-row:hover { text-decoration: underline; }
-
-  /* Collapsible config */
-  .section-header {
-    cursor: pointer; user-select: none;
-  }
-  .section-header .chevron {
-    transition: transform 0.2s;
-    display: inline-block; font-size: 10px;
-  }
-  .section-header.collapsed .chevron { transform: rotate(-90deg); }
-
-  /* Active runs padding boost */
-  #active-wrap td { padding: 9px 12px; }
-  #active-wrap th { padding: 9px 12px; }
-
-  @media (max-width: 800px) {
-    .stats { grid-template-columns: repeat(3, 1fr); }
-    .two-col { grid-template-columns: 1fr; }
-    body { padding: 12px; }
-  }
+  @media (prefers-reduced-motion: reduce){*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
 </style>
 </head>
 <body>
 
-<header>
-  <h1><img src="/logo.png" alt="toad" style="height:24px;vertical-align:middle;margin-right:6px">toad dashboard</h1>
-  <div class="header-right">
-    <span class="daemon-badge offline" id="daemon-badge">
-      <span class="indicator"></span> <span id="daemon-text">Offline</span>
-    </span>
-    <span class="header-sep"></span>
-    <span class="update-badge" id="update-badge"></span>
-    <span id="version-mismatch" class="version-mismatch" style="display:none"></span>
-    <div class="toggle-wrap" id="auto-update-toggle" onclick="toggleAutoUpdate()" title="Automatically update and restart when new versions are available">
-      <span class="toggle-track"><span class="toggle-thumb"></span></span>
-      <span class="toggle-text">Auto update</span>
-    </div>
-    <button class="action-btn" id="btn-update" onclick="doUpdate()" style="display:none" title="Download and install latest version">Update</button>
-    <span class="header-sep"></span>
-    <div class="header-group">
-      <button class="icon-btn" id="btn-check-update" onclick="checkForUpdate()">
-        <svg viewBox="0 0 24 24"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>
-        <span class="tooltip">Check for updates</span>
-      </button>
-      <button class="icon-btn danger" id="btn-restart" onclick="doRestart()">
-        <svg viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-        <span class="tooltip">Restart daemon</span>
-      </button>
-      <a class="icon-btn" href="/kiosk" title="Kiosk mode">
-        <svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-        <span class="tooltip">Kiosk mode</span>
-      </a>
-      <button class="icon-btn" onclick="showDevModal()" title="Dev mode">
-        <svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-        <span class="tooltip">Dev mode</span>
-      </button>
-    </div>
-    <span class="refresh-info" id="last-refresh"></span>
+<div class="wrap">
+  <div class="topbar">
+    <span class="wordmark">Scaler</span><span class="app">toad · monitor</span>
+    <span class="spacer"></span>
+    <span class="chip" id="integ-chip"></span>
+    <span class="chip" id="ver-chip"><span class="dot"></span> …</span>
   </div>
-</header>
 
-<div id="error-bar" class="error-bar"></div>
+  <div class="alerts" id="alerts"></div>
 
-<div class="integrations" id="integrations-row"></div>
+  <nav class="nav" id="nav">
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="investigations">Investigations</button>
+    <button data-tab="tickets">Tickets</button>
+    <button data-tab="system">System</button>
+  </nav>
 
-<!-- Stats cards -->
-<div class="stats" id="stats-row">
-  <div class="stat-card"><div class="label">Investigations</div><div class="value" id="s-total">-</div><div class="sub" id="s-breakdown"></div></div>
-  <div class="stat-card"><div class="label">Merge Rate</div><div class="value" id="s-merge">-</div><div class="sub" id="s-merge-sub"></div></div>
-  <div class="stat-card"><div class="label">Avg Duration</div><div class="value" id="s-dur">-</div><div class="sub">&nbsp;</div></div>
-  <div class="stat-card"><div class="label">Ribbits</div><div class="value" id="s-ribbits">-</div><div class="sub" id="s-ribbits-sub"></div></div>
-  <div class="stat-card"><div class="label">Toad King</div><div class="value" id="s-king">-</div><div class="sub" id="s-king-sub">&nbsp;</div></div>
-  <div class="stat-card"><div class="label">CC Usage</div><div class="value" id="s-cc">-</div><div class="sub" id="s-cc-sub">&nbsp;</div></div>
-</div>
+  <div class="filters">
+    <div class="seg" id="range">
+      <button data-r="today" class="active">Today</button>
+      <button data-r="week">7 days</button>
+      <button data-r="month">30 days</button>
+    </div>
+    <span class="note">range applies to every tab</span>
+    <label class="toggle on" id="autorefresh"><span class="tk"></span> auto-refresh 30s</label>
+    <span class="note" id="refreshed">updated just now</span>
+  </div>
 
-<!-- Active Runs -->
-<section id="active-section">
-  <h2>Active Runs <span class="count" id="active-count">0</span></h2>
-  <div class="table-wrap" id="active-wrap"></div>
-</section>
+  <!-- ================= OVERVIEW ================= -->
+  <section class="tab" id="tab-overview">
+    <div class="pipe" id="pipe"></div>
 
-<!-- Recent History -->
-<section id="history-section">
-  <h2>Recent History <span class="count" id="history-count"></span></h2>
-  <div class="table-wrap" id="history-wrap"></div>
-</section>
+    <div class="grid cols-4" style="margin-bottom:16px">
+      <div class="card"><h3>Intake events</h3><div class="big" id="t-intake">-</div><div class="delta" id="d-intake"></div><div class="spark" data-spark="intake"></div></div>
+      <div class="card"><h3>Investigations</h3><div class="big" id="t-invest">-</div><div class="delta" id="d-invest"></div><div class="spark" data-spark="invest"></div></div>
+      <div class="card"><h3>Tickets filed</h3><div class="big" id="t-filed">-</div><div class="delta" id="d-filed"></div><div class="spark" data-spark="filed"></div></div>
+      <div class="card"><h3>Questions answered</h3><div class="big" id="t-qa">-</div><div class="delta" id="d-qa"></div><div class="spark" data-spark="qa"></div></div>
+    </div>
 
-<!-- Two-column: Triage + Digest -->
-<div class="two-col">
-  <section id="triage-section">
-    <h2>Triage</h2>
-    <div class="info-panel" id="triage-panel">
-      <div class="info-row"><span class="lbl">Total classified</span><span class="val" id="t-total">-</span></div>
-      <div class="info-row"><span class="lbl">Bug</span><span class="val amber" id="t-bug">-</span></div>
-      <div class="info-row"><span class="lbl">Feature</span><span class="val green" id="t-feature">-</span></div>
-      <div class="info-row"><span class="lbl">Question</span><span class="val purple" id="t-question">-</span></div>
-      <div class="info-row"><span class="lbl">Other</span><span class="val" id="t-other">-</span></div>
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card">
+        <div class="chart-head"><h3>Ticket outcomes</h3><span class="spacer"></span><span class="subnote" id="acc-rate"></span><button class="linkbtn" data-tablefor="outcomes">view data</button></div>
+        <div id="outcomes-chart"></div>
+        <div id="outcomes-table" hidden></div>
+      </div>
+      <div class="card">
+        <div class="chart-head"><h3>Tickets by source</h3><span class="spacer"></span><button class="linkbtn" data-tablefor="sources">view data</button></div>
+        <div id="sources-chart"></div>
+        <div class="legend" id="sources-legend"></div>
+        <div id="sources-table" hidden></div>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>Activity</h3>
+        <ul class="feed" id="feed"></ul>
+      </div>
+      <div class="card">
+        <h3>Digest (Toad King)</h3>
+        <div class="kv"><span>status</span><b id="dg-status">-</b></div>
+        <div class="kv"><span>buffered messages</span><b id="dg-buffer">-</b></div>
+        <div class="kv"><span>next flush</span><b id="dg-next">-</b></div>
+        <div class="kv"><span>opportunities (all time)</span><b id="dg-opp">-</b></div>
+        <div class="kv"><span>→ investigated / dismissed</span><b id="dg-inv">-</b></div>
+        <p class="subnote" style="margin:8px 0 0" id="dg-note"></p>
+      </div>
     </div>
   </section>
-  <section id="digest-section">
-    <h2>Digest (Toad King)</h2>
-    <div class="info-panel" id="digest-panel">
-      <div class="info-row"><span class="lbl">Status</span><span class="val" id="d-status">-</span></div>
-      <div class="info-row"><span class="lbl">Messages in buffer</span><span class="val" id="d-buffer">-</span></div>
-      <div class="info-row"><span class="lbl">Next flush</span><span class="val" id="d-next">-</span></div>
-      <div class="info-row"><span class="lbl">Messages processed</span><span class="val" id="d-processed">-</span></div>
-      <div class="info-row"><span class="lbl">Opportunities found</span><span class="val" id="d-opps">-</span></div>
-      <div class="info-row"><span class="lbl">Approved / Dismissed</span><span class="val" id="d-approved">-</span></div>
-      <div class="info-row"><span class="lbl">Auto-spawns</span><span class="val" id="d-spawns">-</span></div>
+
+  <!-- ================= INVESTIGATIONS ================= -->
+  <section class="tab" id="tab-investigations" hidden>
+    <div class="section-title">Investigations</div>
+    <div class="card">
+      <div class="table-scroll">
+      <table class="data" id="inv-table">
+        <thead><tr><th>When</th><th>Trigger</th><th>Repo</th><th>Title</th><th class="num">Confidence</th><th>Outcome</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      </div>
+      <p class="subnote" style="margin:10px 0 0">Click a row for full findings — hypothesis, evidence, gate decision and timings. Showing the most recent 50 loaded, filtered to the selected range.</p>
     </div>
   </section>
-</div>
 
-<!-- Digest Opportunities -->
-<section id="opportunities-section" style="display:none">
-  <h2>Digest Opportunities <span class="count" id="opps-count">0</span></h2>
-  <div class="table-wrap" id="opps-wrap"></div>
-</section>
-
-<!-- Config -->
-<section id="config-section" style="display:none">
-  <h2 class="section-header collapsed" id="config-header" onclick="toggleConfig()">Configuration <span class="chevron">&#x25BC;</span></h2>
-  <div class="info-panel" id="config-panel" style="display:none"></div>
-</section>
-
-<div class="modal-overlay" id="restart-modal">
-  <div class="modal">
-    <h3 id="modal-title">Restarting toad</h3>
-    <div class="restart-steps" id="restart-steps"></div>
-    <div class="modal-footer">
-      <span class="refresh-info" id="modal-elapsed"></span>
-      <button class="action-btn" id="btn-force-reload" onclick="forceReloadDashboard()" style="display:none;margin-left:8px" title="Force the dashboard to restart on the new binary">Force reload</button>
-      <button class="action-btn" onclick="hideRestartModal()" style="margin-left:8px">Close</button>
+  <!-- ================= TICKETS ================= -->
+  <section class="tab" id="tab-tickets" hidden>
+    <div class="section-title">Tickets</div>
+    <div class="grid cols-3" style="margin-bottom:16px">
+      <div class="card"><h3>Acceptance rate</h3><div class="big" id="tk-acc">-</div><div class="delta">accepted or done, of decided tickets</div></div>
+      <div class="card"><h3>Dedup saves</h3><div class="big" id="tk-dedup">-</div><div class="delta">re-observations linked to an existing ticket (of last 50 loaded)</div></div>
+      <div class="card"><h3>Auto-file share</h3><div class="big" id="tk-auto">-</div><div class="delta">tickets filed via corroborated auto-detection, selected range</div></div>
     </div>
-  </div>
-</div>
+    <div class="card">
+      <div class="table-scroll">
+      <table class="data" id="tk-table">
+        <thead><tr><th>Key</th><th>Issue</th><th>Source</th><th>State</th><th>Last seen</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      </div>
+    </div>
+  </section>
 
-<div class="modal-overlay" id="dev-modal">
-  <div class="modal" style="min-width:480px">
-    <h3>Dev Mode</h3>
-    <div style="display:flex;flex-direction:column;gap:12px">
-      <div class="dev-info-grid" id="dev-info-grid">
-        <div class="dev-row"><span class="dev-label">Log file</span><span class="dev-value" id="dev-log-path">-</span></div>
-        <div class="dev-row"><span class="dev-label">Log size</span><span class="dev-value" id="dev-log-size">-</span></div>
-        <div class="dev-row"><span class="dev-label">Database</span><span class="dev-value" id="dev-db-path">-</span></div>
-        <div class="dev-row"><span class="dev-label">DB size</span><span class="dev-value" id="dev-db-size">-</span></div>
-        <div class="dev-row"><span class="dev-label">Toad home</span><span class="dev-value" id="dev-home">-</span></div>
+  <!-- ================= SYSTEM ================= -->
+  <section class="tab" id="tab-system" hidden>
+    <div class="section-title">System</div>
+
+    <div class="grid cols-3" style="margin-bottom:16px">
+      <div class="card">
+        <h3>Live now</h3>
+        <div id="sys-live"></div>
       </div>
-      <div style="border-top:1px solid var(--border);padding-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="action-btn" onclick="devDownloadLog()">Download log</button>
-        <button class="action-btn" onclick="devDownloadDB()">Download DB</button>
+      <div class="card">
+        <h3>Agent &amp; seat</h3>
+        <div id="sys-agent"></div>
       </div>
-      <div style="border-top:1px solid var(--border);padding-top:12px">
-        <div style="font-size:11px;color:var(--red);margin-bottom:8px;font-weight:600">Danger zone</div>
-        <div style="display:flex;gap:8px">
-          <button class="action-btn danger" onclick="devResetLog()">Reset log</button>
-          <button class="action-btn danger" onclick="devResetDB()">Reset DB</button>
+      <div class="card">
+        <h3>MCP server</h3>
+        <div id="sys-mcp"></div>
+      </div>
+    </div>
+
+    <div class="grid cols-2" style="margin-bottom:16px">
+      <div class="card">
+        <h3>Repos &amp; sync</h3>
+        <div id="sys-repos"></div>
+      </div>
+      <div class="card">
+        <h3>Configuration <span class="subnote" style="text-transform:none;letter-spacing:0">— as reported by the running daemon (falls back to local config file when offline)</span></h3>
+        <div id="sys-config"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Admin</h3>
+      <div class="btnrow">
+        <button class="btn primary" id="btn-restart">Restart daemon</button>
+        <button class="btn" id="btn-chkupd">Check for updates</button>
+        <span class="subnote" style="align-self:center">restart drains in-flight work first · auto-update is controlled from the update banner</span>
+      </div>
+      <details class="danger-zone" style="margin-top:16px" id="devdetails">
+        <summary class="subnote" style="cursor:pointer">Developer tools</summary>
+        <div id="dev-info" style="margin-top:12px"></div>
+        <h4 style="margin-top:12px">Danger zone</h4>
+        <div class="btnrow">
+          <button class="btn" id="btn-dl-log">Download log</button>
+          <button class="btn" id="btn-dl-db">Download state.db</button>
+          <button class="btn danger" id="btn-reset-log" data-confirm="Reset the log file? This permanently deletes its contents.">Reset log</button>
+          <button class="btn danger" id="btn-reset-db" data-confirm="Reset state.db? Investigations, tickets index and tokens will be wiped. This cannot be undone.">Reset state.db</button>
         </div>
-      </div>
+      </details>
     </div>
-    <div class="modal-footer">
-      <button class="action-btn" onclick="hideDevModal()">Close</button>
-    </div>
-  </div>
+  </section>
 </div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="Investigation detail"></aside>
+<div id="tip"></div>
+
+<div class="modal" id="modal"><div class="box" id="modal-box"></div></div>
 
 <script>
-const MAX_VISIBLE = 5;
-let historyExpanded = false;
-let oppsExpanded = false;
-const expandedReasons = new Set();
-let configExpanded = false;
+(function(){
+  "use strict";
+  const CAT={auto:"#2aa8df",cta:"#6961e4",digest:"#fd8f01",escalation:"#037e50",unknown:"#9a9a9a"};
+  const SRC_LABEL={auto:"Auto (Sentry)",cta:"CTA click",digest:"Digest",escalation:"Escalation",unknown:"Unknown"};
+  const OUT={pending:{c:"#646464",l:"Pending"},filed:{c:"#9a9a9a",l:"Filed"},accepted:{c:"#037e50",l:"Accepted"},done:{c:"#00c11f",l:"Done"},rejected:{c:"#e23704",l:"Rejected"},unknown:{c:"#c4c4c4",l:"Unknown"}};
+  const SPARK="#2aa8df"; // one uniform hue: these are unrelated single-series trends, color carries no identity
+  const GRAYS=["#000000","#646464","#9a9a9a","#c4c4c4"]; // triage split (different entity set than sources — no palette reuse)
+  const STAGES=[["Intake","messages seen"],["Triage","actionable"],["Investigations","runs"],["Gate","feasible findings"],["Filed","tickets"]];
+  const STAGE_NAV=[null,null,"investigations","investigations","tickets"];
 
-function toggleHistory() { historyExpanded = !historyExpanded; refresh(); }
-function toggleOpps() { oppsExpanded = !oppsExpanded; refresh(); }
-function toggleReason(id) { if (expandedReasons.has(id)) { expandedReasons.delete(id); } else { expandedReasons.add(id); } refresh(); }
-function toggleConfig() {
-  configExpanded = !configExpanded;
-  const panel = document.getElementById('config-panel');
-  const header = document.getElementById('config-header');
-  panel.style.display = configExpanded ? '' : 'none';
-  header.className = 'section-header' + (configExpanded ? '' : ' collapsed');
-}
+  const $=s=>document.querySelector(s),$$=s=>Array.from(document.querySelectorAll(s));
+  function esc(s){ if(s===undefined||s===null) return ""; const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
+  function num(n){ return (n===undefined||n===null) ? "-" : n.toLocaleString(); }
 
-function fmtDuration(seconds) {
-  if (!seconds) return '-';
-  const s = Math.round(seconds);
-  if (s >= 3600) {
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    return h + 'h ' + String(m).padStart(2,'0') + 'm';
+  // --- tooltip ---
+  const tip=$("#tip");
+  function showTip(html,x,y){tip.innerHTML=html;tip.style.opacity=1;tip.style.left=(x+12)+"px";tip.style.top=(y+12)+"px"}
+  function hideTip(){tip.style.opacity=0}
+
+  // --- time formatting ---
+  function fmtDuration(seconds){
+    if(!seconds && seconds!==0) return '-';
+    const s=Math.round(seconds);
+    if(s>=3600){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return h+'h '+String(m).padStart(2,'0')+'m';}
+    const m=Math.floor(s/60),sec=s%60;
+    if(m>0) return m+'m '+String(sec).padStart(2,'0')+'s';
+    return sec+'s';
   }
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  if (m > 0) return m + 'm ' + String(sec).padStart(2,'0') + 's';
-  return sec + 's';
-}
-function fmtUptime(seconds) {
-  if (!seconds) return '-';
-  const s = Math.round(seconds);
-  const d = Math.floor(s / 86400);
-  const h = Math.floor((s % 86400) / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  if (d > 0) return d + 'd ' + h + 'h';
-  if (h > 0) return h + 'h ' + m + 'm';
-  return m + 'm';
-}
-function fmtCost(c) { return c ? '$' + c.toFixed(2) : '-'; } // kept for CC usage display
-function fmtRate(total, succeeded) {
-  if (!total) return '-';
-  return (succeeded / total * 100).toFixed(1) + '%';
-}
-function statusBadge(status, spinning) {
-  const cls = 'badge badge-' + status;
-  const spin = spinning ? '<span class="spinner"></span>' : '';
-  const icon = status === 'done' ? '&#x2713;' : status === 'failed' ? '&#x2717;' : '';
-  return '<span class="' + cls + '">' + spin + icon + ' ' + status + '</span>';
-}
-function shortURL(url) {
-  if (!url) return '';
-  try {
-    const u = new URL(url);
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return esc(url);
-    const path = u.pathname.replace(/^\//, '');
-    const short = path.length > 40 ? path.slice(0, 37) + '...' : path;
-    return '<a href="' + esc(url) + '" target="_blank">' + esc(short) + '</a>';
-  } catch { return esc(url); }
-}
-function esc(s) {
-  if (!s) return '';
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
-function relTime(unixTs, now) {
-  const diff = unixTs - now;
-  if (diff <= 0) return 'now';
-  if (diff < 60) return Math.round(diff) + 's';
-  return Math.round(diff / 60) + 'm';
-}
-function relTimeAgo(unixTs, now) {
-  const diff = now - unixTs;
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
-  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-  return Math.floor(diff / 86400) + 'd ago';
-}
-function num(n) { return n != null ? n.toLocaleString() : '-'; }
-function abbrevSize(s) {
-  const m = {tiny: 'xs', small: 's', medium: 'm', large: 'l', xlarge: 'xl', 'extra-large': 'xl'};
-  return m[s] || esc(s);
-}
+  function fmtUptime(seconds){
+    if(!seconds) return '-';
+    const s=Math.round(seconds),d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);
+    if(d>0) return d+'d '+h+'h';
+    if(h>0) return h+'h '+m+'m';
+    return m+'m';
+  }
+  function relTimeAgo(unixTs,now){
+    const diff=now-unixTs;
+    if(diff<60) return 'just now';
+    if(diff<3600) return Math.floor(diff/60)+'m ago';
+    if(diff<86400) return Math.floor(diff/3600)+'h ago';
+    return Math.floor(diff/86400)+'d ago';
+  }
+  function timeOfDay(unixTs){ return new Date(unixTs*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); }
+  function whenLabel(unixTs, now){
+    const diffDays = Math.floor((now - unixTs) / 86400);
+    if (diffDays <= 0) return timeOfDay(unixTs);
+    if (diffDays === 1) return 'yesterday';
+    return diffDays + 'd ago';
+  }
 
-async function refresh() {
-  try {
-    const resp = await fetch('/api/data');
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const d = await resp.json();
-    const now = d.now;
-    const prNoun = d.pr_noun || 'PR';
+  // --- SVG chart helpers (data-driven, no mock data baked in) ---
+  function sparkline(el,values,labels){
+    const w=el.clientWidth||260,h=44,pad=2,max=Math.max(...values,1);
+    const sx=i=>pad+i*(w-2*pad)/(Math.max(values.length-1,1)),sy=v=>h-pad-v*(h-2*pad)/(max||1);
+    const pts=values.map((v,i)=>[sx(i),sy(v)]);
+    const line=pts.map(p=>p.join(",")).join(" ");
+    el.innerHTML=`<svg width="100%" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="trend">
+      <polygon points="${pad},${h-pad} ${line} ${w-pad},${h-pad}" fill="${SPARK}" opacity="0.12"></polygon>
+      <polyline points="${line}" fill="none" stroke="${SPARK}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+      <circle r="4" fill="${SPARK}" stroke="#fff" stroke-width="2" style="opacity:0" class="dot"></circle></svg>`;
+    const svg=el.firstElementChild,dot=svg.querySelector(".dot");
+    svg.addEventListener("mousemove",e=>{
+      const r=svg.getBoundingClientRect();
+      const i=Math.max(0,Math.min(values.length-1,Math.round((e.clientX-r.left)/r.width*(values.length-1))));
+      dot.setAttribute("cx",pts[i][0]);dot.setAttribute("cy",pts[i][1]);dot.style.opacity=1;
+      showTip(`<b>${values[i]}</b>${labels?" · "+labels[i]:" · "+(i+1)}`,e.clientX,e.clientY);
+    });
+    svg.addEventListener("mouseleave",()=>{dot.style.opacity=0;hideTip()});
+  }
+  function renderSparkOrNoData(el, values, labels){
+    const allZero = !values || values.length===0 || values.every(v=>!v);
+    if (allZero) { el.innerHTML = '<div class="nodata">no data yet</div>'; return; }
+    sparkline(el, values, labels);
+  }
+  function stackedBar(el,entries,total){
+    if(!total){ el.innerHTML='<div class="empty" style="padding:8px 0">No data yet</div>'; return; }
+    const w=el.clientWidth||520,h=64,barH=22,y=8;let x=0,seg="";
+    entries.forEach(([key,val,color,label])=>{
+      if(!val)return;
+      const bw=Math.max(2,val/total*(w-2*(entries.length-1)));
+      seg+=`<g class="seg" data-tip="<b>${esc(label)}</b> · ${val} (${Math.round(val/total*100)}%)">
+        <rect x="${x}" y="${y}" width="${bw}" height="${barH}" rx="4" fill="${color}"></rect>
+        ${bw>56?`<text x="${x+8}" y="${y+barH+16}" class="bar-label">${val}</text><text x="${x+8+String(val).length*8}" y="${y+barH+16}" class="bar-sub"> ${esc(label)}</text>`:""}</g>`;
+      x+=bw+2;
+    });
+    el.innerHTML=`<svg width="100%" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${seg}</svg>`;
+    el.querySelectorAll(".seg").forEach(g=>{g.addEventListener("mousemove",e=>showTip(g.dataset.tip,e.clientX,e.clientY));g.addEventListener("mouseleave",hideTip)});
+  }
+  function dataTable(el,rows,cols){
+    el.innerHTML=`<table class="data"><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join("")}</tr></thead>
+      <tbody>${rows.map(r=>`<tr>${r.map((c,i)=>`<td class="${i>0?"num":""}">${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+  }
 
-    document.getElementById('error-bar').style.display = 'none';
-    document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
+  // ================= data + range handling =================
+  let lastData=null;
+  let range="today"; // "today" | "week" | "month"
 
-    // Daemon status
-    const dm = d.daemon || {};
-    const badge = document.getElementById('daemon-badge');
-    const dtxt = document.getElementById('daemon-text');
-    const ver = dm.version ? 'v' + dm.version : '';
-    if (dm.running) {
-      badge.className = 'daemon-badge online';
-      dtxt.textContent = 'Online \u2014 ' + fmtUptime(dm.uptime_s) + (ver ? ' \u00b7 ' + ver : '') + ' (PID ' + dm.pid + ')';
-    } else {
-      badge.className = 'daemon-badge offline';
-      dtxt.textContent = 'Offline' + (ver ? ' \u00b7 ' + ver : '');
+  function rangeSinceSeconds(now){
+    if(range==="today"){
+      const d=new Date(now*1000); d.setHours(0,0,0,0);
+      return Math.floor(d.getTime()/1000);
     }
+    if(range==="week") return now - 7*86400;
+    return now - 30*86400;
+  }
+  function rangeLabel(){ return range==="today" ? "today" : range==="week" ? "last 7 days" : "last 30 days"; }
+  function aggFor(d){
+    const a=(d.aggregates)||{};
+    return range==="today" ? (a.today||{}) : range==="week" ? (a.week||{}) : (a.month||{});
+  }
 
-    // Update available indicator
-    const updateEl = document.getElementById('update-badge');
-    const btnUpdate = document.getElementById('btn-update');
-    // Sync auto-update toggle and hide manual buttons when auto-update is on
-    const autoToggle = document.getElementById('auto-update-toggle');
-    const autoOn = d.auto_update;
-    if (autoOn) {
-      autoToggle.classList.add('active');
-    } else {
-      autoToggle.classList.remove('active');
+  // ================= render: pipeline =================
+  function triageSplit(d){
+    const t=(d.daemon && d.daemon.triage_by_category) || {};
+    return {bug:t.bug||0, feature:t.feature||0, question:t.question||0, other:t.other||0};
+  }
+  function investigationsInRange(d, sinceSec){
+    return (d.investigations||[]).filter(r=>r.created_at>=sinceSec);
+  }
+  function pipeHTML(d, sinceSec){
+    const agg=aggFor(d);
+    const intakeSeries = range==="today" ? (d.series&&d.series.intake_hourly)||[] : (d.series&&d.series.intake_daily)||[];
+    const intake = intakeSeries.reduce((a,b)=>a+b,0);
+    const triage=triageSplit(d);
+    const triageTotal=triage.bug+triage.feature+triage.question+triage.other;
+    const investCount = agg.investigations||0;
+    const inRange = investigationsInRange(d, sinceSec);
+    const gateCount = inRange.filter(r=>r.feasible).length;
+    const filedCount = agg.filed||0;
+    const vals=[intake, triageTotal, investCount, gateCount, filedCount];
+    const loss=[
+      Math.max(intake-triageTotal,0)+" filtered at triage (not yet wired — see note)",
+      Math.max(triageTotal-investCount,0)+" not investigated / answered as Q&A",
+      Math.max(investCount-gateCount,0)+" infeasible",
+      Math.max(gateCount-filedCount,0)+" awaiting ticket / dismissed"
+    ];
+    return STAGES.map((s,i)=>{
+      let extra="";
+      if(i===1){
+        const tt=triageTotal||1;
+        extra=`<div class="split" data-tip="<b>Triage split (since daemon start)</b> · bug ${triage.bug} · feature ${triage.feature} · question ${triage.question} · other ${triage.other}">
+          ${[triage.bug,triage.feature,triage.question,triage.other].map((v,j)=>`<i style="width:${v/tt*100}%;background:${GRAYS[j]}"></i>`).join("")}</div>
+          <div class="split-legend">bug ${triage.bug} · feature ${triage.feature} · question ${triage.question} · other ${triage.other}</div>`;
+      }
+      const nav=STAGE_NAV[i];
+      const tipExtra = i===0 ? " · not yet wired, see System tab" : (i===1 ? " · since daemon start, not range-scoped" : "");
+      const cell=`<${nav?"button":"div"} class="stage${i===3?" gate":""}" ${nav?`data-nav="${nav}"`:""} data-tip="<b>${s[0]}</b> · ${vals[i]} ${s[1]}${tipExtra}${nav?" · click to open":""}">
+        <div class="n">${num(vals[i])}</div><div class="l">${s[0]}</div><div class="s">${s[1]}</div>${extra}</${nav?"button":"div"}>`;
+      return i<STAGES.length-1?cell+`<div class="arr"><span class="a">→</span><span class="loss">− ${loss[i]}</span></div>`:cell;
+    }).join("");
+  }
+
+  // ================= render: stat tiles =================
+  function sumSeries(arr){ return (arr||[]).reduce((a,b)=>a+b,0); }
+  function renderStatTiles(d){
+    const agg=aggFor(d);
+    const series=d.series||{};
+    const invVals = range==="today" ? (series.invest_hourly||[]) : (series.invest_daily||[]);
+    const filedVals = range==="today" ? (series.filed_hourly||[]) : (series.filed_daily||[]);
+    const intakeVals = range==="today" ? (series.intake_hourly||[]) : (series.intake_daily||[]);
+    const qaVals = range==="today" ? (series.qa_hourly||[]) : (series.qa_daily||[]);
+
+    $("#t-intake").textContent = num(sumSeries(intakeVals));
+    $("#t-invest").textContent = num(agg.investigations||0);
+    $("#t-filed").textContent = num(agg.filed||0);
+    $("#t-qa").textContent = num(sumSeries(qaVals));
+
+    // Delta vs yesterday is only meaningful for "today" (adjacent daily buckets).
+    function deltaHTML(dailyArr){
+      if (range!=="today" || !dailyArr || dailyArr.length<2) return `<span class="subnote">${rangeLabel()}</span>`;
+      const today=dailyArr[dailyArr.length-1], yesterday=dailyArr[dailyArr.length-2];
+      const diff=today-yesterday;
+      const sign=diff>0?"+":"";
+      return `<b>${sign}${diff}</b> vs yesterday`;
     }
-    document.getElementById('btn-check-update').style.display = autoOn ? 'none' : '';
+    $("#d-intake").innerHTML = deltaHTML(series.intake_daily);
+    $("#d-invest").innerHTML = deltaHTML(series.invest_daily);
+    $("#d-filed").innerHTML = deltaHTML(series.filed_daily);
+    $("#d-qa").innerHTML = deltaHTML(series.qa_daily);
 
-    if (!autoOn && dm.update_available && dm.latest_version) {
-      updateEl.textContent = 'v' + dm.latest_version + ' available';
-      updateEl.style.display = '';
-      btnUpdate.style.display = '';
-    } else {
-      updateEl.style.display = 'none';
-      btnUpdate.style.display = 'none';
+    const labels = range==="today" ? null : null;
+    renderSparkOrNoData($('[data-spark="intake"]'), intakeVals, labels);
+    renderSparkOrNoData($('[data-spark="invest"]'), invVals, labels);
+    renderSparkOrNoData($('[data-spark="filed"]'), filedVals, labels);
+    renderSparkOrNoData($('[data-spark="qa"]'), qaVals, labels);
+  }
+
+  // ================= render: outcomes + sources charts =================
+  function renderOutcomes(d){
+    const oc=d.outcome_counts||{};
+    const entries=Object.keys(OUT).map(k=>[k, oc[k]||0, OUT[k].c, OUT[k].l]).filter(e=>e[1]>0);
+    const total=entries.reduce((a,e)=>a+e[1],0);
+    stackedBar($("#outcomes-chart"), entries, total);
+    const decided=(oc.accepted||0)+(oc.done||0)+(oc.rejected||0);
+    $("#acc-rate").textContent = decided>0 ? `acceptance ${Math.round(((oc.accepted||0)+(oc.done||0))/decided*100)}% of ${decided} decided` : "no decided tickets yet";
+    dataTable($("#outcomes-table"), entries.map(e=>[e[3], e[1]]), ["Outcome","Tickets"]);
+  }
+  function renderSources(d){
+    const agg=aggFor(d);
+    const src=agg.filed_by_source||{};
+    const keys=Object.keys(src).length ? Object.keys(src) : Object.keys(CAT);
+    const entries=keys.map(k=>[k, src[k]||0, CAT[k]||CAT.unknown, SRC_LABEL[k]||k]).filter(e=>e[1]>0);
+    const total=entries.reduce((a,e)=>a+e[1],0);
+    stackedBar($("#sources-chart"), entries, total);
+    $("#sources-legend").innerHTML = Object.entries(CAT).map(([k,c])=>`<span><i style="background:${c}"></i>${esc(SRC_LABEL[k]||k)}</span>`).join("");
+    dataTable($("#sources-table"), entries.map(e=>[e[3], e[1]]), ["Source","Tickets"]);
+  }
+
+  // ================= render: activity feed =================
+  function slackURL(channel, threadTs){
+    if(!channel || !threadTs) return null;
+    return `https://slack.com/archives/${channel}/p${threadTs.replace('.','')}`;
+  }
+  function renderFeed(d, now){
+    const items=[];
+    (d.investigations||[]).forEach(r=>{
+      const src=(r.ticket && r.ticket.source) || "unknown";
+      let kind, what;
+      if (r.ticket) {
+        what=`Filed <b>${esc(r.ticket.issue_id)}</b> — ${esc(r.title||r.repo||"investigation")}`;
+        kind="filed";
+      } else if (r.feasible) {
+        what=`Proposed a ticket for ${esc(r.title||r.repo||"investigation")} — awaiting action`;
+        kind="proposed";
+      } else {
+        what=`Investigated and dropped — ${esc(r.title||r.repo||"investigation")}`;
+        kind="dropped";
+      }
+      if (r.stale) what += ' <span class="state warn" title="repo sync failed before run">stale</span>';
+      items.push({t:r.created_at, src, kind, what, nav:"investigations"});
+    });
+    items.sort((a,b)=>b.t-a.t);
+    const top=items.slice(0,10);
+    if (top.length===0) {
+      $("#feed").innerHTML = '<div class="empty">No activity yet</div>';
+      return;
     }
+    $("#feed").innerHTML = top.map(it=>`<li>
+      <span class="t">${timeOfDay(it.t)}</span>
+      <span class="kind"><i style="background:${CAT[it.src]||CAT.unknown}"></i>${esc(it.kind)}</span>
+      <span class="what">${it.what}${it.nav?` <button class="jump" data-jump="${it.nav}">open ↗</button>`:""}</span></li>`).join("");
+  }
 
-    // Version mismatch between daemon and dashboard binary
-    const mismatchEl = document.getElementById('version-mismatch');
-    if (dm.running && dm.daemon_version && dm.version && dm.daemon_version !== dm.version) {
-      mismatchEl.textContent = 'daemon: v' + dm.daemon_version + ' / dashboard: v' + dm.version;
-      mismatchEl.style.display = '';
+  // ================= render: digest card =================
+  function renderDigest(d){
+    const dm=d.daemon||{};
+    const dc=d.digest_counts||{};
+    if (dm.running && dm.digest_enabled) {
+      const mode = dm.digest_dry_run ? (dm.digest_comment_mode ? "comment mode" : "dry-run") : "live";
+      $("#dg-status").textContent = `Enabled (${mode})`;
+      $("#dg-buffer").textContent = num(dm.digest_buffer||0);
+      $("#dg-next").textContent = dm.digest_next_flush ? relTimeAgo(dm.digest_next_flush, d.now).replace("ago","from now") : "-";
     } else {
-      mismatchEl.style.display = 'none';
+      $("#dg-status").textContent = dm.running ? "Disabled" : "Daemon offline";
+      $("#dg-buffer").textContent = "-";
+      $("#dg-next").textContent = "-";
     }
+    const investigated = dc.Approved||0;
+    const dismissed = dc.Dismissed||0;
+    $("#dg-opp").textContent = num(investigated + dismissed + (dc.DryRun||0) + (dc.Investigating||0));
+    $("#dg-inv").textContent = `${investigated} / ${dismissed}`;
+    $("#dg-note").textContent = (dc.Investigating||0) > 0 ? `${dc.Investigating} currently investigating` : "";
+  }
 
-    // Disable restart button if daemon offline or already draining
-    document.getElementById('btn-restart').disabled = !dm.running || dm.draining;
+  // ================= render: investigations tab =================
+  function outcomeLabelFor(r){
+    if (r.ticket) {
+      const state = r.ticket.last_status || r.ticket.last_state_type;
+      return `Filed ${esc(r.ticket.issue_id)}${state?` · ${esc(state)}`:""}`;
+    }
+    if (r.feasible) return "Proposed (no ticket yet)";
+    return "Not filed";
+  }
+  function renderInvestigationsTable(d, sinceSec){
+    const rows = investigationsInRange(d, sinceSec).sort((a,b)=>b.created_at-a.created_at);
+    if (rows.length===0) {
+      $("#inv-table tbody").innerHTML = `<tr><td colspan="6"><div class="empty">No investigations in ${esc(rangeLabel())}</div></td></tr>`;
+      return;
+    }
+    $("#inv-table tbody").innerHTML = rows.map(r=>{
+      const src=(r.ticket && r.ticket.source) || "unknown";
+      return `<tr class="rowbtn" data-id="${esc(r.id)}" tabindex="0">
+        <td>${whenLabel(r.created_at, d.now)}</td>
+        <td><span class="src"><i style="background:${CAT[src]||CAT.unknown}"></i>${esc(SRC_LABEL[src]||src)}</span></td>
+        <td class="mono">${esc(r.repo||"-")}</td>
+        <td>${esc(r.title||"(untitled)")}</td>
+        <td class="num">${Math.round((r.confidence||0)*100)}%</td>
+        <td>${outcomeLabelFor(r)}${r.stale?' <span class="state warn" title="repo sync failed before run">⚠ stale</span>':''}</td></tr>`;
+    }).join("");
+  }
 
-    // Auto-update triggered restart: open modal automatically
-    // Use pre-restart PID/started_at from backend (captured before signal was sent)
-    // to avoid race where daemon already restarted before frontend polls.
+  // ================= render: drawer =================
+  function openDrawer(rec){
+    const f = rec.findings || {};
+    const src=(rec.ticket && rec.ticket.source) || "unknown";
+    const gateKind = rec.ticket ? (rec.ticket.source==="auto" ? "auto" : "propose") : "none";
+    const gateWhy = rec.ticket
+      ? (rec.ticket.source==="auto" ? "Auto-filed without human intervention (corroborated source)." : `Filed via ${esc(SRC_LABEL[src]||src)}.`)
+      : (rec.feasible ? "Feasible, but no ticket has been filed yet." : "Judged infeasible — no ticket filed.");
+    const slack = slackURL(rec.channel, rec.thread_ts);
+    const linearURL = rec.ticket && rec.ticket.issue_url;
+
+    $("#drawer").innerHTML = `<div class="inner">
+      <button class="close" id="dclose">Close ✕</button>
+      <h2>${esc(rec.title||"(untitled)")}</h2>
+      <div class="meta">
+        <span class="src"><i style="background:${CAT[src]||CAT.unknown}"></i>${esc(SRC_LABEL[src]||src)}</span>
+        <span class="chip mono">${esc(rec.repo||"-")}</span>
+        <span class="chip">${rec.duration_ms ? fmtDuration(rec.duration_ms/1000) : "duration n/a"}</span>
+      </div>
+      <div class="links">
+        ${slack?`<a href="${esc(slack)}" target="_blank" rel="noopener">Slack thread ↗</a>`:""}
+        ${linearURL?`<a href="${esc(linearURL)}" target="_blank" rel="noopener">${esc(rec.ticket.issue_id)} in Linear ↗</a>`:""}
+      </div>
+      <div class="gate-verdict ${gateKind}"><b>${gateKind==="auto"?"Gate: auto-path":gateKind==="propose"?"Gate: human-path":"Gate: not applicable"}</b> — ${gateWhy}</div>
+      ${rec.stale?`<div class="stale-note">⚠ Repo sync failed before this run — line references may be stale.</div>`:""}
+      ${f.problem?`<h4>Problem</h4><p>${esc(f.problem)}</p>`:""}
+      <h4>Root cause — hypothesis</h4><p>${esc(f.root_cause||"-")}</p>
+      ${(f.evidence&&f.evidence.length)?`<h4>Evidence</h4><ul>${f.evidence.map(e=>`<li><span class="ev">${esc(e.kind)}: ${esc(e.ref)}</span>${e.note?" — "+esc(e.note):""}</li>`).join("")}</ul>`:""}
+      ${(f.scope&&f.scope.length)?`<h4>Scope</h4><ul>${f.scope.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>`:""}
+      ${(f.non_goals&&f.non_goals.length)?`<h4>Non-goals</h4><ul>${f.non_goals.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>`:""}
+      ${(f.acceptance_criteria&&f.acceptance_criteria.length)?`<h4>Acceptance criteria</h4><ul class="checks">${f.acceptance_criteria.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>`:""}
+      <h4>Confidence</h4><div class="conf"><div class="meter" style="flex:1"><i style="width:${Math.round((rec.confidence||0)*100)}%"></i></div><b>${Math.round((rec.confidence||0)*100)}%</b></div>
+      <h4>Outcome</h4><p>${outcomeLabelFor(rec)}</p></div>`;
+    $("#drawer").classList.add("open");$("#scrim").classList.add("open");
+    $("#dclose").addEventListener("click",closeDrawer);
+  }
+  function closeDrawer(){$("#drawer").classList.remove("open");$("#scrim").classList.remove("open")}
+  $("#inv-table").addEventListener("click",e=>{
+    const tr=e.target.closest("tr[data-id]"); if(!tr||!lastData) return;
+    const rec=(lastData.investigations||[]).find(r=>r.id===tr.dataset.id);
+    if(rec) openDrawer(rec);
+  });
+  $("#inv-table").addEventListener("keydown",e=>{
+    if(e.key!=="Enter") return;
+    const tr=e.target.closest("tr[data-id]"); if(!tr||!lastData) return;
+    const rec=(lastData.investigations||[]).find(r=>r.id===tr.dataset.id);
+    if(rec) openDrawer(rec);
+  });
+  $("#scrim").addEventListener("click",closeDrawer);
+
+  // ================= render: tickets tab =================
+  function stateClassFor(stateType){
+    switch(stateType){
+      case "completed": return "ok";
+      case "canceled": case "cancelled": return "bad";
+      case "triage": return "neutral";
+      case "backlog": case "unstarted": case "started": return "ok";
+      default: return "neutral";
+    }
+  }
+  function renderTicketsTab(d, sinceSec){
+    const all=(d.tickets||[]);
+    const rows=all.filter(t=>t.created_at>=sinceSec).sort((a,b)=>b.last_seen_at-a.last_seen_at);
+
+    // Acceptance rate from the (global, current) outcome_counts.
+    const oc=d.outcome_counts||{};
+    const decided=(oc.accepted||0)+(oc.done||0)+(oc.rejected||0);
+    $("#tk-acc").textContent = decided>0 ? Math.round(((oc.accepted||0)+(oc.done||0))/decided*100)+"%" : "-";
+
+    // Dedup saves: among the loaded window, tickets sharing an issue_id
+    // beyond the first are re-observations linked to an existing ticket.
+    const seen={}; let dedup=0;
+    all.forEach(t=>{ if(!t.issue_id) return; seen[t.issue_id]=(seen[t.issue_id]||0)+1; if(seen[t.issue_id]>1) dedup++; });
+    $("#tk-dedup").textContent = num(dedup);
+
+    // Auto-file share, scoped to the selected range's filed_by_source.
+    const agg=aggFor(d);
+    const bySource=agg.filed_by_source||{};
+    const totalFiled=Object.values(bySource).reduce((a,b)=>a+b,0);
+    $("#tk-auto").textContent = totalFiled>0 ? Math.round((bySource.auto||0)/totalFiled*100)+"%" : "-";
+
+    if (rows.length===0) {
+      $("#tk-table tbody").innerHTML = `<tr><td colspan="5"><div class="empty">No tickets in ${esc(rangeLabel())}</div></td></tr>`;
+      return;
+    }
+    $("#tk-table tbody").innerHTML = rows.map(t=>{
+      const src=t.source||"unknown";
+      const cls=stateClassFor(t.last_state_type);
+      const stateLabel = t.last_status || t.last_state_type || "unknown";
+      const issueCell = t.issue_url ? `<a href="${esc(t.issue_url)}" target="_blank" rel="noopener"><b>${esc(t.issue_id)}</b></a>` : `<b>${esc(t.issue_id)}</b>`;
+      return `<tr>
+        <td class="mono">${esc(t.key)}</td>
+        <td>${issueCell}</td>
+        <td><span class="src"><i style="background:${CAT[src]||CAT.unknown}"></i>${esc(SRC_LABEL[src]||src)}</span></td>
+        <td><span class="state ${cls}">${esc(stateLabel)}</span></td>
+        <td>${relTimeAgo(t.last_seen_at, d.now)}</td></tr>`;
+    }).join("");
+  }
+
+  // ================= render: system tab =================
+  function renderSystemTab(d){
+    const dm=d.daemon||{};
+    const cfg=d.config||{};
+
+    // Live now
+    let liveHTML = "";
+    if (dm.investigate_slots || dm.investigate_in_flight) {
+      const pct = dm.investigate_slots ? Math.round(dm.investigate_in_flight/dm.investigate_slots*100) : 0;
+      liveHTML += `<div class="kv"><span>investigations</span><b>${dm.investigate_in_flight||0} / ${dm.investigate_slots||"?"} slots</b></div><div class="meter"><i style="width:${pct}%"></i></div>`;
+    } else {
+      liveHTML += `<p class="subnote">Concurrency gauges not reporting yet.</p>`;
+    }
+    if (dm.ribbit_slots || dm.ribbit_in_flight) {
+      const pct = dm.ribbit_slots ? Math.round(dm.ribbit_in_flight/dm.ribbit_slots*100) : 0;
+      liveHTML += `<div class="kv" style="margin-top:8px"><span>ribbit pool</span><b>${dm.ribbit_in_flight||0} / ${dm.ribbit_slots||"?"} slots</b></div><div class="meter"><i style="width:${pct}%"></i></div>`;
+    }
+    $("#sys-live").innerHTML = liveHTML;
+
+    // Agent & seat — p50/p95 computed client-side from loaded investigation durations.
+    const durations=(d.investigations||[]).map(r=>r.duration_ms).filter(v=>v>0).sort((a,b)=>a-b);
+    function pct(arr,p){ if(!arr.length) return null; const i=Math.min(arr.length-1, Math.floor(arr.length*p)); return arr[i]; }
+    const p50=pct(durations,0.5), p95=pct(durations,0.95);
+    let agentHTML = `<div class="kv"><span>investigations p50 / p95</span><b>${p50?fmtDuration(p50/1000):"-"} · ${p95?fmtDuration(p95/1000):"-"}</b></div>`;
+    const cc=d.cc_usage;
+    if (cc && cc.five_hour) {
+      agentHTML += `<div class="kv" style="margin-top:8px"><span>seat window usage</span><b>${Math.round(cc.five_hour.utilization)}%</b></div><div class="meter"><i style="width:${Math.round(cc.five_hour.utilization)}%"></i></div>`;
+      if (cc.seven_day) agentHTML += `<div class="kv" style="margin-top:8px"><span>7-day usage</span><b>${Math.round(cc.seven_day.utilization)}%</b></div>`;
+    } else {
+      agentHTML += `<p class="subnote">No Claude Code usage data available.</p>`;
+    }
+    $("#sys-agent").innerHTML = agentHTML;
+
+    // MCP server
+    const mcpInt=(d.integrations||[]).find(i=>i.name==="MCP Server");
+    let mcpHTML="";
+    if (mcpInt && mcpInt.status==="enabled") {
+      mcpHTML = `<div class="kv"><span>listen</span><span class="val-mono">${esc(mcpInt.detail||"-")}</span></div>`;
+    } else {
+      mcpHTML = `<p class="subnote">MCP server disabled.</p>`;
+    }
+    $("#sys-mcp").innerHTML = mcpHTML;
+
+    // Repos & sync
+    const repos=cfg.repos||[];
+    let reposHTML = repos.length
+      ? repos.map(r=>`<div class="kv"><span class="mono">${esc(r.name)}</span><span class="val-mono">${esc(r.path)}</span></div>`).join("")
+      : `<p class="subnote">No repos configured (or daemon offline and no local config).</p>`;
+    reposHTML += `<div class="kv" style="margin-top:6px"><span>loaded</span><b>${(d.investigations||[]).length} investigations · ${(d.tickets||[]).length} tickets (last 50 each)</b></div>`;
+    $("#sys-repos").innerHTML = reposHTML;
+
+    // Configuration
+    let confHTML = "";
+    if (cfg && Object.keys(cfg).length) {
+      confHTML += `<details class="conf-group" open><summary>Limits</summary>
+        <div class="kv"><span>max concurrent</span><b>${num(cfg.max_concurrent)}</b></div>
+        <div class="kv"><span>timeout</span><b>${num(cfg.timeout_minutes)}m</b></div>
+      </details>`;
+      confHTML += `<details class="conf-group"><summary>Digest</summary>
+        <div class="kv"><span>enabled</span><b>${cfg.digest_enabled?"yes":"no"}</b></div>
+        ${cfg.digest_enabled?`<div class="kv"><span>batch interval</span><b>${num(cfg.digest_interval_min)}m</b></div>
+        <div class="kv"><span>max auto-spawn/hr</span><b>${num(cfg.digest_max_spawn_hour)}</b></div>
+        <div class="kv"><span>mode</span><b>${cfg.digest_dry_run?(cfg.digest_comment_mode?"comment":"dry-run"):"live"}</b></div>`:""}
+      </details>`;
+      confHTML += `<details class="conf-group"><summary>MCP</summary>
+        <div class="kv"><span>enabled</span><b>${cfg.mcp_enabled?"yes":"no"}</b></div>
+        ${cfg.mcp_enabled?`<div class="kv"><span>endpoint</span><span class="val-mono">${esc(cfg.mcp_host)}:${num(cfg.mcp_port)}</span></div>`:""}
+      </details>`;
+    } else {
+      confHTML = `<p class="subnote">No configuration loaded.</p>`;
+    }
+    $("#sys-config").innerHTML = confHTML;
+  }
+
+  // ================= main render =================
+  function render(d){
+    lastData = d;
+    const now = d.now || Math.floor(Date.now()/1000);
+    const sinceSec = rangeSinceSeconds(now);
+
+    $("#pipe").innerHTML = pipeHTML(d, sinceSec);
+    $$(".stage").forEach(g=>{
+      g.addEventListener("mousemove",e=>showTip(g.dataset.tip,e.clientX,e.clientY));
+      g.addEventListener("mouseleave",hideTip);
+      if(g.dataset.nav) g.addEventListener("click",()=>gotoTab(g.dataset.nav));
+    });
+    $$(".split").forEach(g=>{g.addEventListener("mousemove",e=>showTip(g.dataset.tip,e.clientX,e.clientY));g.addEventListener("mouseleave",hideTip)});
+
+    renderStatTiles(d);
+    renderOutcomes(d);
+    renderSources(d);
+    renderFeed(d, now);
+    renderDigest(d);
+    renderInvestigationsTable(d, sinceSec);
+    renderTicketsTab(d, sinceSec);
+    renderSystemTab(d);
+
+    // topbar chips
+    const dm=d.daemon||{};
+    const integ=d.integrations||[];
+    $("#integ-chip").innerHTML = integ.map(ig=>{
+      const on = ig.status==="enabled" || ig.status==="dry-run" || ig.status==="comment";
+      return `<span class="idot" style="background:${on?"var(--ok)":"var(--muted)"}" title="${esc(ig.name)}: ${esc(ig.detail||ig.status)}"></span>`;
+    }).join(" ") + ` ${integ.map(ig=>esc(ig.name.toLowerCase())).join(" · ")}`;
+    const verChip=$("#ver-chip");
+    verChip.className = "chip" + (dm.running ? "" : " offline");
+    verChip.innerHTML = `<span class="dot"></span> v${esc(dm.version||"?")}${dm.running?` · up ${fmtUptime(dm.uptime_s)}`:" · offline"}`;
+
+    // attention strip
+    renderAlerts(d);
+
+    $("#btn-restart").disabled = !dm.running || dm.draining;
+
     if (d.auto_restarting && !restartModalOpen) {
       restartOrigPID = d.auto_restart_pid || dm.pid || 0;
       restartOrigStartedAt = d.auto_restart_started || dm.started_at || 0;
-      showRestartModal('Auto-updating toad...');
-      setStepState('signal', 'done');
-      setStepState('drain', 'active');
-      restartPhase = 'drain';
+      showRestartModal("Auto-updating toad…");
+      setStepState("signal","done");
+      setStepState("drain","active");
+      restartPhase="drain";
     }
-
-    // Update restart modal if open
-    if (restartModalOpen) {
-      updateRestartModal(dm, d.active || [], now);
-    }
-
-    // Integrations pills
-    const integ = d.integrations || [];
-    let ihtml = '';
-    for (const ig of integ) {
-      ihtml += '<span class="integration-pill ' + esc(ig.status) + '">'
-        + '<span class="dot"></span>' + esc(ig.name) + ': ' + esc(ig.detail)
-        + '</span>';
-    }
-    document.getElementById('integrations-row').innerHTML = ihtml;
-
-    // Stats cards
-    const st = d.stats || {};
-    document.getElementById('s-total').textContent = num(st.TotalRuns);
-    const active = d.active || [];
-    document.getElementById('s-breakdown').textContent =
-      st.Succeeded + ' passed, ' + st.Failed + ' failed' +
-      (active.length > 0 ? ', ' + active.length + ' active' : '');
-    // Merge rate card
-    const ms = d.merge_stats || {};
-    if (ms.prs_created > 0 && ms.merge_rate >= 0) {
-      document.getElementById('s-merge').textContent = Math.round(ms.merge_rate) + '%';
-      document.getElementById('s-merge').style.color =
-        ms.merge_rate >= 70 ? 'var(--green)' : ms.merge_rate >= 40 ? 'var(--amber)' : 'var(--red)';
-      document.getElementById('s-merge-sub').textContent =
-        ms.prs_merged + ' merged / ' + (ms.prs_merged + ms.prs_closed) + ' resolved'
-        + (ms.prs_open > 0 ? ', ' + ms.prs_open + ' open' : '');
-    } else if (ms.prs_created > 0) {
-      document.getElementById('s-merge').textContent = '-';
-      document.getElementById('s-merge').style.color = 'var(--dim)';
-      document.getElementById('s-merge-sub').textContent = ms.prs_open + ' open, none resolved yet';
-    } else {
-      document.getElementById('s-merge').textContent = '-';
-      document.getElementById('s-merge').style.color = 'var(--dim)';
-      document.getElementById('s-merge-sub').textContent = 'no PRs yet';
-    }
-    document.getElementById('s-dur').textContent = fmtDuration(st.AvgDuration / 1e9);
-    document.getElementById('s-ribbits').textContent = num(dm.ribbits || 0);
-    document.getElementById('s-ribbits-sub').textContent =
-      st.ThreadCount ? st.ThreadCount + ' thread memories' : 'this session';
-
-    // Toad King stat card
-    if (dm.digest_enabled) {
-      document.getElementById('s-king').textContent = num(dm.digest_opportunities || 0);
-      document.getElementById('s-king').style.color = 'var(--green)';
-      document.getElementById('s-king-sub').textContent =
-        dm.digest_dry_run ? ('opportunities (' + (dm.digest_comment_mode ? 'comment' : 'dry-run') + ')') : dm.digest_spawns + ' spawned';
-    } else {
-      document.getElementById('s-king').textContent = 'Off';
-      document.getElementById('s-king').style.color = 'var(--dim)';
-      document.getElementById('s-king-sub').innerHTML = '&nbsp;';
-    }
-
-    // CC Usage card
-    const cc = d.cc_usage;
-    if (cc && cc.five_hour) {
-      const u5 = cc.five_hour.utilization;
-      const color = u5 > 80 ? 'var(--red)' : u5 > 50 ? 'var(--amber)' : 'var(--green)';
-      document.getElementById('s-cc').textContent = Math.round(u5) + '%';
-      document.getElementById('s-cc').style.color = color;
-      let sub = '';
-      if (cc.seven_day) sub += '7d: ' + Math.round(cc.seven_day.utilization) + '%';
-      if (cc.extra_usage && cc.extra_usage.is_enabled) {
-        if (sub) sub += ' \u00b7 ';
-        sub += 'extra: ' + Math.round(cc.extra_usage.utilization) + '%';
-      }
-      document.getElementById('s-cc-sub').textContent = sub;
-    } else {
-      document.getElementById('s-cc').textContent = '-';
-      document.getElementById('s-cc').style.color = 'var(--dim)';
-      document.getElementById('s-cc-sub').innerHTML = '&nbsp;';
-    }
-
-    // Active runs
-    document.getElementById('active-count').textContent = active.length;
-    if (active.length === 0) {
-      document.getElementById('active-wrap').innerHTML = '<div class="empty" style="color:var(--green)">&#x2714; All clear</div>';
-    } else {
-      let html = '<table><tr><th style="width:110px">Status</th><th style="width:25%">Branch</th><th>Task</th><th style="width:80px">Duration</th></tr>';
-      for (const r of active) {
-        const elapsed = now - r.started_at;
-        html += '<tr><td>' + statusBadge(r.status, true) + '</td>'
-          + '<td class="mono ellipsis">' + esc(r.branch) + '</td>'
-          + '<td class="ellipsis" title="' + esc(r.task) + '">' + esc(r.task) + '</td>'
-          + '<td class="mono">' + fmtDuration(elapsed) + '</td></tr>';
-      }
-      html += '</table>';
-      document.getElementById('active-wrap').innerHTML = html;
-    }
-
-    // History (limited)
-    const history = d.history || [];
-    document.getElementById('history-count').textContent = history.length;
-    if (history.length === 0) {
-      document.getElementById('history-wrap').innerHTML = '<div class="empty">No completed runs</div>';
-    } else {
-      let html = '<table><tr><th style="width:90px">Status</th><th style="width:140px">Branch</th><th>Task</th><th style="width:50px">Files</th><th style="width:80px">Duration</th><th style="width:20%">' + prNoun + '</th></tr>';
-      for (let i = 0; i < history.length; i++) {
-        const r = history[i];
-        const hidden = !historyExpanded && i >= MAX_VISIBLE ? ' style="display:none"' : '';
-        const pr = r.status === 'done' && r.pr_url
-          ? shortURL(r.pr_url)
-          : '<span style="color:var(--dim)">' + esc(r.error || '-') + '</span>';
-        html += '<tr' + hidden + '><td>' + statusBadge(r.status, false) + '</td>'
-          + '<td class="mono ellipsis">' + esc(r.branch) + '</td>'
-          + '<td class="ellipsis" title="' + esc(r.task) + '">' + esc(r.task) + '</td>'
-          + '<td class="mono">' + (r.files_changed || '-') + '</td>'
-          + '<td class="mono">' + fmtDuration(r.duration_s) + '</td>'
-          + '<td class="ellipsis">' + pr + '</td></tr>';
-      }
-      html += '</table>';
-      if (history.length > MAX_VISIBLE) {
-        if (historyExpanded) {
-          html += '<div class="toggle-row" onclick="toggleHistory()">Show less</div>';
-        } else {
-          html += '<div class="toggle-row" onclick="toggleHistory()">Show all (' + history.length + ')</div>';
-        }
-      }
-      document.getElementById('history-wrap').innerHTML = html;
-    }
-
-    // Triage panel
-    const cat = dm.triage_by_category || {};
-    document.getElementById('t-total').textContent = num(dm.triages || 0);
-    document.getElementById('t-bug').textContent = num(cat.bug || 0);
-    document.getElementById('t-feature').textContent = num(cat.feature || 0);
-    document.getElementById('t-question').textContent = num(cat.question || 0);
-    document.getElementById('t-other').textContent = num(cat.other || 0);
-
-    // Digest panel
-    const dsec = document.getElementById('digest-section');
-    const opps = d.opportunities || [];
-    const dc = d.digest_counts || {};
-    const approvedCount = dc.Approved || 0;
-    const dismissedCount = dc.Dismissed || 0;
-    const dryRunCount = dc.DryRun || 0;
-    const investigatingCount = dc.Investigating || 0;
-    if (dm.running) {
-      dsec.style.display = '';
-      if (dm.digest_enabled) {
-        if (dm.digest_dry_run && dm.digest_comment_mode) {
-          document.getElementById('d-status').innerHTML = '<span style="color:var(--blue)">Enabled (comment mode)</span>';
-        } else if (dm.digest_dry_run) {
-          document.getElementById('d-status').innerHTML = '<span style="color:var(--amber)">Enabled (dry-run)</span>';
-        } else {
-          document.getElementById('d-status').innerHTML = '<span style="color:var(--green)">Enabled</span>';
-        }
-        document.getElementById('d-buffer').textContent = num(dm.digest_buffer);
-        document.getElementById('d-next').textContent =
-          dm.digest_next_flush ? 'in ' + relTime(dm.digest_next_flush, now) : '-';
-        document.getElementById('d-processed').textContent = num(dm.digest_processed);
-        document.getElementById('d-opps').textContent = num(approvedCount + dismissedCount + dryRunCount + investigatingCount);
-        let approvedText = '<span style="color:var(--green)">' + approvedCount + '</span> / <span style="color:var(--red)">' + dismissedCount + '</span>';
-        if (dryRunCount > 0) approvedText += ' <span style="color:var(--dim)">(' + dryRunCount + ' dry-run)</span>';
-        if (investigatingCount > 0) approvedText += ' <span style="color:var(--amber)">(' + investigatingCount + ' investigating)</span>';
-        document.getElementById('d-approved').innerHTML = approvedText;
-        document.getElementById('d-spawns').textContent = num(dm.digest_spawns);
-      } else {
-        document.getElementById('d-status').innerHTML = '<span style="color:var(--dim)">Disabled</span>';
-        document.getElementById('d-buffer').textContent = '-';
-        document.getElementById('d-next').textContent = '-';
-        document.getElementById('d-processed').textContent = '-';
-        document.getElementById('d-opps').textContent = '-';
-        document.getElementById('d-approved').textContent = '-';
-        document.getElementById('d-spawns').textContent = '-';
-      }
-    } else {
-      dsec.style.display = '';
-      document.getElementById('d-status').innerHTML = '<span style="color:var(--dim)">Daemon offline</span>';
-      ['d-buffer','d-next','d-processed','d-opps','d-approved','d-spawns'].forEach(id => {
-        document.getElementById(id).textContent = '-';
-      });
-    }
-
-    // Triage section — hide if daemon offline with no data
-    const tsec = document.getElementById('triage-section');
-    tsec.style.display = (dm.running || (dm.triages || 0) > 0) ? '' : 'none';
-
-    // Digest Opportunities (limited)
-    const digestEnabled = (d.config && d.config.digest_enabled) || (dm.running && dm.digest_enabled);
-    const oppsSec = document.getElementById('opportunities-section');
-    if (opps.length === 0 && !digestEnabled) {
-      oppsSec.style.display = 'none';
-    } else {
-      oppsSec.style.display = '';
-      document.getElementById('opps-count').textContent = opps.length;
-      let ohtml = '';
-      if (opps.length === 0) {
-        const dryRunMode = (d.config && d.config.digest_dry_run) || (dm.running && dm.digest_dry_run);
-        const commentModeEmpty = (d.config && d.config.digest_comment_mode) || (dm.running && dm.digest_comment_mode);
-        const modeLabel = dryRunMode ? (commentModeEmpty ? 'comment' : 'dry-run') : 'live';
-        ohtml = '<div class="empty">Toad King is monitoring your channels (' + modeLabel + ' mode). Opportunities will appear here as they are identified.</div>';
-        document.getElementById('opps-wrap').innerHTML = ohtml;
-      } else {
-        ohtml = '<table><tr><th style="width:80px">When</th><th>Summary</th><th style="width:90px">Channel</th><th style="width:70px">Category</th><th style="width:85px">Confidence</th><th style="width:40px">Size</th><th style="width:100px">Status</th><th style="width:28px"></th></tr>';
-        for (let i = 0; i < opps.length; i++) {
-          const o = opps[i];
-          const hidden = !oppsExpanded && i >= MAX_VISIBLE ? ' display:none;' : '';
-          let obadge;
-          const commentMode = (d.config && d.config.digest_comment_mode) || (dm.running && dm.digest_comment_mode);
-          if (o.investigating) {
-            obadge = '<span class="badge badge-running"><span class="spinner"></span> investigating</span>';
-          } else if (o.dismissed) {
-            obadge = '<span class="badge badge-failed">dismissed</span>';
-          } else if (o.dry_run && commentMode) {
-            obadge = '<span class="badge badge-commented">commented</span>';
-          } else if (o.dry_run) {
-            obadge = '<span class="badge badge-validating">dry-run</span>';
-          } else {
-            obadge = '<span class="badge badge-done">spawned</span>';
-          }
-          const dimStyle = o.dismissed ? 'opacity:0.55;' : '';
-          const rowStyle = (hidden || dimStyle) ? ' style="' + hidden + dimStyle + '"' : '';
-          let reasonTip = '';
-          if (o.reasoning) {
-            const full = esc(o.reasoning);
-            if (full.length <= 120) {
-              reasonTip = '<br><span style="color:var(--dim);font-size:11px">' + full + '</span>';
-            } else if (expandedReasons.has(i)) {
-              reasonTip = '<br><span style="color:var(--dim);font-size:11px">' + full + ' <a href="#" onclick="event.preventDefault();toggleReason(' + i + ')" style="color:var(--accent)">less</a></span>';
-            } else {
-              reasonTip = '<br><span style="color:var(--dim);font-size:11px">' + full.substring(0, 120) + '… <a href="#" onclick="event.preventDefault();toggleReason(' + i + ')" style="color:var(--accent)">more</a></span>';
-            }
-          }
-          let slackLink = '';
-          if (o.channel_id && o.thread_ts) {
-            const ts = o.thread_ts.replace('.', '');
-            const url = 'https://slack.com/archives/' + o.channel_id + '/p' + ts;
-            slackLink = '<a href="' + url + '" target="_blank" rel="noopener" title="View in Slack" style="color:var(--muted);text-decoration:none;opacity:0.6;transition:opacity 0.15s" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">'
-              + '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>'
-              + '</a>';
-          }
-          let chanPill = '';
-          if (o.channel) {
-            const chanInner = '<span class="badge" style="background:rgba(125,133,144,0.15);color:var(--dim)">#' + esc(o.channel) + '</span>';
-            if (o.channel_id && o.thread_ts) {
-              const ts = o.thread_ts.replace('.', '');
-              const url = 'https://slack.com/archives/' + o.channel_id + '/p' + ts;
-              chanPill = '<a href="' + url + '" target="_blank" rel="noopener" style="text-decoration:none">' + chanInner + '</a>';
-            } else {
-              chanPill = chanInner;
-            }
-          }
-          ohtml += '<tr' + rowStyle + '><td>' + relTimeAgo(o.created_at, now) + '</td>'
-            + '<td style="white-space:normal">' + esc(o.summary) + reasonTip + '</td>'
-            + '<td>' + chanPill + '</td>'
-            + '<td>' + esc(o.category) + '</td>'
-            + '<td class="mono">' + (o.confidence * 100).toFixed(0) + '%</td>'
-            + '<td><span class="badge" style="background:rgba(125,133,144,0.15);color:var(--dim)">' + abbrevSize(o.est_size) + '</span></td>'
-            + '<td>' + obadge + '</td>'
-            + '<td style="text-align:center">' + slackLink + '</td></tr>';
-        }
-        ohtml += '</table>';
-        if (opps.length > MAX_VISIBLE) {
-          if (oppsExpanded) {
-            ohtml += '<div class="toggle-row" onclick="toggleOpps()">Show less</div>';
-          } else {
-            ohtml += '<div class="toggle-row" onclick="toggleOpps()">Show all (' + opps.length + ')</div>';
-          }
-        }
-        document.getElementById('opps-wrap').innerHTML = ohtml;
-      }
-    }
-
-    // Config (collapsed by default)
-    const cfgSec = document.getElementById('config-section');
-    const cfg = d.config;
-    if (cfg) {
-      cfgSec.style.display = '';
-      let html = '';
-      if (cfg.repos && cfg.repos.length > 0) {
-        for (const r of cfg.repos) {
-          html += '<div class="info-row"><span class="lbl">Repo: ' + esc(r.name) + '</span><span class="val mono">' + esc(r.path) + '</span></div>';
-        }
-      }
-      html += '<div class="info-row"><span class="lbl">Max concurrent</span><span class="val">' + cfg.max_concurrent + '</span></div>';
-      html += '<div class="info-row"><span class="lbl">Max retries</span><span class="val">' + cfg.max_retries + '</span></div>';
-      html += '<div class="info-row"><span class="lbl">Timeout</span><span class="val">' + cfg.timeout_minutes + 'm</span></div>';
-      if (cfg.digest_enabled) {
-        html += '<div class="info-row"><span class="lbl">Digest interval</span><span class="val">' + cfg.digest_interval_min + 'm</span></div>';
-        html += '<div class="info-row"><span class="lbl">Digest max spawn/hr</span><span class="val">' + cfg.digest_max_spawn_hour + '</span></div>';
-      }
-      if (cfg.mcp_enabled) {
-        html += '<div class="info-row"><span class="lbl">MCP endpoint</span><span class="val mono">' + esc(cfg.mcp_host) + ':' + cfg.mcp_port + '</span></div>';
-      }
-      document.getElementById('config-panel').innerHTML = html;
-      document.getElementById('config-panel').style.display = configExpanded ? '' : 'none';
-      document.getElementById('config-header').className = 'section-header' + (configExpanded ? '' : ' collapsed');
-    } else {
-      cfgSec.style.display = 'none';
-    }
-  } catch (e) {
-    const bar = document.getElementById('error-bar');
-    bar.textContent = 'Failed to fetch data: ' + e.message;
-    bar.style.display = 'block';
-  }
-}
-
-let restartModalOpen = false;
-let restartStartedAt = 0;
-let restartOrigPID = 0;
-let restartOrigStartedAt = 0;
-let restartPhase = ''; // signal, drain, offline, done, error
-
-const RESTART_STEPS = [
-  { id: 'signal',  label: 'Sending restart signal' },
-  { id: 'drain',   label: 'Draining in-flight work' },
-  { id: 'restart', label: 'Restarting daemon' },
-  { id: 'online',  label: 'Daemon back online' },
-  { id: 'dash',    label: 'Reloading dashboard' },
-];
-
-function renderSteps() {
-  return RESTART_STEPS.map(s =>
-    '<div class="restart-step" id="rs-' + s.id + '">'
-    + '<span class="restart-step-icon"><span class="dot"></span><span class="check"></span></span>'
-    + '<span class="step-label">' + s.label + '</span>'
-    + '<span class="step-detail" id="rsd-' + s.id + '"></span>'
-    + '</div>'
-  ).join('');
-}
-
-function setStepState(id, state, detail) {
-  const el = document.getElementById('rs-' + id);
-  if (!el) return;
-  el.className = 'restart-step' + (state ? ' ' + state : '');
-  const checkEl = el.querySelector('.check');
-  if (state === 'done') checkEl.textContent = '\u2713';
-  else if (state === 'error') checkEl.textContent = '\u2717';
-  else checkEl.textContent = '';
-  const detailEl = document.getElementById('rsd-' + id);
-  if (detailEl) detailEl.textContent = detail || '';
-}
-
-function showRestartModal(title) {
-  restartModalOpen = true;
-  restartStartedAt = Date.now();
-  restartPhase = 'signal';
-  document.getElementById('modal-title').textContent = title;
-  document.getElementById('restart-steps').innerHTML = renderSteps();
-  document.getElementById('modal-elapsed').textContent = '';
-  document.getElementById('btn-force-reload').style.display = 'none';
-  document.getElementById('restart-modal').classList.add('visible');
-  setStepState('signal', 'active');
-  // Show emergency force-reload button after 15s if still stuck
-  setTimeout(() => {
-    if (restartModalOpen && restartPhase !== 'done') {
-      document.getElementById('btn-force-reload').style.display = '';
-    }
-  }, 15000);
-}
-
-function hideRestartModal() {
-  restartModalOpen = false;
-  restartPhase = '';
-  document.getElementById('restart-modal').classList.remove('visible');
-  const btn = document.getElementById('btn-restart');
-  btn.disabled = false;
-  btn.classList.remove('spinning');
-}
-
-// --- Dev mode ---
-function showDevModal() {
-  document.getElementById('dev-modal').classList.add('visible');
-  loadDevInfo();
-}
-function hideDevModal() {
-  document.getElementById('dev-modal').classList.remove('visible');
-}
-function formatBytes(b) {
-  if (b < 0) return 'N/A';
-  if (b < 1024) return b + ' B';
-  if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
-  return (b/(1024*1024)).toFixed(1) + ' MB';
-}
-async function loadDevInfo() {
-  try {
-    const r = await fetch('/api/dev/info');
-    const d = await r.json();
-    document.getElementById('dev-log-path').textContent = d.log_path || 'N/A';
-    document.getElementById('dev-log-size').textContent = formatBytes(d.log_size);
-    document.getElementById('dev-db-path').textContent = d.db_path || 'N/A';
-    document.getElementById('dev-db-size').textContent = formatBytes(d.db_size);
-    document.getElementById('dev-home').textContent = d.toad_home || 'N/A';
-  } catch(e) { console.error('dev info failed', e); }
-}
-async function devDownload(url, filename) {
-  try {
-    const r = await fetch(url);
-    const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  } catch(e) { alert('Download failed: ' + e.message); }
-}
-function devDownloadLog() { devDownload('/api/dev/download-log', 'toad.log'); }
-function devDownloadDB() { devDownload('/api/dev/download-db', 'state.db'); }
-async function devResetLog() {
-  if (!confirm('This will permanently delete the log file. Continue?')) return;
-  try {
-    const r = await fetch('/api/dev/reset-log', {method:'POST'});
-    const d = await r.json();
-    if (d.ok) { loadDevInfo(); } else { alert('Error: ' + (d.error || 'unknown')); }
-  } catch(e) { alert('Failed: ' + e.message); }
-}
-async function devResetDB() {
-  if (!confirm('This will permanently delete the state database including all run history and investigation data. This cannot be undone. Continue?')) return;
-  try {
-    const r = await fetch('/api/dev/reset-db', {method:'POST'});
-    const d = await r.json();
-    if (d.ok) { alert('Database reset. Dashboard will need a restart.'); location.reload(); }
-    else { alert('Error: ' + (d.error || 'unknown')); }
-  } catch(e) { alert('Failed: ' + e.message); }
-}
-
-function updateRestartModal(dm, active, now) {
-  const elapsed = Math.round((Date.now() - restartStartedAt) / 1000);
-  document.getElementById('modal-elapsed').textContent = fmtDuration(elapsed) + ' elapsed';
-
-  if (restartPhase === 'done' || restartPhase === 'error') return;
-
-  // Phase: signal sent, waiting for draining to start
-  if (restartPhase === 'signal' && dm.draining) {
-    setStepState('signal', 'done');
-    setStepState('drain', 'active');
-    restartPhase = 'drain';
+    if (restartModalOpen) updateRestartModal(dm, now);
   }
 
-  // Phase: draining — show active task count
-  if (restartPhase === 'drain') {
-    if (active.length > 0) {
-      const tasks = active.map(r => esc(r.task || r.branch)).join(', ');
-      setStepState('drain', 'active', active.length + ' task' + (active.length > 1 ? 's' : ''));
-    } else {
-      setStepState('drain', 'active');
+  // ================= attention strip =================
+  const dismissedAlerts = new Set();
+  function renderAlerts(d){
+    const dm=d.daemon||{};
+    const alertsEl = $("#alerts");
+    let html="";
+    if (dm.update_available && !dismissedAlerts.has("upd")) {
+      html += `<div class="alert update" data-a="upd">
+        <b>Update available</b>${dm.latest_version?` v${esc(dm.latest_version)}`:""}
+        <span class="spacer"></span>
+        <button class="primary" id="do-update">Update &amp; restart</button>
+        <button class="dismiss" data-d="upd" aria-label="dismiss">✕</button>
+      </div>`;
     }
+    alertsEl.innerHTML = html;
+    const upd=$("#do-update"); if(upd) upd.addEventListener("click", doUpdate);
+    $$(".alert .dismiss").forEach(b=>b.addEventListener("click",()=>{
+      dismissedAlerts.add(b.dataset.d);
+      b.closest(".alert").remove();
+    }));
   }
 
-  // Daemon went offline — draining done, now restarting binary
-  if (!dm.running && (restartPhase === 'drain' || restartPhase === 'signal')) {
-    setStepState('signal', 'done');
-    setStepState('drain', 'done');
-    setStepState('restart', 'active');
-    restartPhase = 'offline';
+  // ================= tabs + range + toggles =================
+  function gotoTab(t){
+    $$("#nav button").forEach(x=>x.classList.toggle("active",x.dataset.tab===t));
+    ["overview","investigations","tickets","system"].forEach(k=>{ $("#tab-"+k).hidden = k!==t; });
+    window.scrollTo({top:0});
   }
+  $("#nav").addEventListener("click",e=>{const b=e.target.closest("button[data-tab]");if(b)gotoTab(b.dataset.tab)});
+  $("#feed").addEventListener("click",e=>{const j=e.target.closest("[data-jump]");if(j)gotoTab(j.dataset.jump)});
 
-  // Timeout: daemon didn't come back after 2 minutes offline
-  if (restartPhase === 'offline' && elapsed > 120) {
-    setStepState('restart', 'error', 'timed out');
-    document.getElementById('modal-elapsed').innerHTML =
-      '<button class="action-btn" onclick="hideRestartModal()">Dismiss</button>';
-    restartPhase = 'error';
-    return;
+  $("#range").addEventListener("click",e=>{
+    const b=e.target.closest("button[data-r]"); if(!b) return;
+    $$("#range button").forEach(x=>x.classList.toggle("active",x===b));
+    range=b.dataset.r;
+    if (lastData) render(lastData);
+  });
+
+  $$(".linkbtn[data-tablefor]").forEach(btn=>btn.addEventListener("click",()=>{
+    const chart=$("#"+btn.dataset.tablefor+"-chart"), table=$("#"+btn.dataset.tablefor+"-table");
+    const showingTable=!table.hidden; table.hidden=showingTable; chart.style.display=showingTable?"":"none";
+    const lg=$("#"+btn.dataset.tablefor+"-legend"); if(lg) lg.style.display=showingTable?"":"none";
+    btn.textContent=showingTable?"view data":"view chart";
+  }));
+
+  let autoRefreshOn = true;
+  $("#autorefresh").addEventListener("click", function(){
+    autoRefreshOn = !autoRefreshOn;
+    this.classList.toggle("on", autoRefreshOn);
+  });
+
+  // ================= modal helpers =================
+  function modal(html){ $("#modal-box").innerHTML=html; $("#modal").classList.add("open"); }
+  function closeModal(){ $("#modal").classList.remove("open"); }
+  // Clicking the modal's backdrop (not its box) closes it, unless a restart
+  // is actively in progress — losing that modal shouldn't lose the restart
+  // tracking state, so Escape is blocked the same way (see keydown handler).
+  $("#modal").addEventListener("click", e=>{ if(e.target.id==="modal" && !restartModalOpen) closeModal(); });
+  document.addEventListener("keydown", e=>{
+    if (e.key!=="Escape") return;
+    if (restartModalOpen) return; // don't let Escape abandon an in-progress restart
+    if ($("#modal").classList.contains("open")) closeModal();
+    else if ($("#drawer").classList.contains("open")) closeDrawer();
+  });
+
+  // ================= restart flow =================
+  let restartModalOpen=false, restartStartedAt=0, restartOrigPID=0, restartOrigStartedAt=0, restartPhase="";
+  const RESTART_STEPS=[
+    {id:"signal",label:"Sending restart signal"},
+    {id:"drain",label:"Draining in-flight work"},
+    {id:"restart",label:"Restarting daemon"},
+    {id:"online",label:"Daemon back online"},
+    {id:"dash",label:"Reloading dashboard"},
+  ];
+  function stepIcon(state){ return state==="done" ? "✓" : state==="error" ? "✕" : state==="active" ? "●" : "○"; }
+  function renderStepsHTML(){
+    return `<div class="rsteps">${RESTART_STEPS.map(s=>`<div class="rstep" id="rs-${s.id}"><span class="dot">${stepIcon("")}</span><span>${esc(s.label)}</span><span class="detail" id="rsd-${s.id}"></span></div>`).join("")}</div>`;
   }
+  function setStepState(id,state,detail){
+    const el=document.getElementById("rs-"+id); if(!el) return;
+    el.className="rstep"+(state?" "+state:"");
+    el.querySelector(".dot").textContent = stepIcon(state);
+    const d=document.getElementById("rsd-"+id); if(d) d.textContent=detail||"";
+  }
+  function showRestartModal(title){
+    restartModalOpen=true; restartStartedAt=Date.now(); restartPhase="signal";
+    modal(`<h3>${esc(title)}</h3>${renderStepsHTML()}<p class="subnote" id="modal-elapsed"></p><div class="btnrow"><button class="btn" id="m-force-reload" style="display:none">Force reload</button></div>`);
+    setStepState("signal","active");
+    const forceBtn=$("#m-force-reload");
+    forceBtn.addEventListener("click", forceReloadDashboard);
+    setTimeout(()=>{ if(restartModalOpen && restartPhase!=="done") forceBtn.style.display=""; }, 15000);
+  }
+  function hideRestartModal(){
+    restartModalOpen=false; restartPhase="";
+    closeModal();
+    $("#btn-restart").disabled=false;
+  }
+  function updateRestartModal(dm, now){
+    const elapsedEl=$("#modal-elapsed");
+    if(elapsedEl) elapsedEl.textContent = fmtDuration(Math.round((Date.now()-restartStartedAt)/1000)) + " elapsed";
 
-  // Detect restart complete: daemon is running, not draining, and started_at changed
-  if (dm.running && !dm.draining && restartOrigPID) {
-    const restarted = dm.pid !== restartOrigPID || (dm.started_at && dm.started_at !== restartOrigStartedAt);
-    if (restarted && restartPhase !== 'signal') {
-      setStepState('signal', 'done');
-      setStepState('drain', 'done');
-      setStepState('restart', 'done');
-      setStepState('online', 'done', 'PID ' + dm.pid);
-      setStepState('dash', 'active');
-      restartPhase = 'done';
-      // Reload dashboard process so it runs the new binary
-      setTimeout(async () => {
-        try {
-          await fetch('/api/reload-dashboard');
-        } catch (e) { /* expected — server restarts */ }
-        // Wait for new dashboard to come up, then reload page
-        const retryReload = setInterval(() => {
-          fetch('/api/data').then(() => {
-            clearInterval(retryReload);
-            window.location.reload();
-          }).catch(() => {});
-        }, 500);
-        // Give up after 10s
-        setTimeout(() => clearInterval(retryReload), 10000);
-      }, 500);
+    if (restartPhase==="done" || restartPhase==="error") return;
+
+    if (restartPhase==="signal" && dm.draining) { setStepState("signal","done"); setStepState("drain","active"); restartPhase="drain"; }
+
+    if (restartPhase==="drain") {
+      const inFlight=(dm.investigate_in_flight||0)+(dm.ribbit_in_flight||0);
+      setStepState("drain","active", inFlight>0 ? (inFlight+" in flight") : "");
     }
-  }
-}
 
-async function checkForUpdate() {
-  const btn = document.getElementById('btn-check-update');
-  const tip = btn.querySelector('.tooltip');
-  btn.disabled = true;
-  btn.classList.add('spinning');
-  tip.textContent = 'Checking...';
-  try {
-    const resp = await fetch('/api/check-update');
-    const d = await resp.json();
-    btn.classList.remove('spinning');
-    if (d.available) {
-      tip.textContent = 'v' + d.latest + ' available!';
-    } else {
-      tip.textContent = 'Up to date';
+    if (!dm.running && (restartPhase==="drain" || restartPhase==="signal")) {
+      setStepState("signal","done"); setStepState("drain","done"); setStepState("restart","active");
+      restartPhase="offline";
     }
-    refresh();
-  } catch (e) {
-    btn.classList.remove('spinning');
-    tip.textContent = 'Error checking';
-  }
-  setTimeout(() => { btn.disabled = false; tip.textContent = 'Check for updates'; }, 3000);
-}
 
-async function doUpdate() {
-  const btn = document.getElementById('btn-update');
-  btn.disabled = true;
-  btn.textContent = 'Updating...';
-  try {
-    const resp = await fetch('/api/update');
-    const d = await resp.json();
-    if (d.status === 'started' || d.status === 'running') {
-      btn.textContent = 'Installing...';
-      const poll = setInterval(async () => {
-        try {
-          const cr = await fetch('/api/data');
-          const cd = await cr.json();
-          if (!cd.daemon || !cd.daemon.update_available) {
-            clearInterval(poll);
-            btn.textContent = 'Updated!';
-            btn.disabled = false;
-            refresh();
-            setTimeout(() => { btn.style.display = 'none'; }, 2000);
-          }
-        } catch (e) { /* retry */ }
-      }, 3000);
-      setTimeout(() => { clearInterval(poll); btn.disabled = false; btn.textContent = 'Update'; }, 120000);
-    }
-  } catch (e) {
-    btn.textContent = 'Error';
-    setTimeout(() => { btn.disabled = false; btn.textContent = 'Update'; }, 3000);
-  }
-}
-
-async function triggerRestart(title) {
-  showRestartModal(title);
-  try {
-    const resp = await fetch('/api/restart');
-    const d = await resp.json();
-    if (d.error) {
-      setStepState('signal', 'error', d.error);
-      restartPhase = 'error';
-      document.getElementById('modal-elapsed').innerHTML =
-        '<button class="action-btn" onclick="hideRestartModal()">Dismiss</button>';
+    if (restartPhase==="offline" && Date.now()-restartStartedAt > 120000) {
+      setStepState("restart","error","timed out");
+      if(elapsedEl) elapsedEl.innerHTML = '<button class="btn" id="m-dismiss">Dismiss</button>';
+      const dbtn=$("#m-dismiss"); if(dbtn) dbtn.addEventListener("click", hideRestartModal);
+      restartPhase="error";
       return;
     }
-    restartOrigPID = d.pid || 0;
-    restartOrigStartedAt = d.started_at || 0;
-    setStepState('signal', 'done');
-    setStepState('drain', 'active');
-    restartPhase = 'drain';
-  } catch (e) {
-    setStepState('signal', 'error', 'failed');
-    restartPhase = 'error';
-    document.getElementById('modal-elapsed').innerHTML =
-      '<button class="action-btn" onclick="hideRestartModal()">Dismiss</button>';
+
+    if (dm.running && !dm.draining && restartOrigPID) {
+      const restarted = dm.pid!==restartOrigPID || (dm.started_at && dm.started_at!==restartOrigStartedAt);
+      if (restarted && restartPhase!=="signal") {
+        setStepState("signal","done"); setStepState("drain","done"); setStepState("restart","done");
+        setStepState("online","done","PID "+dm.pid);
+        setStepState("dash","active");
+        restartPhase="done";
+        setTimeout(async ()=>{
+          try { await fetch("/api/reload-dashboard"); } catch(e) {}
+          const retry=setInterval(()=>{
+            fetch("/api/data").then(()=>{ clearInterval(retry); window.location.reload(); }).catch(()=>{});
+          }, 500);
+          setTimeout(()=>clearInterval(retry), 10000);
+        }, 500);
+      }
+    }
   }
-}
-
-async function doRestart() {
-  const btn = document.getElementById('btn-restart');
-  btn.disabled = true;
-  btn.classList.add('spinning');
-  await triggerRestart('Restarting toad...');
-}
-
-async function forceReloadDashboard() {
-  const btn = document.getElementById('btn-force-reload');
-  btn.disabled = true;
-  btn.textContent = 'Reloading...';
-  try {
-    await fetch('/api/reload-dashboard');
-  } catch (e) { /* expected — server restarts */ }
-  // Poll until the new dashboard responds, then reload the page
-  const poll = setInterval(() => {
-    fetch('/api/data').then(() => {
-      clearInterval(poll);
-      window.location.reload();
-    }).catch(() => {});
-  }, 500);
-  setTimeout(() => { clearInterval(poll); btn.disabled = false; btn.textContent = 'Force reload'; }, 15000);
-}
-
-async function toggleAutoUpdate() {
-  const toggle = document.getElementById('auto-update-toggle');
-  const enabling = !toggle.classList.contains('active');
-  try {
-    await fetch('/api/auto-update?enabled=' + (enabling ? '1' : '0'), { method: 'POST' });
-    toggle.classList.toggle('active');
-  } catch (e) {
-    // silently fail, next refresh will sync state
+  async function triggerRestart(title){
+    showRestartModal(title);
+    try {
+      const resp=await fetch("/api/restart");
+      const d=await resp.json();
+      if (d.error) {
+        setStepState("signal","error",d.error);
+        restartPhase="error";
+        const el=$("#modal-elapsed"); if(el) el.innerHTML='<button class="btn" id="m-dismiss">Dismiss</button>';
+        const dbtn=$("#m-dismiss"); if(dbtn) dbtn.addEventListener("click", hideRestartModal);
+        return;
+      }
+      restartOrigPID=d.pid||0; restartOrigStartedAt=d.started_at||0;
+      setStepState("signal","done"); setStepState("drain","active"); restartPhase="drain";
+    } catch(e) {
+      setStepState("signal","error","failed");
+      restartPhase="error";
+      const el=$("#modal-elapsed"); if(el) el.innerHTML='<button class="btn" id="m-dismiss">Dismiss</button>';
+      const dbtn=$("#m-dismiss"); if(dbtn) dbtn.addEventListener("click", hideRestartModal);
+    }
   }
-}
+  $("#btn-restart").addEventListener("click", ()=>{
+    modal(`<h3>Restart toad?</h3><p>In-flight work is drained first.</p>
+      <div class="btnrow"><button class="btn primary" id="m-go">Drain &amp; restart</button><button class="btn" id="m-cancel">Cancel</button></div>`);
+    $("#m-cancel").addEventListener("click", closeModal);
+    $("#m-go").addEventListener("click", ()=>triggerRestart("Restarting toad…"));
+  });
+  async function forceReloadDashboard(){
+    try { await fetch("/api/reload-dashboard"); } catch(e) {}
+    const poll=setInterval(()=>{ fetch("/api/data").then(()=>{ clearInterval(poll); window.location.reload(); }).catch(()=>{}); }, 500);
+    setTimeout(()=>clearInterval(poll), 15000);
+  }
 
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && restartModalOpen) hideRestartModal();
-});
+  // ================= update flow =================
+  async function doUpdate(){
+    modal(`<h3>Updating…</h3><p>brew upgrade toad · then drain &amp; restart</p><div class="meter"><i style="width:30%"></i></div>`);
+    try {
+      await fetch("/api/update");
+      const poll=setInterval(async ()=>{
+        try {
+          const r=await fetch("/api/data"); const d=await r.json();
+          if (!d.daemon || !d.daemon.update_available) { clearInterval(poll); closeModal(); refresh(); }
+        } catch(e) {}
+      }, 3000);
+      setTimeout(()=>clearInterval(poll), 120000);
+    } catch(e) { modal(`<h3>Update failed</h3><p>${esc(e.message)}</p><div class="btnrow"><button class="btn primary" id="m-x">OK</button></div>`); $("#m-x").addEventListener("click",closeModal); }
+  }
+  $("#btn-chkupd").addEventListener("click", async ()=>{
+    try {
+      const resp=await fetch("/api/check-update");
+      const d=await resp.json();
+      if (d.available) modal(`<h3>Update available</h3><p>v${esc(d.latest)} is available (current: v${esc(d.current)}).</p><div class="btnrow"><button class="btn primary" id="m-x">OK</button></div>`);
+      else modal(`<h3>You're current ✓</h3><p>v${esc(d.current||"")} is the latest release.</p><div class="btnrow"><button class="btn primary" id="m-x">OK</button></div>`);
+      $("#m-x").addEventListener("click",closeModal);
+      refresh();
+    } catch(e) {
+      modal(`<h3>Check failed</h3><p>${esc(e.message)}</p><div class="btnrow"><button class="btn primary" id="m-x">OK</button></div>`);
+      $("#m-x").addEventListener("click",closeModal);
+    }
+  });
 
-refresh();
-setInterval(refresh, 2000);
+  // ================= dev tools =================
+  function formatBytes(b){ if(b<0) return "N/A"; if(b<1024) return b+" B"; if(b<1024*1024) return (b/1024).toFixed(1)+" KB"; return (b/(1024*1024)).toFixed(1)+" MB"; }
+  async function loadDevInfo(){
+    try {
+      const r=await fetch("/api/dev/info"); const d=await r.json();
+      $("#dev-info").innerHTML = `
+        <div class="kv"><span>Log file</span><span class="val-mono">${esc(d.log_path||"N/A")}</span></div>
+        <div class="kv"><span>Log size</span><b>${formatBytes(d.log_size)}</b></div>
+        <div class="kv"><span>Database</span><span class="val-mono">${esc(d.db_path||"N/A")}</span></div>
+        <div class="kv"><span>DB size</span><b>${formatBytes(d.db_size)}</b></div>
+        <div class="kv"><span>Toad home</span><span class="val-mono">${esc(d.toad_home||"N/A")}</span></div>`;
+    } catch(e) { $("#dev-info").innerHTML = '<p class="subnote">Failed to load dev info.</p>'; }
+  }
+  $("#devdetails").addEventListener("toggle", function(){ if(this.open) loadDevInfo(); });
+  async function devDownload(url, filename){
+    try {
+      const r=await fetch(url); const blob=await r.blob();
+      const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=filename; a.click();
+      URL.revokeObjectURL(a.href);
+    } catch(e) { modal(`<h3>Download failed</h3><p>${esc(e.message)}</p><div class="btnrow"><button class="btn primary" id="m-x">OK</button></div>`); $("#m-x").addEventListener("click",closeModal); }
+  }
+  $("#btn-dl-log").addEventListener("click", ()=>devDownload("/api/dev/download-log","toad.log"));
+  $("#btn-dl-db").addEventListener("click", ()=>devDownload("/api/dev/download-db","state.db"));
+  function confirmDanger(message, onConfirm){
+    modal(`<h3>Are you sure?</h3><p>${esc(message)}</p><div class="btnrow"><button class="btn danger" id="m-yes">Yes, do it</button><button class="btn" id="m-no">Cancel</button></div>`);
+    $("#m-no").addEventListener("click", closeModal);
+    $("#m-yes").addEventListener("click", ()=>{ closeModal(); onConfirm(); });
+  }
+  $("#btn-reset-log").addEventListener("click", function(){
+    confirmDanger(this.dataset.confirm, async ()=>{
+      try { const r=await fetch("/api/dev/reset-log",{method:"POST"}); const d=await r.json();
+        if(d.ok) loadDevInfo(); else modal(`<h3>Error</h3><p>${esc(d.error||"unknown")}</p><div class="btnrow"><button class="btn primary" id="m-x">OK</button></div>`),$("#m-x").addEventListener("click",closeModal);
+      } catch(e) {}
+    });
+  });
+  $("#btn-reset-db").addEventListener("click", function(){
+    confirmDanger(this.dataset.confirm, async ()=>{
+      try { const r=await fetch("/api/dev/reset-db",{method:"POST"}); const d=await r.json();
+        if(d.ok) { modal(`<h3>Database reset</h3><p>The dashboard will reload.</p><div class="btnrow"><button class="btn primary" id="m-x">OK</button></div>`); $("#m-x").addEventListener("click",()=>{closeModal();location.reload();}); }
+        else modal(`<h3>Error</h3><p>${esc(d.error||"unknown")}</p><div class="btnrow"><button class="btn primary" id="m-x">OK</button></div>`),$("#m-x").addEventListener("click",closeModal);
+      } catch(e) {}
+    });
+  });
+
+  // ================= fetch loop =================
+  let lastFetchAt = 0;
+  async function refresh(){
+    try {
+      const resp = await fetch("/api/data");
+      if (!resp.ok) throw new Error("HTTP "+resp.status);
+      const d = await resp.json();
+      lastFetchAt = Date.now();
+      render(d);
+    } catch(e) {
+      $("#refreshed").textContent = "refresh failed: "+e.message;
+    }
+  }
+
+  setInterval(()=>{
+    const secAgo = Math.floor((Date.now()-lastFetchAt)/1000);
+    if (lastFetchAt) $("#refreshed").textContent = "updated "+(secAgo<2?"just now":secAgo+"s ago");
+    const dueForRefresh = restartModalOpen ? (Date.now()-lastFetchAt>=1500) : (autoRefreshOn && Date.now()-lastFetchAt>=30000);
+    if (dueForRefresh) refresh();
+  }, 1000);
+
+  refresh();
+})();
 </script>
 </body>
 </html>
-
