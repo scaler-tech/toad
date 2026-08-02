@@ -891,19 +891,39 @@
     const alertsEl = $("#alerts");
     let html="";
     if (dm.update_available && !dismissedAlerts.has("upd")) {
+      // d.auto_update may be absent (e.g. offline payload with no daemon
+      // state yet) — treat anything but a literal true as off, same as the
+      // toggle's own click handler does when reading it back.
+      const autoOn = d.auto_update === true;
       html += `<div class="alert update" data-a="upd">
         <b>Update available</b>${dm.latest_version?` v${esc(dm.latest_version)}`:""}
         <span class="spacer"></span>
         <button class="primary" id="do-update">Update &amp; restart</button>
+        <label class="toggle${autoOn?" on":""}" id="autoupd" title="auto-update"><span class="tk"></span> auto</label>
         <button class="dismiss" data-d="upd" aria-label="dismiss">✕</button>
       </div>`;
     }
     alertsEl.innerHTML = html;
     const upd=$("#do-update"); if(upd) upd.addEventListener("click", doUpdate);
+    const autoToggle=$("#autoupd"); if(autoToggle) autoToggle.addEventListener("click", toggleAutoUpdate);
     $$(".alert .dismiss").forEach(b=>b.addEventListener("click",()=>{
       dismissedAlerts.add(b.dataset.d);
       b.closest(".alert").remove();
     }));
+  }
+
+  // Straight port of the old dashboard's toggleAutoUpdate(): optimistically
+  // flips the toggle's visual state, then POSTs the new value to the
+  // (unchanged) /api/auto-update endpoint. The next refresh's renderAlerts()
+  // re-syncs from d.auto_update, so a failed request self-corrects.
+  async function toggleAutoUpdate(e){
+    e.stopPropagation();
+    const toggle=$("#autoupd");
+    const enabling=!toggle.classList.contains("on");
+    toggle.classList.toggle("on", enabling);
+    try {
+      await fetch("/api/auto-update?enabled="+(enabling?"1":"0"), {method:"POST"});
+    } catch(err) { /* next refresh resyncs from server state */ }
   }
 
   // ================= tabs + range + toggles =================

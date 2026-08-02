@@ -65,6 +65,7 @@ func TestApiDataHandler_MarshalsNewPayloadFields(t *testing.T) {
 		Confidence: 0.7,
 		EstSize:    "small",
 		Channel:    "data-eng",
+		DryRun:     true,
 		CreatedAt:  now,
 	}); err != nil {
 		t.Fatalf("SaveDigestOpportunity: %v", err)
@@ -168,16 +169,21 @@ func TestApiDataHandler_MarshalsNewPayloadFields(t *testing.T) {
 	if resp.Config == nil {
 		t.Fatal("expected config to be present")
 	}
-	if resp.Opportunities == nil || len(resp.Opportunities) != 1 {
-		t.Fatalf("expected 1 opportunity, got %v", resp.Opportunities)
+	// The seeded digest opportunity should surface via digest_counts (the
+	// only place the frontend reads digest-opportunity data from — the
+	// per-opportunity "opportunities" field was dropped as dead payload
+	// weight, see the deleted-fields check below).
+	if resp.DigestCounts == nil || resp.DigestCounts.DryRun != 1 {
+		t.Fatalf("expected digest_counts.DryRun=1 from the seeded opportunity, got %+v", resp.DigestCounts)
 	}
 
-	// Deleted runs-pipeline fields must not reappear in the payload.
+	// Deleted runs-pipeline fields (and the dead per-opportunity payload)
+	// must not reappear in the payload.
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("unmarshal raw response: %v", err)
 	}
-	for _, deleted := range []string{"merge_stats", "active", "history", "pr_noun", "stats"} {
+	for _, deleted := range []string{"merge_stats", "active", "history", "pr_noun", "stats", "opportunities"} {
 		if _, ok := raw[deleted]; ok {
 			t.Errorf("expected deleted field %q to be absent from payload, but it was present", deleted)
 		}

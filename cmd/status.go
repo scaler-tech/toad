@@ -115,7 +115,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 type apiResponse struct {
 	Daemon             *apiDaemon          `json:"daemon"`
 	Integrations       []apiIntegration    `json:"integrations"`
-	Opportunities      []apiOpportunity    `json:"opportunities"`
 	DigestCounts       *state.DigestCounts `json:"digest_counts,omitempty"`
 	OutcomeCounts      map[string]int      `json:"outcome_counts,omitempty"`
 	Config             *apiConfig          `json:"config,omitempty"`
@@ -129,21 +128,6 @@ type apiResponse struct {
 	AutoRestartPID     int                 `json:"auto_restart_pid,omitempty"`
 	AutoRestartStarted int64               `json:"auto_restart_started,omitempty"`
 	Now                int64               `json:"now"`
-}
-
-type apiOpportunity struct {
-	Summary       string  `json:"summary"`
-	Category      string  `json:"category"`
-	Confidence    float64 `json:"confidence"`
-	EstSize       string  `json:"est_size"`
-	Channel       string  `json:"channel"`
-	ChannelID     string  `json:"channel_id,omitempty"`
-	ThreadTS      string  `json:"thread_ts,omitempty"`
-	DryRun        bool    `json:"dry_run"`
-	Dismissed     bool    `json:"dismissed"`
-	Investigating bool    `json:"investigating"`
-	Reasoning     string  `json:"reasoning,omitempty"`
-	CreatedAt     int64   `json:"created_at"`
 }
 
 const (
@@ -522,28 +506,6 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 		integrations = append(integrations, mcpInt)
 
 		resp.Integrations = integrations
-
-		opportunities, err := db.RecentDigestOpportunities(20)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		for _, o := range opportunities {
-			resp.Opportunities = append(resp.Opportunities, apiOpportunity{
-				Summary:       o.Summary,
-				Category:      o.Category,
-				Confidence:    o.Confidence,
-				EstSize:       o.EstSize,
-				Channel:       o.Channel,
-				ChannelID:     o.ChannelID,
-				ThreadTS:      o.ThreadTS,
-				DryRun:        o.DryRun,
-				Dismissed:     o.Dismissed,
-				Investigating: o.Investigating,
-				Reasoning:     o.Reasoning,
-				CreatedAt:     o.CreatedAt.Unix(),
-			})
-		}
 
 		if digestCounts, err := db.DigestOpportunityCounts(); err == nil {
 			resp.DigestCounts = digestCounts
