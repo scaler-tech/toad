@@ -129,6 +129,8 @@ toad init
 
 Walks you through Slack tokens, repo paths, and the Toad King (digest) opt-in, then writes `.toad.yaml` in the current directory. The wizard doesn't yet cover every v2 section — notably `intake.bot_allowlist` and `ticket` tuning — so open the generated file afterward and add those by hand. [`.toad.yaml.example`](.toad.yaml.example) has every key with a comment; treat it as the reference, not something to copy wholesale.
 
+> Heads up: the wizard's welcome screen and some prompt copy still describe v1 behavior ("fixes bugs by autonomously creating pull requests") and haven't been updated for this rewrite. Ignore that copy — the [Configuration Walkthrough](#configuration-walkthrough) below is the source of truth for what toad actually does and what `.toad.yaml` should contain.
+
 ```bash
 toad
 ```
@@ -419,7 +421,7 @@ If you see this and expected auto-filing to work, set both `issue_tracker.enable
 ### MCP tools return unauthorized
 
 - Run `/toad mcp connect` in Slack to (re)issue your personal token, then `/toad mcp status` to confirm it's live.
-- `logs`, `investigations`, and `query` require the `dev` role — add your Slack user ID to `mcp.devs`.
+- `logs` and `query` require the `dev` role — add your Slack user ID to `mcp.devs`. `ask` and `investigations` work with any valid connected token; `investigations` in particular is Biome's context bridge, so it's deliberately not gated on `mcp.devs` — Biome connects with a regular user token, not a dev one.
 
 ### State issues
 

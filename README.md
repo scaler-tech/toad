@@ -47,6 +47,8 @@ toad init    # setup wizard: Slack tokens, repo paths, Linear, optional Sentry M
 toad         # start the daemon
 ```
 
+> The wizard's welcome text and some prompts still describe v1 behavior (coding/PRs) and haven't caught up to this rewrite yet. Follow [SETUP.md](SETUP.md)'s config walkthrough as the source of truth for what `.toad.yaml` should actually contain.
+
 See **[SETUP.md](SETUP.md)** for prerequisites, the Slack app scopes toad actually uses, environment variables, finding your Sentry bot ID, running as a daemon, and a smoke-test checklist.
 
 ## Features
@@ -92,8 +94,9 @@ internal/
                   writer, API-key fallback, provider interface
   vcs/            VCS provider abstraction (GitHub via gh, GitLab via glab):
                   read-only PR/CI/issue lookups for ribbit and investigation
-  issuetracker/   Linear integration: issue creation/lookup, comments,
-                  assignee gating, crossposting
+  issuetracker/   Linear API client: issue creation/lookup, comments,
+                  assignee gating (crossposting to an existing ticket is
+                  orchestrated by cmd/root.go, not this package)
   mcp/            MCP server: ask, logs, investigations, query tools with
                   token auth
   tui/            Shared huh theme for the init wizard
