@@ -1,74 +1,150 @@
-# Toad configuration
-# Copy to .toad.yaml and fill in your values
-# Place in repo root or globally at ~/.toad/config.yaml
+# Copy to .toad.yaml — see SETUP.md
 
+# ──────────────────────────────────────────────
+# Slack Connection
+# ──────────────────────────────────────────────
 slack:
   # Tokens (can also use TOAD_SLACK_APP_TOKEN / TOAD_SLACK_BOT_TOKEN env vars)
   app_token: "xapp-1-..."
   bot_token: "xoxb-..."
 
-  # Channels to monitor (use channel IDs, not names)
-  channels:
-    - "C0123456789"
+  # Channels to monitor (use channel IDs, not names).
+  # Leave empty to auto-join and monitor all public channels.
+  channels: []
+  # channels:
+  #   - "C0123456789"
 
-  # What triggers Toad
+  # What triggers toad
   triggers:
-    emoji: "frog"              # React with 🐸 to trigger
-    keywords:                  # These in messages trigger Toad
+    emoji: "frog"              # react with this on a toad reply to escalate/ticket it
+    keywords:
       - "toad fix"
       - "toad help"
 
+# ──────────────────────────────────────────────
+# Repositories — read-only context for investigations.
+# Toad never commits, pushes, or opens anything against these.
+# ──────────────────────────────────────────────
 repos:
-  - name: "my-app"                 # Short name to identify this repo
-    path: "/path/to/repo"          # Absolute or relative path (resolved to absolute)
-    test_command: "go test ./..."
-    lint_command: "golangci-lint run"
-    default_branch: "main"
-    auto_merge: false              # Enable auto-merge on PRs (requires repo setting)
-    # Per-service validation for monorepos
-    # services:
-    #   - path: "web-app"
-    #     test_command: "make test"
-    #     lint_command: "make stan && make cs"
+  sync_minutes: 10             # periodic git fetch interval (0 = disabled)
+  list:
+    - name: "my-app"                 # unique short name
+      path: "/path/to/repo"          # absolute (or relative, resolved to absolute)
+      # description: ""              # optional; auto-detected / falls back to README
+      primary: true                  # fallback repo when a message's repo is ambiguous
+      default_branch: "main"
+      # Per-repo VCS override (defaults to the global `vcs:` section below):
+      # vcs:
+      #   platform: "gitlab"
+      #   host: "gitlab.company.com"
+      #   bot_usernames: ["renovate-bot"]
   # Add more repos:
-  # - name: "frontend"
-  #   path: "/path/to/frontend"
-  #   primary: true                # Designate one as fallback when repo can't be determined
+  # list:
+  #   - name: "frontend"
+  #     path: "/path/to/frontend"
 
+# ──────────────────────────────────────────────
+# Safety Limits
+# ──────────────────────────────────────────────
 limits:
-  max_concurrent: 2            # Max parallel tadpoles
-  max_turns: 30                # Max agent turns per tadpole
-  timeout_minutes: 10          # Kill tadpole after this
-  max_files_changed: 5         # Abort if too many files touched
-  max_retries: 1               # Test/lint failure retries
+  max_concurrent: 2            # max concurrent investigations; ribbit pool is 3x this
+  timeout_minutes: 10          # ribbit run timeout
+  max_retries: 1
+  history_size: 50             # thread history lines included as context
 
+# ──────────────────────────────────────────────
+# Triage — message classification
+# ──────────────────────────────────────────────
 triage:
-  model: "haiku"               # Fast classification (~1s)
-  auto_spawn: false            # Require explicit 🐸 trigger for code changes
+  model: "haiku"                # fast, cheap classification (~1s)
 
-agent:
-  platform: "claude"           # Agent backend ("claude" is the only supported platform)
-  model: "sonnet"              # Model for tadpole code runs
-  # append_system_prompt: ""   # Extra instructions for all agent runs
+# ──────────────────────────────────────────────
+# Intake — bot message allowlist
+# Only these Slack Bot IDs (e.g. your Sentry integration) are let into
+# triage as intake; this is also what makes a finding "Sentry-corroborated"
+# for the ticket auto-file gate below. See SETUP.md for how to find a bot ID.
+# ──────────────────────────────────────────────
+# intake:
+#   bot_allowlist:
+#     - "B0123456789"
 
+# ──────────────────────────────────────────────
+# Ticket — Linear auto-filing gate
+# ──────────────────────────────────────────────
+ticket:
+  auto_file: true               # auto-file when Sentry-corroborated + confident + feasible
+  auto_file_confidence: 0.85    # confidence floor to clear the gate; else propose via CTA
+  # triage_state_id: ""         # optional Linear workflow state ID for newly filed tickets
+
+# ──────────────────────────────────────────────
+# Toad King — passive digest monitoring
+# ──────────────────────────────────────────────
 digest:
-  enabled: false               # Opt-in batch analysis (Toad King)
-  # dry_run: false             # Collect + analyze but skip spawn/notify
-  batch_minutes: 5
-  min_confidence: 0.95
-  max_auto_spawn_hour: 3
-  allowed_categories: ["bug"]
-  max_est_size: "medium"
+  enabled: false                # opt-in batch analysis
+  # dry_run: false               # analyze without filing/proposing
+  batch_minutes: 5              # how often to analyze batched messages
+  min_confidence: 0.95          # confidence floor (auto-lowered to 0.85 in comment mode)
+  max_auto_spawn_hour: 3        # max auto-filed tickets per hour
+  allowed_categories: ["bug"]   # categories eligible for auto-file
+  max_est_size: "medium"        # max estimated fix size
+  # max_chunk_size: 50            # messages per analysis batch
+  # chunk_timeout_secs: 120       # batch analysis timeout
+  # investigate_timeout_secs: 600 # investigation time limit (default: 10 min)
+  # comment_investigation: false  # post findings as a Slack reply (dry_run only)
+  # bot_list: []                  # bot IDs eligible for active outreach (empty = all)
 
+# ──────────────────────────────────────────────
+# Issue Tracker — the tracker connection itself.
+# `ticket.auto_file` above is the separate gate on top of this.
+# ──────────────────────────────────────────────
 issue_tracker:
-  enabled: false               # Enable issue tracker integration
-  provider: "linear"           # "linear" (only supported provider for now)
-  # api_token: ""              # Or use TOAD_LINEAR_API_TOKEN env var
-  # team_id: ""                # Linear team ID for issue creation
-  create_issues: false         # Opt-in: create issues for opportunities without one
-  # bug_label_id: ""           # Optional Linear label for bugs
-  # feature_label_id: ""       # Optional Linear label for features
+  enabled: false               # enable Linear integration
+  provider: "linear"           # "linear" is the only supported provider
+  # api_token: ""              # or use TOAD_LINEAR_API_TOKEN env var
+  # team_id: ""                # Linear team ID (required when create_issues is true)
+  create_issues: false         # both this and `enabled` must be true to file tickets
+  # bug_label_id: ""           # optional Linear label for bugs
+  # feature_label_id: ""       # optional Linear label for features
+  # respect_assignees: false   # defer to ticket assignee instead of re-filing
+  stale_days: 7                # ignore assignments older than this many days
 
+# ──────────────────────────────────────────────
+# VCS Platform — read-only PR/CI/issue lookups for ribbit and investigation
+# ──────────────────────────────────────────────
+vcs:
+  platform: "github"          # "github" or "gitlab"
+  # host: ""                  # self-hosted GitLab hostname (or TOAD_GITLAB_HOST env)
+  # bot_usernames: []         # usernames to treat as bots (GitLab)
+
+# ──────────────────────────────────────────────
+# Agent — investigation, triage, and ribbit runs
+# ──────────────────────────────────────────────
+agent:
+  platform: "claude"
+  model: "sonnet"
+  # append_system_prompt: ""   # extra instructions for all agent runs
+  # fallback_api_key_env: "ANTHROPIC_API_KEY"  # env var to retry with when the CLI seat is throttled
+  # mcp_servers:                # MCP servers available during read-only investigations
+  #   sentry:
+  #     url: "https://mcp.sentry.dev/mcp"
+  #     auth_token_env: "TOAD_SENTRY_MCP_TOKEN"
+
+# ──────────────────────────────────────────────
+# Logging
+# ──────────────────────────────────────────────
 log:
   level: "info"                # debug, info, warn, error
-  # file: "~/.toad/toad.log"
+  # file: "~/.toad/toad.log"   # default log file location
+
+# ──────────────────────────────────────────────
+# MCP Server — ask/logs/investigations/query tools for Claude Desktop/Code
+# ──────────────────────────────────────────────
+# mcp:
+#   enabled: false
+#   host: "localhost"
+#   port: 8099
+#   # tls: false                 # true if served behind TLS (e.g. reverse proxy) —
+#                                 # affects the URL shown in /toad mcp connect DMs
+#   devs:                        # Slack user IDs with dev role (logs/query/investigations)
+#     - "U0123456789"
+#   message: ""                  # optional message included in the connect DM

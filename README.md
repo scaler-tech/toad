@@ -1,203 +1,117 @@
 # 🐸 toad
 
-**The AI teammate that finds bugs before your users do.**
+**A Slack-native investigation agent that turns bug reports and alerts into evidence-backed Linear tickets.**
 
-Toad is a self-hosted Go daemon that watches your Slack channels, identifies bugs from conversations and alerts, verifies them against your codebase, and opens fix PRs — all before anyone files a ticket. It's like having a senior engineer who reads every message and quietly fixes things.
+Toad watches your Slack channels, triages what comes in with Haiku, and — for anything that looks like a bug or feature — runs a read-only investigation against your actual codebase before it ever touches a tracker. The output isn't "someone should look at this," it's a root-cause hypothesis with `file:line` evidence, a scope, explicit non-goals, and acceptance criteria. Toad no longer writes code, opens PRs, or creates git worktrees; that work now belongs to [Biome](#biome), a separate cloud coding platform that picks up filed tickets.
 
-## 👑 What makes toad different
+## Why this shape
 
-Most AI coding tools wait for you to ask. Toad doesn't.
+Two systems, two kinds of confidence, and humans in the loop at both:
 
-**The Toad King** passively monitors every message in your Slack workspace, batch-analyzes them with Haiku, investigates feasibility against your actual codebase, and autonomously spawns fix agents for high-confidence one-shot bugs. No @mentions, no tickets, no human in the loop until PR review.
+- **Toad's confidence is about intake** — is this really a bug, do I understand where it lives, is the evidence solid enough to act on?
+- **Biome's confidence is about delivery** — can this be safely built, tested, and shipped?
 
-On top of that, toad handles the full reactive path too — @mention it with a bug report and get a PR in minutes, ask it a question and get a codebase-grounded answer in seconds.
+Toad only auto-files a ticket without a human in between when a report is corroborated by an allowlisted monitoring bot (e.g. Sentry) *and* the investigation clears a confidence floor. Everything else — the common case — becomes a "Create Linear ticket" button in Slack. A human decides whether the ticket is worth filing; later, a human (or Biome's own gate) decides whether the fix is worth shipping. Two sign-offs, not zero and not four.
 
-**Why toad over Copilot, Devin, or Claude Code?**
-
-| | Toad | Copilot Agent | Devin | Claude Code |
-|---|---|---|---|---|
-| Proactive bug detection | Yes (Toad King) | No | No | No |
-| Self-hosted (code stays local) | Yes | No | No | No |
-| PR review feedback loop | Yes (3 rounds) | No | No | No |
-| CI failure auto-fix | Yes | No | No | No |
-| Cost | Your existing Claude sub | Per-seat | Per-seat | Per-seat |
-| Slack-native | Yes | No | Coming | Coming |
-| MCP integration (Claude Desktop) | Yes | No | No | No |
-| Adaptive personality | Yes | No | No | No |
-
-## 🐣 How it works
+## How it works
 
 ```
-Slack message → Triage (Haiku, ~1s) → Route by category:
-  👑 Toad King   → passive batch analysis → investigate → auto-fix PR
-  🐣 bug/feature → spawn tadpole → worktree → Claude Code → validate → PR
-  🐸 question    → ribbit reply (Sonnet + read-only codebase tools)
+Slack message (incl. allowlisted bots, e.g. Sentry)
+  -> Triage (Haiku, ~1s): actionable? category? escalate?
+  -> route:
+       question        -> ribbit reply (Claude, read-only tools)
+       bug / feature    -> read-only investigation (Claude, Sentry MCP support)
+                             -> Findings: feasible?, root cause (hypothesis),
+                                file:line evidence, scope, non-goals,
+                                acceptance criteria, confidence
+                             -> ticket gate:
+                                  Sentry-corroborated + confident + feasible
+                                    -> auto-file to Linear
+                                  otherwise
+                                    -> "Create Linear ticket" button in Slack
 ```
 
-**Tadpoles** run the full lifecycle autonomously: create a git worktree, invoke Claude Code, validate with your test/lint commands, retry on failure, push and open a PR. After shipping, toad watches for review comments and CI failures, auto-spawning fix tadpoles for up to 3 rounds.
+Escalation paths bypass the gate entirely, since a human already signed off:
+- Triage returning `escalate: true` on an urgent message
+- Clicking the "Create Linear ticket" CTA on any toad message
+- Reacting with the trigger emoji (default `:frog:`) on one of toad's own replies
 
-**Ribbits** are for when you just need an answer. Mention toad with a question and it reads your codebase with read-only tools, then replies in-thread. Thread memory means follow-ups stay coherent.
+Passive coverage works the same way at batch scale: the digest engine (**Toad King**) collects untriggered channel messages, has Haiku propose opportunities across a batch, and feeds anything that survives its guardrails through the identical investigate-then-gate flow — it never spawns anything, only proposes or files.
 
-**Passive detection** — Even without @mentions, the Toad King can identify bugs from alerts and conversations. When it finds something fixable, it posts investigation findings with a "Fix this" button that spawns a tadpole on click.
+Findings are persisted regardless of what the ticket gate decides, so a later CTA click, escalation, or an MCP `investigations` lookup can reuse an existing investigation instead of paying for a new one.
 
-## 🐸 The glossary
-
-Everything in toad is named after the lifecycle of a frog:
-
-| Term | What it means |
-|------|---------------|
-| 🐸 **Toad** | The daemon — sits in your Slack pond, watching |
-| 🥚 **Triage** | Every message classified by Haiku in ~1s |
-| 🐸 **Ribbit** | Codebase-aware answer to a question |
-| 🐣 **Tadpole** | Autonomous coding agent — worktree, Claude Code, validate, PR |
-| 👑 **Toad King** | Passive monitoring → investigation → auto-fix |
-| 🔁 **PR Watch** | Review comment and CI failure auto-fixing |
-| 🧠 **Personality** | 22-trait adaptive personality with dampened learning |
-
-## 📋 Requirements
-
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude`), authenticated
-- [GitHub CLI](https://cli.github.com) (`gh`) or [GitLab CLI](https://gitlab.com/gitlab-org/cli) (`glab`), authenticated
-- A Slack app with Socket Mode enabled
-
-## 🚀 Install
-
-### macOS and Linux
+## Quick start
 
 ```bash
-brew tap scaler-tech/pkg https://github.com/scaler-tech/pkg
-brew install --cask toad
+toad init    # setup wizard: Slack tokens, repo paths, Linear, optional Sentry MCP
+toad         # start the daemon
 ```
 
-> **macOS security note:** If macOS blocks the app, the cask's post-install hook should handle it. If not: `xattr -d com.apple.quarantine $(which toad)`
+See **[SETUP.md](SETUP.md)** for prerequisites, the Slack app scopes toad actually uses, environment variables, finding your Sentry bot ID, running as a daemon, and a smoke-test checklist.
 
-### Windows
+## Features
 
-```bash
-scoop bucket add scaler-tech https://github.com/scaler-tech/pkg
-scoop install toad
-```
+- **Q&A (ribbit)** — `@toad` a question and get a codebase-grounded answer using read-only tools (Read, Glob, Grep) plus read-only VCS lookups (`gh`/`glab` issue and PR views). Thread memory keeps follow-ups coherent; ribbit retries once on an empty result.
+- **Investigation** — a read-only Claude run per actionable report, scoped to every configured repo (`--add-dir`), optionally backed by a Sentry MCP server for pulling stack traces and issue context directly into the investigation.
+- **Ticket filing + gate semantics** — `internal/ticket` is the single author of every filed ticket. It decides auto-file vs. propose, composes the ticket body (problem, root-cause hypothesis, evidence, scope, non-goals, acceptance criteria), and de-duplicates by an external key (`sentry:<issue-id>` or `thread:<channel>:<ts>`) so re-observing the same problem posts a comment instead of a duplicate ticket.
+- **Escalation paths** — CTA button, trigger-emoji reaction on a toad reply, or a triage `escalate` verdict — each files immediately, bypassing the auto-file gate since a human (or an urgent-enough signal) already made the call.
+- **Digest (Toad King)** — passive, opt-in batch analysis of channel traffic with confidence/category/size/hourly-cap guardrails, so proactive ticket proposals stay conservative by default.
+- **MCP server tools** — `ask` (ribbit-backed Q&A), `logs`, `investigations` (Biome's context bridge — look up a prior investigation's findings by thread or ticket), and `query` (read-only SQL against toad's state DB), all behind per-user bearer tokens issued via a Slack slash command.
+- **Outcome tracking** — an hourly poller checks every filed ticket against Linear for status transitions and logs them. Visibility only; it never changes toad's filing behavior.
 
-### Other options
+## Biome
 
-```bash
-# Binary releases
-# Download from https://github.com/scaler-tech/toad/releases/latest
+Biome is the separate cloud platform that turns a signed-off Linear ticket into a shipped fix. Toad's job ends at "here's a ticket a human is willing to stand behind"; Biome's job is everything from there — coding, testing, and delivery confidence. The `investigations` MCP tool is the bridge: Biome can pull toad's original findings (evidence, scope, acceptance criteria) instead of re-deriving them from the ticket text alone.
 
-# Go install
-go install github.com/scaler-tech/toad@latest
-
-# Build from source
-git clone https://github.com/scaler-tech/toad.git && cd toad && make build
-```
-
-## 🔧 Quick start
-
-```bash
-toad init    # Setup wizard — Slack tokens, repo config, Toad King opt-in
-toad         # Start the daemon
-```
-
-Toad connects to Slack via Socket Mode, auto-joins public channels, and starts listening. Mention `@toad` in any channel with a question or bug report and watch it work.
-
-> For detailed Slack app setup, configuration, and advanced features, see the **[Setup Guide](SETUP.md)**.
-
-**Server deployment:** When running under a process supervisor (systemd, supervisord), set `SUPERVISED=1` so toad exits cleanly on restart instead of self-replacing. See the [Setup Guide](SETUP.md#running-under-a-process-supervisor) for examples.
-
-## 🐸 CLI commands
-
-| Command | Description |
-|---------|-------------|
-| `toad` | Start the daemon |
-| `toad init` | Interactive setup wizard |
-| `toad run "task"` | Spawn a tadpole from the CLI (no Slack needed) |
-| `toad status` | Open live monitoring dashboard in browser |
-| `toad version` | Print version info |
-| `toad update` | Self-update to latest version |
-| `toad restart` | Gracefully restart the daemon |
-
-## 🏛️ Architecture
+## Architecture
 
 ```
-cmd/
-  root.go          Daemon bootstrap, initialization
-  handlers.go      Message routing, triggered/passive/tadpole handlers
-  investigation.go Investigation prompts, parsing, ticket formatting
-  helpers.go       Utilities, repo sync, VCS resolver
-  run.go           CLI one-shot mode
-  init.go          Setup wizard
-  status.go        Web dashboard + dev mode
+cmd/            Cobra commands: toad (daemon), init, status, restart, update, version.
+                Daemon logic: root.go (bootstrap), handlers.go (message routing,
+                bot allowlist), ticketflow.go (investigate-and-file flow: triggered
+                investigations, CTA/escalation requests, digest hooks),
+                outcomes.go (hourly Linear status poller)
 
 internal/
-  slack/           Socket Mode client, event routing, dedup
-  triage/          Haiku classification
-  ribbit/          Q&A with read-only tools
-  tadpole/         Worktree, agent runner, validation, shipping
-  state/           In-memory + SQLite state, crash recovery
-  reviewer/        PR review + CI watcher, fix tadpole spawning
-  digest/          Toad King: batch analysis, investigation, auto-spawn
-  config/          YAML config with cascading defaults, multi-repo profiles
-  personality/     Adaptive 22-trait personality with dampened learning
-  agent/           Coding agent provider abstraction (see PROVIDERS.md)
-  vcs/             VCS provider abstraction (see PROVIDERS.md)
-  issuetracker/    Issue tracker abstraction (see PROVIDERS.md)
-  mcp/             MCP server for Claude Desktop/Code integration
+  slack/          Socket Mode client, event routing, dedup, reply tracking
+  triage/         Haiku classification: actionable, category, size, keywords,
+                  files, escalate
+  ribbit/         Read-only Q&A engine, thread memory, VCS-aware Bash allowlist
+  investigation/  Read-only investigation runner: prompt, agent invocation,
+                  Findings parsing (feasibility, root cause, evidence, scope,
+                  acceptance criteria, confidence)
+  ticket/         Ticket Engine: auto-file/propose gate, idempotent filing,
+                  ticket body composition
+  state/          In-memory + SQLite state, crash recovery, ticket_index and
+                  investigations tables
+  digest/         Toad King: batching, Haiku analysis, guardrails, gated
+                  propose/file — never spawns
+  config/         YAML config with cascading defaults, multi-repo profiles,
+                  repo resolver
+  agent/          Agent CLI abstraction (Claude Code subprocess), MCP config
+                  writer, API-key fallback, provider interface
+  vcs/            VCS provider abstraction (GitHub via gh, GitLab via glab):
+                  read-only PR/CI/issue lookups for ribbit and investigation
+  issuetracker/   Linear integration: issue creation/lookup, comments,
+                  assignee gating, crossposting
+  mcp/            MCP server: ask, logs, investigations, query tools with
+                  token auth
+  tui/            Shared huh theme for the init wizard
+  update/         Auto-update via Homebrew
+  log/            Structured logging (slog, optional file output)
+  preflight/      Pre-run validation checks
+  toadpath/       Home directory resolution (~/.toad or $TOAD_HOME)
 ```
 
-Three packages use a provider/plugin pattern for extensibility. See the `PROVIDERS.md` in each directory for the interface contracts, current implementations, and how to add new ones.
-
-### Key design decisions
-
-- **Single binary, zero infra** — Go binary, git worktrees, your Claude subscription. No Docker, no cloud.
-- **Three-tier intelligence** — Haiku for triage (~$0.001), Sonnet for investigation (read-only), Sonnet for execution (full tools).
-- **6-layer guardrails on proactive spawning** — disabled by default, personality-driven confidence threshold (0.85 in comment mode, ~0.95 otherwise), category + size restrictions, hourly cap, existing validation + human PR review.
-- **Write-through state** — in-memory cache + SQLite for crash recovery and dashboard.
-- **MCP server** — optional Streamable HTTP endpoint lets Claude Desktop and Claude Code query toad (ask questions, read logs) via authenticated tokens managed through Slack.
-
-## 🔌 MCP Server
-
-Toad includes an optional MCP (Model Context Protocol) server that lets Claude Desktop and Claude Code interact with your toad instance directly — ask codebase questions, read daemon logs, and check health.
-
-**Setup:**
-1. Enable in config: `mcp.enabled: true` and set `mcp.port: 8099`
-2. Add a `/toad` slash command to your Slack app (see [Setup Guide](SETUP.md))
-3. Run `/toad mcp connect` in Slack to get a personal token
-4. Add toad as an MCP server in Claude Desktop or Claude Code
-
-**Available tools:**
-- `ask` — Ask toad a codebase question (uses ribbit engine with read-only tools)
-- `logs` — Read and filter daemon logs (dev role required)
-- `watches` — List open PR watches being monitored (dev role required)
-- `query` — Execute read-only SQL against the state database (dev role required)
-
-> For full setup instructions, see the **[Setup Guide](SETUP.md#mcp-server)**.
-
-## 🧠 Personality System
-
-Toad develops a personality over time based on team feedback. 22 traits (verbosity, formality, humor, caution, etc.) adjust through dampened learning from emoji reactions, text feedback in threads, and PR outcomes.
-
-**Setup:**
-1. Enable in config: `personality.enabled: true`
-2. Optionally disable learning: `personality.learning_enabled: false` (uses base traits only)
-
-Personality data is stored at `~/.toad/personality.yaml` and visualized as a radar chart in the dashboard and kiosk view.
-
-> For configuration details, see the **[Setup Guide](SETUP.md#personality)**.
-
-## 🛠️ Development
+## Development
 
 ```bash
-make build    # Build binary
-make test     # Run tests with race detector
-make lint     # Run golangci-lint
-make vet      # Run go vet
-make fmt      # Format code
+go build ./...    # Build
+go test ./...     # Test
+go vet ./...      # Lint
+gofmt -l .        # Formatting check (CI-enforced)
 ```
 
-## 📄 License
+## License
 
 [Elastic License 2.0 (ELv2)](LICENSE) — free to use, modify, and distribute. You may not offer toad as a hosted/managed service.
-
----
-
-*Built with [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Toad eats bugs. 🐸*
