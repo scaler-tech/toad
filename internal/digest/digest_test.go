@@ -198,6 +198,14 @@ func TestBuildChunks_LargeAndSmallChannels(t *testing.T) {
 	}
 }
 
+// findMatchingBracket exercises the shared investigation.FindMatchingDelimiter
+// scanner over '['/']' — digest.parseOpportunities' own bracket-matching
+// case, now that the digest package no longer keeps a byte-for-byte
+// duplicate of that scanning logic (see internal/investigation/parse.go).
+func findMatchingBracket(s string, pos int) int {
+	return investigation.FindMatchingDelimiter(s, pos, '[', ']')
+}
+
 func TestFindMatchingBracket_Simple(t *testing.T) {
 	idx := findMatchingBracket(`[]`, 0)
 	if idx != 1 {

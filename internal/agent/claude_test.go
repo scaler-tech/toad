@@ -133,13 +133,6 @@ func TestBuildArgs_NoMaxTurns(t *testing.T) {
 	assertNotContains(t, args, "--max-turns")
 }
 
-func TestBuildResumeArgs_NoMaxTurns(t *testing.T) {
-	args := buildResumeArgs("sess-123", "continue please")
-	assertNotContains(t, args, "--max-turns")
-	assertContains(t, args, "--resume")
-	assertContains(t, args, "sess-123")
-}
-
 func TestBuildArgs_PermissionReadOnlyWithBash(t *testing.T) {
 	args := buildArgs(RunOpts{
 		Model:               "sonnet",

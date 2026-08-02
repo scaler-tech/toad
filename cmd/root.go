@@ -211,6 +211,18 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	investRunner := investigation.NewRunner(readOnlyProvider, cfg.Agent.Model, mcpPath, allowedMCP, SyncRepoNow, repoPaths)
 	ticketEngine := ticket.New(tracker, stateDB, cfg.Ticket, slackClient.GetPermalink)
 
+	// flowDeps bundles the six dependencies every investigate-and-file entry
+	// point in cmd/ needs (see its doc comment in ticketflow.go) — built once
+	// here and passed down as a single value instead of six positional params.
+	deps := flowDeps{
+		stateManager:   stateManager,
+		tracker:        tracker,
+		resolver:       resolver,
+		investRunner:   investRunner,
+		ticketEngine:   ticketEngine,
+		investigateSem: investigateSem,
+	}
+
 	// 9. Initialize MCP server if enabled (started after context is created below)
 	var mcpSrv *toadmcp.Server
 	if cfg.MCP.Enabled {
@@ -371,7 +383,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		messageWg.Add(1)
 		go func() {
 			defer messageWg.Done()
-			handleMessage(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, ribbitSem, investigateSem, digestEngine, tracker, resolver, repoPaths, investRunner, ticketEngine, cfg.Intake.BotAllowlist)
+			handleMessage(ctx, msg, triageEngine, ribbitEngine, slackClient, deps, ribbitSem, digestEngine, repoPaths, cfg.Intake.BotAllowlist)
 		}()
 	})
 

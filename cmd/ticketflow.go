@@ -35,6 +35,25 @@ import (
 	"github.com/scaler-tech/toad/internal/triage"
 )
 
+// flowDeps bundles the six dependencies shared by every investigate-and-file
+// entry point in this package: handleMessage, handleTriggered,
+// handleTicketRequest, handleBotIntake, runTriggeredInvestigation,
+// runTicketRequest, and runBotIntake all thread the exact same six values
+// through, previously as six separate positional parameters apiece.
+// Constructed once in root.go and passed down as a single value. Deliberately
+// does NOT also carry slackClient, triageEngine, botAllowlist, channelName,
+// or the semaphores/engines only some of these callers need (ribbitSem,
+// digestEngine, repoPaths) — the goal is fewer positional params, not a god
+// object holding everything.
+type flowDeps struct {
+	stateManager   *state.Manager
+	tracker        issuetracker.Tracker
+	resolver       *config.Resolver
+	investRunner   *investigation.Runner
+	ticketEngine   *ticket.Engine
+	investigateSem chan struct{}
+}
+
 // staleCaveat is appended to Findings.Reasoning when the repo sync failed
 // before an investigation ran against it (Task 9's carried finding:
 // investigation.Runner itself only slog.Warns on a sync failure and
@@ -125,12 +144,62 @@ func generateInvestigationID() string {
 	return fmt.Sprintf("invest-%d-%s", time.Now().UnixMilli(), suffix)
 }
 
+// ticketItem is the common shape both <linked_tickets> renderers below (the
+// Slack-thread path's buildTicketContextBlock and the digest path's
+// buildDigestTicketContextBlock) reduce their differently-sourced input to
+// before sharing renderTicketContextBlock. buildTicketContextBlock fetches
+// details live via issuetracker.Tracker, which this file's rendering has
+// never surfaced comments for; buildDigestTicketContextBlock works from
+// digest's own pre-fetched tickets, which do carry comments. Comments is
+// left empty by the Slack-thread path rather than forcing artificial parity
+// between the two callers — the shared renderer just takes what it's given.
+type ticketItem struct {
+	ID          string
+	Title       string
+	Description string
+	Comments    []string // pre-formatted lines, one per comment
+}
+
+// renderTicketContextBlock formats items into the "<linked_tickets>" block
+// investigation.Request's TicketContext field expects
+// (internal/investigation/prompt.go writes it into the prompt verbatim).
+// Returns "" when no item has a non-blank ID.
+func renderTicketContextBlock(items []ticketItem) string {
+	var b strings.Builder
+	b.WriteString("<linked_tickets>\n")
+	found := false
+	for _, it := range items {
+		if it.ID == "" {
+			continue
+		}
+		found = true
+		fmt.Fprintf(&b, "## %s\n", it.ID)
+		if it.Title != "" {
+			fmt.Fprintf(&b, "Title: %s\n", it.Title)
+		}
+		if it.Description != "" {
+			desc := it.Description
+			if len(desc) > 2000 {
+				desc = desc[:2000] + "..."
+			}
+			fmt.Fprintf(&b, "Description:\n%s\n", desc)
+		}
+		for _, c := range it.Comments {
+			fmt.Fprintf(&b, "%s\n", c)
+		}
+		b.WriteString("\n")
+	}
+	if !found {
+		return ""
+	}
+	b.WriteString("</linked_tickets>\n")
+	return b.String()
+}
+
 // buildTicketContextBlock formats any issue-tracker references found in text
-// or threadContext into the "<linked_tickets>" block investigation.Request's
-// TicketContext field expects (internal/investigation/prompt.go writes it
-// into the prompt verbatim — wrapping it is this function's job, mirroring
-// the deleted v1 cmd/investigation.go's formatTicketContext). Reuses the
-// same extraction as enrichWithIssueDetails (cmd/helpers.go) but renders a
+// or threadContext into the "<linked_tickets>" block (mirroring the deleted
+// v1 cmd/investigation.go's formatTicketContext). Reuses the same
+// extraction as enrichWithIssueDetails (cmd/helpers.go) but renders a
 // separate tagged block instead of appending plain entries to a context
 // slice, since investigation.Request keeps ticket context distinct from raw
 // thread conversation. Returns "" when no issue references are found.
@@ -149,9 +218,7 @@ func buildTicketContextBlock(ctx context.Context, tracker issuetracker.Tracker, 
 		limit = len(refs)
 	}
 
-	var b strings.Builder
-	b.WriteString("<linked_tickets>\n")
-	found := false
+	var items []ticketItem
 	for _, ref := range refs[:limit] {
 		details, err := tracker.GetIssueDetails(ctx, ref)
 		if err != nil {
@@ -161,25 +228,9 @@ func buildTicketContextBlock(ctx context.Context, tracker issuetracker.Tracker, 
 		if details == nil {
 			continue
 		}
-		found = true
-		fmt.Fprintf(&b, "## %s\n", details.ID)
-		if details.Title != "" {
-			fmt.Fprintf(&b, "Title: %s\n", details.Title)
-		}
-		if details.Description != "" {
-			desc := details.Description
-			if len(desc) > 2000 {
-				desc = desc[:2000] + "..."
-			}
-			fmt.Fprintf(&b, "Description:\n%s\n", desc)
-		}
-		b.WriteString("\n")
+		items = append(items, ticketItem{ID: details.ID, Title: details.Title, Description: details.Description})
 	}
-	if !found {
-		return ""
-	}
-	b.WriteString("</linked_tickets>\n")
-	return b.String()
+	return renderTicketContextBlock(items)
 }
 
 // preInvestigationTicketCheck looks up the ticket index for the external key
@@ -337,17 +388,12 @@ func runTriggeredInvestigation(
 	msg *islack.IncomingMessage,
 	result *triage.Result,
 	channelName, threadTS string,
-	stateManager *state.Manager,
-	tracker issuetracker.Tracker,
-	resolver *config.Resolver,
-	investRunner *investigation.Runner,
-	ticketEngine *ticket.Engine,
-	investigateSem chan struct{},
+	deps flowDeps,
 	sentryCorroborated bool,
 ) triggeredOutcome {
-	defer stateManager.Unclaim(threadTS)
+	defer deps.stateManager.Unclaim(threadTS)
 
-	db := stateManager.DB()
+	db := deps.stateManager.DB()
 
 	sentryRefsForCheck := msg.SentryRefs
 	if !sentryCorroborated {
@@ -356,14 +402,14 @@ func runTriggeredInvestigation(
 
 	// Idempotency pre-check: skip a fresh, expensive investigation entirely
 	// when a ticket already tracks this exact problem.
-	if existing := preInvestigationTicketCheck(ctx, db, tracker, sentryRefsForCheck, msg.Channel, threadTS); existing != nil {
+	if existing := preInvestigationTicketCheck(ctx, db, deps.tracker, sentryRefsForCheck, msg.Channel, threadTS); existing != nil {
 		return triggeredOutcome{
 			Kind:      outcomeIdempotentHit,
 			ReplyText: fmt.Sprintf(":ticket: Already tracked as %s: %s", existing.IssueID, existing.IssueURL),
 		}
 	}
 
-	repo := resolver.Resolve(result.Repo, result.FilesHint)
+	repo := deps.resolver.Resolve(result.Repo, result.FilesHint)
 	if repo == nil {
 		slog.Info("could not resolve a repo for investigation, falling through to ribbit", "summary", result.Summary)
 		return triggeredOutcome{Kind: outcomeFallThrough}
@@ -379,12 +425,12 @@ func runTriggeredInvestigation(
 		Keywords:      result.Keywords,
 		FilesHint:     result.FilesHint,
 		SentryRefs:    msg.SentryRefs,
-		TicketContext: buildTicketContextBlock(ctx, tracker, msg.Text, msg.ThreadContext),
+		TicketContext: buildTicketContextBlock(ctx, deps.tracker, msg.Text, msg.ThreadContext),
 		Repo:          repo,
 		Timeout:       4 * time.Minute,
 	}
 
-	findings, err := runInvestigation(ctx, investRunner, investigateSem, req)
+	findings, err := runInvestigation(ctx, deps.investRunner, deps.investigateSem, req)
 	if err != nil {
 		slog.Warn("triggered investigation failed, falling through to ribbit", "error", err, "summary", result.Summary)
 		return triggeredOutcome{Kind: outcomeFallThrough}
@@ -404,7 +450,7 @@ func runTriggeredInvestigation(
 		return triggeredOutcome{Kind: outcomeFallThrough, Findings: findings}
 	}
 
-	decision, fileResult, fileErr := fileOrProposeFromFindings(ctx, ticketEngine, *findings, msg.Channel, threadTS, recordID, ticket.SourceAuto)
+	decision, fileResult, fileErr := fileOrProposeFromFindings(ctx, deps.ticketEngine, *findings, msg.Channel, threadTS, recordID, ticket.SourceAuto)
 	if fileErr != nil {
 		slog.Error("ticket filing failed", "error", fileErr, "summary", result.Summary)
 		return triggeredOutcome{
@@ -505,22 +551,17 @@ func runTicketRequest(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
 	result *triage.Result, // nil for a bare CTA click with no fresh triage
-	stateManager *state.Manager,
-	tracker issuetracker.Tracker,
-	resolver *config.Resolver,
-	investRunner *investigation.Runner,
-	ticketEngine *ticket.Engine,
-	investigateSem chan struct{},
+	deps flowDeps,
 	channelName, threadTS string,
 	src ticket.Source,
 	sentryCorroborated bool,
 ) ticketRequestOutcome {
-	if !stateManager.Claim(threadTS) {
+	if !deps.stateManager.Claim(threadTS) {
 		return ticketRequestOutcome{Conflict: true}
 	}
-	defer stateManager.Unclaim(threadTS)
+	defer deps.stateManager.Unclaim(threadTS)
 
-	db := stateManager.DB()
+	db := deps.stateManager.DB()
 
 	findings, recordID := reuseRecentInvestigation(db, threadTS)
 	if findings == nil {
@@ -531,7 +572,7 @@ func runTicketRequest(
 			category, confidence, summary, keywords = result.Category, result.Confidence, result.Summary, result.Keywords
 		}
 
-		repo := resolver.Resolve(repoHint, filesHint)
+		repo := deps.resolver.Resolve(repoHint, filesHint)
 		if repo == nil {
 			return ticketRequestOutcome{Err: errors.New("could not resolve a repo for this thread")}
 		}
@@ -546,12 +587,12 @@ func runTicketRequest(
 			Keywords:      keywords,
 			FilesHint:     filesHint,
 			SentryRefs:    msg.SentryRefs,
-			TicketContext: buildTicketContextBlock(ctx, tracker, msg.Text, msg.ThreadContext),
+			TicketContext: buildTicketContextBlock(ctx, deps.tracker, msg.Text, msg.ThreadContext),
 			Repo:          repo,
 			Timeout:       4 * time.Minute,
 		}
 
-		f, err := runInvestigation(ctx, investRunner, investigateSem, req)
+		f, err := runInvestigation(ctx, deps.investRunner, deps.investigateSem, req)
 		if err != nil {
 			return ticketRequestOutcome{Err: fmt.Errorf("investigation failed: %w", err)}
 		}
@@ -571,7 +612,7 @@ func runTicketRequest(
 	// current request's own corroboration.
 	enforceCorroboration(findings, sentryCorroborated)
 
-	fileResult, err := ticketEngine.FileOrUpdate(ctx, *findings, msg.Channel, threadTS, recordID, src)
+	fileResult, err := deps.ticketEngine.FileOrUpdate(ctx, *findings, msg.Channel, threadTS, recordID, src)
 	if err != nil {
 		return ticketRequestOutcome{Err: fmt.Errorf("filing ticket: %w", err)}
 	}
@@ -624,12 +665,7 @@ func handleTicketRequest(
 	msg *islack.IncomingMessage,
 	slackClient *islack.Client,
 	result *triage.Result,
-	stateManager *state.Manager,
-	tracker issuetracker.Tracker,
-	resolver *config.Resolver,
-	investRunner *investigation.Runner,
-	ticketEngine *ticket.Engine,
-	investigateSem chan struct{},
+	deps flowDeps,
 	channelName string,
 	src ticket.Source,
 	sentryCorroborated bool,
@@ -659,10 +695,10 @@ func handleTicketRequest(
 				msg.ThreadContext = tc
 			}
 		}
-		msg.ThreadContext = enrichWithIssueDetails(ctx, tracker, msg.Text, msg.ThreadContext)
+		msg.ThreadContext = enrichWithIssueDetails(ctx, deps.tracker, msg.Text, msg.ThreadContext)
 	}
 
-	outcome := runTicketRequest(ctx, msg, result, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, threadTS, src, sentryCorroborated)
+	outcome := runTicketRequest(ctx, msg, result, deps, channelName, threadTS, src, sentryCorroborated)
 	if outcome.Conflict {
 		slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
 		return
@@ -692,12 +728,7 @@ func runBotIntake(
 	msg *islack.IncomingMessage,
 	triageEngine *triage.Engine,
 	channelName string,
-	stateManager *state.Manager,
-	tracker issuetracker.Tracker,
-	resolver *config.Resolver,
-	investRunner *investigation.Runner,
-	ticketEngine *ticket.Engine,
-	investigateSem chan struct{},
+	deps flowDeps,
 	sentryCorroborated bool,
 ) *triggeredOutcome {
 	result, err := triageEngine.Classify(ctx, msg, channelName)
@@ -725,14 +756,13 @@ func runBotIntake(
 	}
 
 	threadTS := msg.ThreadTS()
-	if !stateManager.Claim(threadTS) {
+	if !deps.stateManager.Claim(threadTS) {
 		slog.Debug("bot intake: thread already claimed, dropping", "thread", threadTS, "bot_id", msg.BotID)
 		return nil
 	}
 
 	slog.Info("bot intake investigating", "summary", result.Summary, "category", result.Category, "bot_id", msg.BotID)
-	outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS,
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, sentryCorroborated)
+	outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS, deps, sentryCorroborated)
 
 	if outcome.Kind == outcomeFallThrough {
 		slog.Debug("bot intake: investigation fell through (infeasible or errored), dropping", "bot_id", msg.BotID)
@@ -749,13 +779,8 @@ func handleBotIntake(
 	msg *islack.IncomingMessage,
 	triageEngine *triage.Engine,
 	slackClient *islack.Client,
-	stateManager *state.Manager,
+	deps flowDeps,
 	channelName string,
-	tracker issuetracker.Tracker,
-	resolver *config.Resolver,
-	investRunner *investigation.Runner,
-	ticketEngine *ticket.Engine,
-	investigateSem chan struct{},
 	sentryCorroborated bool,
 ) {
 	if msg.ThreadTimestamp != "" {
@@ -765,9 +790,9 @@ func handleBotIntake(
 			msg.ThreadContext = tc
 		}
 	}
-	msg.ThreadContext = enrichWithIssueDetails(ctx, tracker, msg.Text, msg.ThreadContext)
+	msg.ThreadContext = enrichWithIssueDetails(ctx, deps.tracker, msg.Text, msg.ThreadContext)
 
-	outcome := runBotIntake(ctx, msg, triageEngine, channelName, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, sentryCorroborated)
+	outcome := runBotIntake(ctx, msg, triageEngine, channelName, deps, sentryCorroborated)
 	if outcome == nil {
 		return
 	}
@@ -775,7 +800,7 @@ func handleBotIntake(
 	threadTS := msg.ThreadTS()
 	// See ReplyWithOptionalCTA's doc comment: the button is suppressed when
 	// the tracker can't actually create issues.
-	showCTA := outcome.Kind == outcomeProposed && ticketEngine.ShouldCreateIssues()
+	showCTA := outcome.Kind == outcomeProposed && deps.ticketEngine.ShouldCreateIssues()
 	if _, err := slackClient.ReplyWithOptionalCTA(msg.Channel, threadTS, outcome.ReplyText, showCTA); err != nil {
 		slog.Warn("bot intake investigation reply failed", "error", err)
 	}
@@ -899,42 +924,27 @@ func digestInvestigationID(db *state.DB, threadTS string) string {
 // investigation gate runs) into the same "<linked_tickets>" block shape
 // buildTicketContextBlock produces for the Slack-thread flows — including
 // any fetched comments, which buildTicketContextBlock's own tracker-driven
-// fetch doesn't carry. Returns "" when there are no tickets with a
-// non-blank ID.
+// fetch doesn't carry (see ticketItem's doc comment). Returns "" when there
+// are no tickets with a non-blank ID.
 func buildDigestTicketContextBlock(tickets []digest.TicketContext) string {
 	if len(tickets) == 0 {
 		return ""
 	}
 
-	var b strings.Builder
-	b.WriteString("<linked_tickets>\n")
-	found := false
+	items := make([]ticketItem, 0, len(tickets))
 	for _, tc := range tickets {
-		if tc.ID == "" {
-			continue
-		}
-		found = true
-		fmt.Fprintf(&b, "## %s\n", tc.ID)
-		if tc.Title != "" {
-			fmt.Fprintf(&b, "Title: %s\n", tc.Title)
-		}
-		if tc.Description != "" {
-			desc := tc.Description
-			if len(desc) > 2000 {
-				desc = desc[:2000] + "..."
-			}
-			fmt.Fprintf(&b, "Description:\n%s\n", desc)
-		}
+		var comments []string
 		for _, c := range tc.Comments {
-			fmt.Fprintf(&b, "Comment (%s): %s\n", c.Author, c.Body)
+			comments = append(comments, fmt.Sprintf("Comment (%s): %s", c.Author, c.Body))
 		}
-		b.WriteString("\n")
+		items = append(items, ticketItem{
+			ID:          tc.ID,
+			Title:       tc.Title,
+			Description: tc.Description,
+			Comments:    comments,
+		})
 	}
-	if !found {
-		return ""
-	}
-	b.WriteString("</linked_tickets>\n")
-	return b.String()
+	return renderTicketContextBlock(items)
 }
 
 // investigateFromDigest is digest.InvestigateFunc's real implementation: it

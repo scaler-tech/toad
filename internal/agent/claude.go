@@ -152,46 +152,6 @@ func (c *ClaudeProvider) runOnce(ctx context.Context, opts RunOpts, extraEnv []s
 	return result, nil
 }
 
-func (c *ClaudeProvider) Resume(ctx context.Context, sessionID, prompt, workDir string) (*RunResult, error) {
-	args := buildResumeArgs(sessionID, prompt)
-
-	start := time.Now()
-
-	cmd := exec.CommandContext(ctx, "claude", args...)
-	if workDir != "" {
-		cmd.Dir = workDir
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	duration := time.Since(start)
-
-	if err != nil {
-		return nil, fmt.Errorf("claude resume call failed: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-
-	slog.Debug("claude resume raw output", "len", len(stdout.Bytes()), "duration", duration)
-
-	result, err := parseEnvelope(stdout.Bytes())
-	if err != nil {
-		return nil, err
-	}
-	result.Duration = duration
-	return result, nil
-}
-
-// buildResumeArgs constructs the Claude CLI argument list for resuming a session.
-func buildResumeArgs(sessionID, prompt string) []string {
-	return []string{
-		"--print",
-		"--resume", sessionID,
-		"--output-format", "json",
-		"-p", prompt,
-	}
-}
-
 // buildArgs constructs the Claude CLI argument list from RunOpts.
 func buildArgs(opts RunOpts) []string {
 	args := []string{

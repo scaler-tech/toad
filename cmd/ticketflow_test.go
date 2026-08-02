@@ -90,9 +90,12 @@ func newTestResolver(t *testing.T) *config.Resolver {
 // exercising runTriggeredInvestigation directly — no live Slack client and
 // no live issue tracker, per Task 6's precedent that this package has no
 // Slack test double and the decision logic in ticketflow.go is deliberately
-// kept Slack-client-free so it can be tested this way.
+// kept Slack-client-free so it can be tested this way. Returns the
+// individual pieces tests assert on directly (db, stateManager, tracker,
+// mockProvider) plus a flowDeps bundling all six of runTriggeredInvestigation
+// (and friends)'s shared dependencies for a single call-site argument.
 func setupTriggeredTest(t *testing.T, findingsJSON string, cfg config.TicketConfig) (
-	*state.DB, *state.Manager, *ticketflowTrackerFake, *agent.MockProvider, *investigation.Runner, *ticket.Engine, chan struct{},
+	*state.DB, *state.Manager, *ticketflowTrackerFake, *agent.MockProvider, flowDeps,
 ) {
 	t.Helper()
 	db := newTestDB(t)
@@ -102,7 +105,15 @@ func setupTriggeredTest(t *testing.T, findingsJSON string, cfg config.TicketConf
 	investRunner := investigation.NewRunner(mockProvider, "sonnet", "", nil, nil, nil)
 	ticketEngine := ticket.New(tracker, db, cfg, nil)
 	investigateSem := make(chan struct{}, 2)
-	return db, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem
+	deps := flowDeps{
+		stateManager:   stateManager,
+		tracker:        tracker,
+		resolver:       newTestResolver(t),
+		investRunner:   investRunner,
+		ticketEngine:   ticketEngine,
+		investigateSem: investigateSem,
+	}
+	return db, stateManager, tracker, mockProvider, deps
 }
 
 const highConfidenceSentryFindings = `{"feasible":true,"title":"Refund export double-counts partial refunds","problem":"p","root_cause":"rc","evidence":[],"scope":["s"],"non_goals":[],"acceptance_criteria":["ac"],"confidence":0.92,"repo":"svc","sentry_issue_ids":["BILLING-42"],"issue_id":"","files_found":[],"reasoning":"Found the root cause via Sentry stack trace."}`
@@ -146,8 +157,7 @@ func TestComposeFiledReply_AlreadyExistedUsesLinkedWording(t *testing.T) {
 // IsBot/BotID and sentryCorroborated=true reflects that a caller already
 // checked BotID against cfg.Intake.BotAllowlist.
 func TestRunTriggeredInvestigation_AutoFilesHighConfidenceSentryFinding(t *testing.T) {
-	db, stateManager, tracker, _, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
-	resolver := newTestResolver(t)
+	db, stateManager, tracker, _, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
 
 	msg := &islack.IncomingMessage{Channel: "C1", Timestamp: "100.1", SentryRefs: []string{"BILLING-42"}, Text: "users report double refunds", IsBot: true, BotID: "B_SENTRY"}
 	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "double refunds", Actionable: true}
@@ -157,7 +167,7 @@ func TestRunTriggeredInvestigation_AutoFilesHighConfidenceSentryFinding(t *testi
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
+		deps, true /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeFiled {
 		t.Fatalf("expected outcomeFiled, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -192,8 +202,7 @@ func TestRunTriggeredInvestigation_AutoFilesHighConfidenceSentryFinding(t *testi
 // (b) low-confidence finding -> proposed to a human, with TicketBlocks
 // producing real Slack blocks for the composed reply.
 func TestRunTriggeredInvestigation_ProposesLowConfidenceFinding(t *testing.T) {
-	_, stateManager, tracker, _, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, lowConfidenceSentryFindings, autoFileCfg())
-	resolver := newTestResolver(t)
+	_, stateManager, tracker, _, deps := setupTriggeredTest(t, lowConfidenceSentryFindings, autoFileCfg())
 
 	msg := &islack.IncomingMessage{Channel: "C2", Timestamp: "200.1", SentryRefs: []string{"BILLING-42"}, Text: "maybe a bug?"}
 	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "maybe a bug", Actionable: true}
@@ -203,7 +212,7 @@ func TestRunTriggeredInvestigation_ProposesLowConfidenceFinding(t *testing.T) {
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, false /* sentryCorroborated */)
+		deps, false /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeProposed {
 		t.Fatalf("expected outcomeProposed, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -227,8 +236,7 @@ func TestRunTriggeredInvestigation_ProposesLowConfidenceFinding(t *testing.T) {
 // report — see TestRunTriggeredInvestigation_HumanPastedSentryIDSkipsIdempotencyPreCheck
 // for the non-corroborated case.
 func TestRunTriggeredInvestigation_DuplicateSentryKeySkipsInvestigation(t *testing.T) {
-	db, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
-	resolver := newTestResolver(t)
+	db, stateManager, tracker, mockProvider, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
 
 	if err := db.UpsertTicketIndex(&state.TicketIndexEntry{
 		ExternalKey: "sentry:BILLING-42",
@@ -249,7 +257,7 @@ func TestRunTriggeredInvestigation_DuplicateSentryKeySkipsInvestigation(t *testi
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
+		deps, true /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeIdempotentHit {
 		t.Fatalf("expected outcomeIdempotentHit, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -286,7 +294,14 @@ func TestRunTriggeredInvestigation_FallsThroughToRibbitOnInvestigationError(t *t
 	investRunner := investigation.NewRunner(mockProvider, "sonnet", "", nil, nil, nil)
 	ticketEngine := ticket.New(tracker, db, autoFileCfg(), nil)
 	investigateSem := make(chan struct{}, 2)
-	resolver := newTestResolver(t)
+	deps := flowDeps{
+		stateManager:   stateManager,
+		tracker:        tracker,
+		resolver:       newTestResolver(t),
+		investRunner:   investRunner,
+		ticketEngine:   ticketEngine,
+		investigateSem: investigateSem,
+	}
 
 	msg := &islack.IncomingMessage{Channel: "C13", Timestamp: "1300.1", Text: "something broke"}
 	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "something broke", Actionable: true}
@@ -296,7 +311,7 @@ func TestRunTriggeredInvestigation_FallsThroughToRibbitOnInvestigationError(t *t
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, false /* sentryCorroborated */)
+		deps, false /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeFallThrough {
 		t.Fatalf("expected outcomeFallThrough on an investigation agent error, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -314,8 +329,7 @@ func TestRunTriggeredInvestigation_FallsThroughToRibbitOnInvestigationError(t *t
 // underlying error and the investigation's own reasoning — not a crash and
 // not a silently-dropped report.
 func TestRunTriggeredInvestigation_CreateIssueErrorSurfacesAsFilingFailed(t *testing.T) {
-	_, stateManager, tracker, _, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
-	resolver := newTestResolver(t)
+	_, stateManager, tracker, _, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
 	tracker.createErr = errors.New("linear api unavailable")
 
 	msg := &islack.IncomingMessage{Channel: "C11", Timestamp: "1100.1", SentryRefs: []string{"BILLING-42"}, Text: "users report double refunds", IsBot: true, BotID: "B_SENTRY"}
@@ -326,7 +340,7 @@ func TestRunTriggeredInvestigation_CreateIssueErrorSurfacesAsFilingFailed(t *tes
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
+		deps, true /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeFilingFailed {
 		t.Fatalf("expected outcomeFilingFailed, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -355,8 +369,7 @@ func TestRunTriggeredInvestigation_CreateIssueErrorSurfacesAsFilingFailed(t *tes
 // only logs it and still returns the existing entry, so the caller must still
 // report an idempotent hit linking the existing ticket.
 func TestRunTriggeredInvestigation_ReObservationPostCommentErrorDoesNotCrashFlow(t *testing.T) {
-	db, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
-	resolver := newTestResolver(t)
+	db, stateManager, tracker, mockProvider, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
 	tracker.postErr = errors.New("linear comment api unavailable")
 
 	if err := db.UpsertTicketIndex(&state.TicketIndexEntry{
@@ -378,7 +391,7 @@ func TestRunTriggeredInvestigation_ReObservationPostCommentErrorDoesNotCrashFlow
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
+		deps, true /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeIdempotentHit {
 		t.Fatalf("expected outcomeIdempotentHit despite the PostComment error, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -405,8 +418,7 @@ func TestRunTriggeredInvestigation_ReObservationPostCommentErrorDoesNotCrashFlow
 // of the resulting proposal must dedup-key on the Slack thread, never on
 // the unverified Sentry ID.
 func TestRunTriggeredInvestigation_HumanPastedSentryIDDoesNotAutoFile(t *testing.T) {
-	db, stateManager, tracker, _, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
-	resolver := newTestResolver(t)
+	db, stateManager, tracker, _, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
 
 	msg := &islack.IncomingMessage{Channel: "C10", Timestamp: "1000.1", SentryRefs: []string{"BILLING-42"}, Text: "hey saw BILLING-42 again, users report double refunds"}
 	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "double refunds", Actionable: true}
@@ -416,7 +428,7 @@ func TestRunTriggeredInvestigation_HumanPastedSentryIDDoesNotAutoFile(t *testing
 	}
 
 	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, false /* sentryCorroborated */)
+		deps, false /* sentryCorroborated */)
 
 	if outcome.Kind != outcomeProposed {
 		t.Fatalf("expected outcomeProposed for a non-corroborated Sentry ID, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
@@ -427,8 +439,7 @@ func TestRunTriggeredInvestigation_HumanPastedSentryIDDoesNotAutoFile(t *testing
 
 	// A human later explicitly files it via the CTA, reusing the saved
 	// finding — must dedup-key on the thread, not the unverified sentry ID.
-	outcome2 := runTicketRequest(context.Background(), msg, nil, stateManager, tracker, resolver,
-		investRunner, ticketEngine, investigateSem, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
+	outcome2 := runTicketRequest(context.Background(), msg, nil, deps, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
 	if outcome2.Err != nil {
 		t.Fatalf("unexpected error filing via CTA: %v", outcome2.Err)
 	}
@@ -482,8 +493,7 @@ func TestRunInvestigation_AppendsStalenessCaveatOnSyncFailure(t *testing.T) {
 // this through Decide made the button a permanent no-op for any finding
 // that wasn't already Sentry-corroborated and high-confidence).
 func TestRunTicketRequest_FilesDirectlyForPreviouslyProposedFinding(t *testing.T) {
-	db, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, "", autoFileCfg())
-	resolver := newTestResolver(t)
+	db, _, tracker, mockProvider, deps := setupTriggeredTest(t, "", autoFileCfg())
 
 	findings := &investigation.Findings{
 		Feasible: true, Title: "Some bug", Problem: "p", RootCause: "rc",
@@ -492,8 +502,7 @@ func TestRunTicketRequest_FilesDirectlyForPreviouslyProposedFinding(t *testing.T
 	msg := &islack.IncomingMessage{Channel: "C5", Timestamp: "500.1", Text: "please file a ticket for this"}
 	saveInvestigationRecord(db, "invest-test-1", msg.ThreadTS(), msg.Channel, findings)
 
-	outcome := runTicketRequest(context.Background(), msg, nil, stateManager, tracker, resolver,
-		investRunner, ticketEngine, investigateSem, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
+	outcome := runTicketRequest(context.Background(), msg, nil, deps, "eng-alerts", msg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
 
 	if outcome.Err != nil {
 		t.Fatalf("unexpected error: %v", outcome.Err)
@@ -529,8 +538,7 @@ func TestRunTicketRequest_FilesDirectlyForPreviouslyProposedFinding(t *testing.T
 // (a concurrent investigation/ticket-request in flight) must conflict
 // immediately — no investigation run, no ticket filed.
 func TestRunTicketRequest_ConflictWhenThreadAlreadyClaimed(t *testing.T) {
-	_, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
-	resolver := newTestResolver(t)
+	_, stateManager, tracker, mockProvider, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
 
 	msg := &islack.IncomingMessage{Channel: "C6", Timestamp: "600.1", Text: "escalate this"}
 	threadTS := msg.ThreadTS()
@@ -540,8 +548,7 @@ func TestRunTicketRequest_ConflictWhenThreadAlreadyClaimed(t *testing.T) {
 	// Deliberately not unclaiming, to simulate a concurrent flow already
 	// holding this thread's claim.
 
-	outcome := runTicketRequest(context.Background(), msg, nil, stateManager, tracker, resolver,
-		investRunner, ticketEngine, investigateSem, "eng-alerts", threadTS, ticket.SourceEscalation, false /* sentryCorroborated */)
+	outcome := runTicketRequest(context.Background(), msg, nil, deps, "eng-alerts", threadTS, ticket.SourceEscalation, false /* sentryCorroborated */)
 
 	if !outcome.Conflict {
 		t.Fatalf("expected Conflict outcome, got %+v", outcome)
@@ -561,8 +568,7 @@ func TestRunTicketRequest_ConflictWhenThreadAlreadyClaimed(t *testing.T) {
 // ticket_index row (not just a thread-keyed one, since this report IS
 // externally corroborated).
 func TestRunBotIntake_ActionableCorroboratedBugAutoFiles(t *testing.T) {
-	db, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
-	resolver := newTestResolver(t)
+	db, _, tracker, mockProvider, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
 
 	triageProvider := &agent.MockProvider{RunResult: &agent.RunResult{
 		Result: `{"actionable":true,"confidence":0.9,"summary":"double refunds","category":"bug","estimated_size":"small"}`,
@@ -571,8 +577,7 @@ func TestRunBotIntake_ActionableCorroboratedBugAutoFiles(t *testing.T) {
 
 	msg := &islack.IncomingMessage{Channel: "C14", Timestamp: "1400.1", SentryRefs: []string{"BILLING-42"}, Text: "users report double refunds", IsBot: true, BotID: "B_SENTRY"}
 
-	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts",
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
+	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts", deps, true /* sentryCorroborated */)
 
 	if outcome == nil {
 		t.Fatal("expected a non-nil outcome for an actionable, corroborated bug")
@@ -602,8 +607,7 @@ func TestRunBotIntake_ActionableCorroboratedBugAutoFiles(t *testing.T) {
 // (c) An allowlisted bot message that triages as "question" (not bug/
 // feature) must be silently dropped: no investigation run.
 func TestRunBotIntake_DropsQuestionCategoryNoInvestigation(t *testing.T) {
-	_, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
-	resolver := newTestResolver(t)
+	_, _, tracker, mockProvider, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
 
 	triageProvider := &agent.MockProvider{RunResult: &agent.RunResult{
 		Result: `{"actionable":true,"confidence":0.9,"summary":"just curious","category":"question","estimated_size":"small"}`,
@@ -612,8 +616,7 @@ func TestRunBotIntake_DropsQuestionCategoryNoInvestigation(t *testing.T) {
 
 	msg := &islack.IncomingMessage{Channel: "C7", Timestamp: "700.1", BotID: "B123", IsBot: true, Text: "what's the deploy status?"}
 
-	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts",
-		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
+	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts", deps, true /* sentryCorroborated */)
 
 	if outcome != nil {
 		t.Fatalf("expected nil outcome (dropped) for a question-triaged bot message, got %+v", outcome)
@@ -898,8 +901,15 @@ func TestDigestSaveThenCTAReuse_NonCorroboratedClearsSentryID(t *testing.T) {
 	// (inside runTicketRequest) picks up the record investigateFromDigest just
 	// saved instead of running a fresh investigation.
 	ctaMsg := &islack.IncomingMessage{Channel: digestMsg.Channel, Timestamp: digestMsg.ThreadTS}
-	outcome := runTicketRequest(context.Background(), ctaMsg, nil, newTestStateManager(t, db), tracker, resolver,
-		investRunner, ticketEngine, investigateSem, "eng-alerts", ctaMsg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
+	deps := flowDeps{
+		stateManager:   newTestStateManager(t, db),
+		tracker:        tracker,
+		resolver:       resolver,
+		investRunner:   investRunner,
+		ticketEngine:   ticketEngine,
+		investigateSem: investigateSem,
+	}
+	outcome := runTicketRequest(context.Background(), ctaMsg, nil, deps, "eng-alerts", ctaMsg.ThreadTS(), ticket.SourceCTA, false /* sentryCorroborated */)
 	if outcome.Err != nil {
 		t.Fatalf("unexpected error filing via CTA: %v", outcome.Err)
 	}
@@ -949,8 +959,15 @@ func TestDigestSaveThenCTAReuse_CorroboratedKeepsSentryID(t *testing.T) {
 	}
 
 	ctaMsg := &islack.IncomingMessage{Channel: digestMsg.Channel, Timestamp: digestMsg.ThreadTS, IsBot: true, BotID: "B_SENTRY"}
-	outcome := runTicketRequest(context.Background(), ctaMsg, nil, newTestStateManager(t, db), tracker, resolver,
-		investRunner, ticketEngine, investigateSem, "eng-alerts", ctaMsg.ThreadTS(), ticket.SourceCTA, true /* sentryCorroborated */)
+	deps := flowDeps{
+		stateManager:   newTestStateManager(t, db),
+		tracker:        tracker,
+		resolver:       resolver,
+		investRunner:   investRunner,
+		ticketEngine:   ticketEngine,
+		investigateSem: investigateSem,
+	}
+	outcome := runTicketRequest(context.Background(), ctaMsg, nil, deps, "eng-alerts", ctaMsg.ThreadTS(), ticket.SourceCTA, true /* sentryCorroborated */)
 	if outcome.Err != nil {
 		t.Fatalf("unexpected error filing via CTA: %v", outcome.Err)
 	}

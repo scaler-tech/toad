@@ -9,11 +9,8 @@ import (
 
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/digest"
-	"github.com/scaler-tech/toad/internal/investigation"
-	"github.com/scaler-tech/toad/internal/issuetracker"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
-	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/ticket"
 	"github.com/scaler-tech/toad/internal/triage"
 )
@@ -24,15 +21,10 @@ func handleMessage(
 	triageEngine *triage.Engine,
 	ribbitEngine *ribbit.Engine,
 	slackClient *islack.Client,
-	stateManager *state.Manager,
+	deps flowDeps,
 	ribbitSem chan struct{},
-	investigateSem chan struct{},
 	digestEngine *digest.Engine,
-	tracker issuetracker.Tracker,
-	resolver *config.Resolver,
 	repoPaths map[string]string,
-	investRunner *investigation.Runner,
-	ticketEngine *ticket.Engine,
 	botAllowlist []string,
 ) {
 	// Resolve channel name for context
@@ -50,7 +42,7 @@ func handleMessage(
 		// always false in practice here — computed rather than hardcoded so
 		// the rule stays in one place.
 		sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
-		handleTicketRequest(ctx, msg, slackClient, nil, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, ticket.SourceCTA, sentryCorroborated)
+		handleTicketRequest(ctx, msg, slackClient, nil, deps, channelName, ticket.SourceCTA, sentryCorroborated)
 		return
 	}
 
@@ -70,7 +62,7 @@ func handleMessage(
 			return
 		}
 
-		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, channelName, tracker, resolver, repoPaths, investRunner, ticketEngine, ribbitSem, investigateSem, botAllowlist)
+		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, deps, channelName, repoPaths, ribbitSem, botAllowlist)
 		return
 	}
 
@@ -108,7 +100,7 @@ func handleMessage(
 		// one case where external corroboration is genuine — see
 		// isSentryCorroborated's doc comment (ticketflow.go).
 		sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
-		handleBotIntake(ctx, msg, triageEngine, slackClient, stateManager, channelName, tracker, resolver, investRunner, ticketEngine, investigateSem, sentryCorroborated)
+		handleBotIntake(ctx, msg, triageEngine, slackClient, deps, channelName, sentryCorroborated)
 		return
 	}
 
@@ -127,7 +119,7 @@ func handleMessage(
 	}
 
 	slog.Debug("handler: passive path", "channel", channelName, "user", msg.User)
-	handlePassive(ctx, msg, triageEngine, ribbitEngine, slackClient, channelName, resolver, repoPaths, ticketEngine)
+	handlePassive(ctx, msg, triageEngine, ribbitEngine, slackClient, channelName, deps.resolver, repoPaths, deps.ticketEngine)
 }
 
 func handleTriggered(
@@ -136,15 +128,10 @@ func handleTriggered(
 	triageEngine *triage.Engine,
 	ribbitEngine *ribbit.Engine,
 	slackClient *islack.Client,
-	stateManager *state.Manager,
+	deps flowDeps,
 	channelName string,
-	tracker issuetracker.Tracker,
-	resolver *config.Resolver,
 	repoPaths map[string]string,
-	investRunner *investigation.Runner,
-	ticketEngine *ticket.Engine,
 	ribbitSem chan struct{},
-	investigateSem chan struct{},
 	botAllowlist []string,
 ) {
 	// The caller (handleMessage) has already acquired ribbitSem before
@@ -201,7 +188,7 @@ func handleTriggered(
 
 	// Enrich thread context by resolving any Linear ticket URLs/references
 	// into full issue descriptions so triage and ribbit have real context.
-	msg.ThreadContext = enrichWithIssueDetails(ctx, tracker, msg.Text, msg.ThreadContext)
+	msg.ThreadContext = enrichWithIssueDetails(ctx, deps.tracker, msg.Text, msg.ThreadContext)
 
 	// Triage — fast Haiku classification (~1s) to decide category for ribbit.
 	result, err := triageEngine.Classify(ctx, msg, channelName)
@@ -257,7 +244,7 @@ func handleTriggered(
 	if result.Escalate {
 		slog.Info("triage escalate flag set, routing to ticket flow", "summary", result.Summary)
 		releaseRibbitSem()
-		handleTicketRequest(ctx, msg, slackClient, result, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, ticket.SourceEscalation, sentryCorroborated)
+		handleTicketRequest(ctx, msg, slackClient, result, deps, channelName, ticket.SourceEscalation, sentryCorroborated)
 		return
 	}
 
@@ -266,7 +253,7 @@ func handleTriggered(
 	// (or errored) investigation falls through to the unchanged ribbit path
 	// below — v1 semantics.
 	if (result.Category == "bug" || result.Category == "feature") && result.Confidence >= 0.5 {
-		if !stateManager.Claim(threadTS) {
+		if !deps.stateManager.Claim(threadTS) {
 			slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
 			return
 		}
@@ -275,14 +262,13 @@ func handleTriggered(
 		slackClient.SetStatus(msg.Channel, threadTS, "Investigating the codebase...")
 		releaseRibbitSem()
 
-		outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS,
-			stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, sentryCorroborated)
+		outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS, deps, sentryCorroborated)
 
 		if outcome.Kind != outcomeFallThrough {
 			slackClient.ClearStatus(msg.Channel, threadTS)
 			// See ReplyWithOptionalCTA's doc comment: the button is
 			// suppressed when the tracker can't actually create issues.
-			showCTA := outcome.Kind == outcomeProposed && ticketEngine.ShouldCreateIssues()
+			showCTA := outcome.Kind == outcomeProposed && deps.ticketEngine.ShouldCreateIssues()
 			if _, err := slackClient.ReplyWithOptionalCTA(msg.Channel, threadTS, outcome.ReplyText, showCTA); err != nil {
 				slog.Warn("investigation reply failed", "error", err)
 			}
@@ -293,15 +279,15 @@ func handleTriggered(
 	}
 
 	// Resolve repo for ribbit
-	repo := resolver.Resolve(result.Repo, result.FilesHint)
+	repo := deps.resolver.Resolve(result.Repo, result.FilesHint)
 
 	// RIBBIT: questions, refactors, and other categories get a codebase-aware reply
 	slog.Info("generating ribbit", "summary", result.Summary, "category", result.Category)
 
 	// Look up prior thread memory for coherent follow-ups
 	var prior *ribbit.PriorContext
-	if stateManager.DB() != nil {
-		mem, err := stateManager.DB().GetThreadMemory(threadTS)
+	if deps.stateManager.DB() != nil {
+		mem, err := deps.stateManager.DB().GetThreadMemory(threadTS)
 		if err != nil {
 			slog.Warn("failed to look up thread memory", "error", err)
 		} else if mem != nil {
@@ -331,8 +317,8 @@ func handleTriggered(
 	}
 
 	// Save thread memory for future follow-ups
-	if stateManager.DB() != nil {
-		if err := stateManager.DB().SaveThreadMemory(threadTS, msg.Channel, result.Summary, resp.Text); err != nil {
+	if deps.stateManager.DB() != nil {
+		if err := deps.stateManager.DB().SaveThreadMemory(threadTS, msg.Channel, result.Summary, resp.Text); err != nil {
 			slog.Warn("failed to save thread memory", "error", err)
 		}
 	}
@@ -340,7 +326,7 @@ func handleTriggered(
 	daemonCounters.ribbits.Add(1)
 	// See ReplyWithOptionalCTA's doc comment: the button is suppressed when
 	// the tracker can't actually create issues.
-	showCTA := (result.Category == "bug" || result.Category == "feature") && ticketEngine.ShouldCreateIssues()
+	showCTA := (result.Category == "bug" || result.Category == "feature") && deps.ticketEngine.ShouldCreateIssues()
 	if _, err := slackClient.ReplyWithOptionalCTA(msg.Channel, msg.ThreadTS(), resp.Text, showCTA); err != nil {
 		slog.Warn("ribbit reply failed", "error", err)
 	}

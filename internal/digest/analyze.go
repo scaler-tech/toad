@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/scaler-tech/toad/internal/agent"
+	"github.com/scaler-tech/toad/internal/investigation"
 )
 
 const digestPrompt = `You are the Toad King — a conservative code-change detector. You are given a batch of recent Slack messages from a development team. Your job is to identify ONLY clear, specific, one-shot bug reports or feature requests that a coding agent could fix autonomously.
@@ -102,13 +103,7 @@ func (e *Engine) analyze(ctx context.Context, msgs []Message) ([]Opportunity, er
 		repoField = `, "repo": "<name>"`
 	}
 
-	minConf := 0.95
-	if e.cfg != nil && e.cfg.MinConfidence > 0 {
-		minConf = e.cfg.MinConfidence
-	}
-	if e.cfg != nil && e.cfg.DryRun && e.cfg.CommentInvestigation && minConf > 0.85 {
-		minConf = 0.85
-	}
+	minConf := e.minConfidence()
 
 	// Tell Haiku to return opportunities slightly below the active threshold
 	// so near-misses are visible (dismissed by guardrails but logged for analysis).
@@ -142,7 +137,7 @@ func parseOpportunities(data []byte) ([]Opportunity, error) {
 	// Strategy 1: look for [{ or [] directly — the expected array start patterns
 	for _, needle := range []string{`[{`, `[]`} {
 		if idx := strings.Index(text, needle); idx >= 0 {
-			end := findMatchingBracket(text, idx)
+			end := investigation.FindMatchingDelimiter(text, idx, '[', ']')
 			if end >= 0 {
 				if err := json.Unmarshal([]byte(text[idx:end+1]), &opps); err == nil {
 					parsed = true
@@ -154,9 +149,13 @@ func parseOpportunities(data []byte) ([]Opportunity, error) {
 
 	// Strategy 2: strip markdown code fences, then find first [
 	if !parsed {
-		stripped := stripDigestCodeFences(text)
+		// stripDigestCodeFences previously trimmed the result itself; trim
+		// here at the call site instead, to keep that exact behavior now
+		// that the fence-stripping is shared with internal/investigation
+		// (whose own StripCodeFences deliberately returns untrimmed).
+		stripped := strings.TrimSpace(investigation.StripCodeFences(text))
 		if start := strings.Index(stripped, "["); start >= 0 {
-			end := findMatchingBracket(stripped, start)
+			end := investigation.FindMatchingDelimiter(stripped, start, '[', ']')
 			if end >= 0 {
 				if err := json.Unmarshal([]byte(stripped[start:end+1]), &opps); err == nil {
 					parsed = true
@@ -173,55 +172,4 @@ func parseOpportunities(data []byte) ([]Opportunity, error) {
 		return nil, fmt.Errorf("parsing digest opportunities: no valid JSON array found (text: %q)", preview)
 	}
 	return opps, nil
-}
-
-// stripDigestCodeFences removes markdown code fences from text.
-func stripDigestCodeFences(text string) string {
-	fenceStart := strings.Index(text, "```")
-	if fenceStart < 0 {
-		return text
-	}
-	inner := text[fenceStart+3:]
-	if nl := strings.Index(inner, "\n"); nl >= 0 {
-		inner = inner[nl+1:]
-	}
-	if fenceEnd := strings.Index(inner, "```"); fenceEnd >= 0 {
-		inner = inner[:fenceEnd]
-	}
-	return strings.TrimSpace(inner)
-}
-
-// findMatchingBracket finds the index of the ']' that matches the '[' at pos,
-// accounting for nested brackets and JSON strings.
-func findMatchingBracket(s string, pos int) int {
-	depth := 0
-	inString := false
-	escaped := false
-	for i := pos; i < len(s); i++ {
-		if escaped {
-			escaped = false
-			continue
-		}
-		ch := s[i]
-		if inString {
-			if ch == '\\' {
-				escaped = true
-			} else if ch == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch ch {
-		case '"':
-			inString = true
-		case '[':
-			depth++
-		case ']':
-			depth--
-			if depth == 0 {
-				return i
-			}
-		}
-	}
-	return -1
 }

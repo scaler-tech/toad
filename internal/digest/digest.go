@@ -373,12 +373,7 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 		}
 
 		if findings == nil {
-			findings = &investigation.Findings{
-				Feasible:   true,
-				Reasoning:  taskDescription,
-				Repo:       opp.Repo,
-				FilesFound: investigatedFiles,
-			}
+			findings = syntheticFindings(taskDescription, opp, investigatedFiles)
 		}
 
 		if err := e.propose(ctx, *findings, msg); err != nil {
@@ -393,17 +388,7 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 			continue
 		}
 
-		// Propose succeeded — its own outreach (ticket filed/proposed +
-		// thread notice) has already served the purpose the scoped claim
-		// existed to protect (no concurrent :frog:/CTA spawn racing the
-		// investigation). Release it here too, not just on failure:
-		// HasRecentOpportunity, actedIssues, and the ticket_index carry
-		// dedup forward from this point on, so holding the claim forever
-		// would only block a legitimate follow-up on the same thread+scope
-		// (carried finding from Task 6/15's review).
-		if e.unclaim != nil {
-			e.unclaim(threadTS, scope)
-		}
+		e.unclaimAfterPropose(threadTS, scope)
 
 		e.totalSpawns.Add(1)
 	}
@@ -784,12 +769,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 		}
 
 		if findings == nil {
-			findings = &investigation.Findings{
-				Feasible:   true,
-				Reasoning:  taskDescription,
-				Repo:       opp.Repo,
-				FilesFound: investigatedFiles,
-			}
+			findings = syntheticFindings(taskDescription, opp, investigatedFiles)
 		}
 		if issueRef != nil {
 			findings.IssueID = issueRef.ID
@@ -808,18 +788,35 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			}
 		} else {
 			e.totalSpawns.Add(1)
-			// Propose succeeded — release the scoped claim here too, not
-			// just on failure. It has already served its dedup purpose
-			// (no concurrent :frog:/CTA spawn racing the investigation);
-			// HasRecentOpportunity, actedIssues, and the ticket_index carry
-			// dedup forward from this point on. Holding it forever (the
-			// prior behavior) would permanently block any legitimate
-			// follow-up on the same thread+scope (carried finding from
-			// Task 6/15's review).
-			if e.unclaim != nil {
-				e.unclaim(threadTS, scope)
-			}
+			e.unclaimAfterPropose(threadTS, scope)
 		}
 	}
 	return true
+}
+
+// syntheticFindings builds a fallback Findings verdict for the two propose
+// call sites above, used whenever no real investigation ran (e.investigate
+// is nil) or a real one produced no result — both proposal paths need a
+// *Findings to hand to e.propose regardless.
+func syntheticFindings(taskDescription string, opp Opportunity, files []string) *investigation.Findings {
+	return &investigation.Findings{
+		Feasible:   true,
+		Reasoning:  taskDescription,
+		Repo:       opp.Repo,
+		FilesFound: files,
+	}
+}
+
+// unclaimAfterPropose releases the scoped thread+scope claim after a
+// successful propose call. Propose succeeding has already served the
+// purpose the scoped claim existed to protect (no concurrent :frog:/CTA
+// spawn racing the investigation) — HasRecentOpportunity, actedIssues, and
+// the ticket_index carry dedup forward from this point on, so holding the
+// claim forever (the prior behavior) would only block a legitimate
+// follow-up on the same thread+scope (carried finding from Task 6/15's
+// review). A no-op when e.unclaim is nil.
+func (e *Engine) unclaimAfterPropose(threadTS, scope string) {
+	if e.unclaim != nil {
+		e.unclaim(threadTS, scope)
+	}
 }

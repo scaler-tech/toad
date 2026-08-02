@@ -1545,41 +1545,6 @@ func TestDB_GetInvestigationByThread_NotFound(t *testing.T) {
 	}
 }
 
-func TestDB_GetInvestigation_ByID(t *testing.T) {
-	db := openTestDB(t)
-
-	rec := &InvestigationRecord{
-		ID:           "inv-1",
-		ThreadTS:     "1722500000.000100",
-		Channel:      "C123",
-		Repo:         "toad",
-		FindingsJSON: `{"summary":"details"}`,
-		CreatedAt:    time.Now(),
-	}
-	if err := db.SaveInvestigation(rec); err != nil {
-		t.Fatalf("SaveInvestigation: %v", err)
-	}
-
-	got, err := db.GetInvestigation("inv-1")
-	if err != nil {
-		t.Fatalf("GetInvestigation: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected investigation")
-	}
-	if got.Channel != "C123" || got.Repo != "toad" {
-		t.Errorf("got %+v", got)
-	}
-
-	missing, err := db.GetInvestigation("nonexistent")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if missing != nil {
-		t.Errorf("expected nil for unknown id, got %v", missing)
-	}
-}
-
 func TestDB_FindInvestigationByTicket(t *testing.T) {
 	db := openTestDB(t)
 

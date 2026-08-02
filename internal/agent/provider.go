@@ -49,16 +49,9 @@ type Provider interface {
 	// Run executes the agent with the given options.
 	Run(ctx context.Context, opts RunOpts) (*RunResult, error)
 
-	// Resume continues a previous session by ID. Providers that do not
-	// support session resumption return ErrResumeNotSupported.
-	Resume(ctx context.Context, sessionID, prompt, workDir string) (*RunResult, error)
-
 	// Check verifies the agent CLI is available on this system.
 	Check() error
 }
-
-// ErrResumeNotSupported is returned by providers that cannot resume sessions.
-var ErrResumeNotSupported = fmt.Errorf("agent provider does not support session resumption")
 
 // NewProvider returns a Provider for the given platform name. fallbackEnv
 // names an environment variable holding an Anthropic API key to fall back to

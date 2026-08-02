@@ -1250,17 +1250,6 @@ func (d *DB) GetInvestigationByThread(threadTS string) (*InvestigationRecord, er
 	return scanInvestigation(row)
 }
 
-// GetInvestigation looks up an investigation by its ID. Returns nil, nil if absent.
-func (d *DB) GetInvestigation(id string) (*InvestigationRecord, error) {
-	ctx, cancel := dbCtx()
-	defer cancel()
-	row := d.db.QueryRowContext(ctx,
-		"SELECT id, thread_ts, channel, repo, findings_json, created_at FROM investigations WHERE id = ?",
-		id,
-	)
-	return scanInvestigation(row)
-}
-
 // FindInvestigationByTicket resolves the investigation behind a tracking
 // ticket by joining through ticket_index.investigation_id. Returns nil, nil
 // if no ticket_index row references an investigation for this issue.
@@ -1351,15 +1340,38 @@ type ThreadMemory struct {
 const ThreadMemoryTTL = 24 * time.Hour
 
 func scanRun(row *sql.Row) (*Run, error) {
+	run, err := scanRunRow(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+func scanRuns(rows *sql.Rows) ([]*Run, error) {
+	var runs []*Run
+	for rows.Next() {
+		run, err := scanRunRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+// scanRunRow scans a single Run row (the 11 columns shared by scanRun's
+// single-row query and scanRuns' multi-row query) — see the scanner
+// interface's doc comment above.
+func scanRunRow(row scanner) (*Run, error) {
 	var run Run
 	var resultJSON sql.NullString
 	err := row.Scan(
 		&run.ID, &run.Status, &run.SlackChannel, &run.SlackThreadTS,
 		&run.Branch, &run.WorktreePath, &run.Task, &run.RepoName, &run.ClaimScope, &run.StartedAt, &resultJSON,
 	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, err
 	}
@@ -1370,26 +1382,4 @@ func scanRun(row *sql.Row) (*Run, error) {
 		}
 	}
 	return &run, nil
-}
-
-func scanRuns(rows *sql.Rows) ([]*Run, error) {
-	var runs []*Run
-	for rows.Next() {
-		var run Run
-		var resultJSON sql.NullString
-		if err := rows.Scan(
-			&run.ID, &run.Status, &run.SlackChannel, &run.SlackThreadTS,
-			&run.Branch, &run.WorktreePath, &run.Task, &run.RepoName, &run.ClaimScope, &run.StartedAt, &resultJSON,
-		); err != nil {
-			return nil, err
-		}
-		if resultJSON.Valid && resultJSON.String != "" {
-			var result RunResult
-			if err := json.Unmarshal([]byte(resultJSON.String), &result); err == nil {
-				run.Result = &result
-			}
-		}
-		runs = append(runs, &run)
-	}
-	return runs, rows.Err()
 }

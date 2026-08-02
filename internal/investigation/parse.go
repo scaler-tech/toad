@@ -77,10 +77,16 @@ func ParseFindings(resultText string) (*Findings, error) {
 	return &findings, nil
 }
 
-// stripCodeFences removes markdown code fences (```json ... ``` or ``` ... ```)
-// from text, returning the inner content. If no fences are found, returns the
-// original text unchanged.
-func stripCodeFences(text string) string {
+// StripCodeFences removes markdown code fences (```json ... ``` or ``` ... ```)
+// from text, returning the inner content unmodified. If no fences are found,
+// returns the original text unchanged. Exported so internal/digest/analyze.go
+// can share this logic for its own (array-shaped) LLM response parsing
+// instead of keeping a byte-for-byte duplicate — that caller trims the
+// result itself where it needs to, same as this package's own caller in
+// ParseFindings (strategy 2 below wraps the call in strings.TrimSpace);
+// this function intentionally does not trim, so both callers keep their
+// exact prior semantics.
+func StripCodeFences(text string) string {
 	// Find opening fence
 	fenceStart := strings.Index(text, "```")
 	if fenceStart < 0 {
@@ -98,18 +104,30 @@ func stripCodeFences(text string) string {
 	return inner
 }
 
-// findMatchingBrace finds the index of the '}' that matches the '{' at pos,
-// accounting for nested braces and JSON strings.
-func findMatchingBrace(s string, pos int) int {
+// stripCodeFences is a thin local alias for StripCodeFences, kept so this
+// file's own call site below reads the same as before StripCodeFences was
+// exported.
+func stripCodeFences(text string) string {
+	return StripCodeFences(text)
+}
+
+// FindMatchingDelimiter finds the index of the closeByte that matches the
+// openByte at position start in text, accounting for nesting and JSON
+// strings (a delimiter byte inside a quoted string, or escaped, never
+// affects the depth count). Exported so internal/digest/analyze.go can share
+// this scanning logic for its own bracket-matching (open='[', close=']')
+// instead of keeping a byte-for-byte duplicate of this package's
+// brace-matching (open='{', close='}').
+func FindMatchingDelimiter(text string, start int, openByte, closeByte byte) int {
 	depth := 0
 	inString := false
 	escaped := false
-	for i := pos; i < len(s); i++ {
+	for i := start; i < len(text); i++ {
 		if escaped {
 			escaped = false
 			continue
 		}
-		ch := s[i]
+		ch := text[i]
 		if inString {
 			if ch == '\\' {
 				escaped = true
@@ -121,9 +139,9 @@ func findMatchingBrace(s string, pos int) int {
 		switch ch {
 		case '"':
 			inString = true
-		case '{':
+		case openByte:
 			depth++
-		case '}':
+		case closeByte:
 			depth--
 			if depth == 0 {
 				return i
@@ -131,6 +149,13 @@ func findMatchingBrace(s string, pos int) int {
 		}
 	}
 	return -1
+}
+
+// findMatchingBrace is a thin local alias for FindMatchingDelimiter over
+// '{'/'}' braces, kept so this file's own call sites below read the same as
+// before FindMatchingDelimiter was exported.
+func findMatchingBrace(s string, pos int) int {
+	return FindMatchingDelimiter(s, pos, '{', '}')
 }
 
 // knownExts lists file extensions that indicate a real source file path.
