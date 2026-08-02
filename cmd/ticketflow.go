@@ -25,8 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/slack-go/slack"
-
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/digest"
 	"github.com/scaler-tech/toad/internal/investigation"
@@ -36,20 +34,6 @@ import (
 	"github.com/scaler-tech/toad/internal/ticket"
 	"github.com/scaler-tech/toad/internal/triage"
 )
-
-// staleFlagKey is the context key wrapSync (root.go) uses to report a repo
-// sync failure back to the specific investigation call that triggered it.
-// A context value (rather than a field on investigation.Runner) keeps this
-// goroutine-local: concurrent investigations never share the flag, even
-// though they share one Runner and one wrapped RepoSyncer.
-type staleFlagKey struct{}
-
-// withStaleTracking returns a context carrying a fresh staleness flag for a
-// single investigation call, and a pointer to read it afterward.
-func withStaleTracking(ctx context.Context) (context.Context, *bool) {
-	stale := new(bool)
-	return context.WithValue(ctx, staleFlagKey{}, stale), stale
-}
 
 // staleCaveat is appended to Findings.Reasoning when the repo sync failed
 // before an investigation ran against it (Task 9's carried finding:
@@ -61,7 +45,10 @@ const staleCaveat = "\n\n_note: repo sync failed before this investigation; line
 // runInvestigation gates an investigation run behind investigateSem (bounded
 // concurrent investigations — separate from ribbitSem since investigations
 // are slow, minutes not seconds) and appends a staleness caveat to the
-// findings when the repo sync failed beforehand.
+// findings when the repo sync failed beforehand. Staleness is read off the
+// returned Findings.RepoSyncFailed (set by Runner.Run itself) rather than
+// smuggled back through ctx — see investigation.Findings' doc comment on
+// that field.
 func runInvestigation(ctx context.Context, investRunner *investigation.Runner, investigateSem chan struct{},
 	req investigation.Request) (*investigation.Findings, error) {
 	select {
@@ -71,15 +58,48 @@ func runInvestigation(ctx context.Context, investRunner *investigation.Runner, i
 		return nil, ctx.Err()
 	}
 
-	staleCtx, stale := withStaleTracking(ctx)
-	findings, err := investRunner.Run(staleCtx, req)
+	findings, err := investRunner.Run(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	if *stale {
+	if findings.RepoSyncFailed {
 		findings.Reasoning = strings.TrimRight(findings.Reasoning, "\n") + staleCaveat
 	}
 	return findings, nil
+}
+
+// isSentryCorroborated reports whether a Sentry reference may be trusted as
+// genuine external corroboration: only when the message that carried it
+// arrived from an allowlisted monitoring bot, identified by botID. Every
+// IncomingMessage/digest.Message construction path sets IsBot as exactly
+// `BotID != ""` (verified against internal/slack/events.go and client.go),
+// so checking botID directly here is equivalent to checking IsBot and also
+// works for callers that only have a raw bot ID string (e.g. digest.Message,
+// which carries no IsBot field of its own).
+//
+// This is the single mechanism for the corroboration gate: a Sentry ID must
+// never drive ticket identity, auto-file, or the ticket footer merely
+// because it appears in human-pasted text or an investigation agent's own
+// output — only because it arrived from a bot on the configured allowlist.
+// See enforceCorroboration for the other half of the rule (clearing
+// findings that fail this check).
+func isSentryCorroborated(botID string, allowlist []string) bool {
+	return botID != "" && slices.Contains(allowlist, botID)
+}
+
+// enforceCorroboration clears f.SentryIssueIDs when corroborated is false —
+// the single enforcement point for the corroboration rule (see
+// isSentryCorroborated's doc comment for the full rationale): a Sentry
+// reference may only drive Decide/ExternalKey/FileOrUpdate/the ticket
+// footer once it's been confirmed to have arrived from an allowlisted
+// monitoring bot, never from human-pasted text or model output. Nil-safe —
+// a no-op when f is nil — so callers can pass a possibly-nil *Findings
+// without a separate guard.
+func enforceCorroboration(f *investigation.Findings, corroborated bool) {
+	if f == nil || corroborated {
+		return
+	}
+	f.SentryIssueIDs = nil
 }
 
 // randomHex mirrors the v1 tadpole runner's ID-suffix generator (deleted in
@@ -369,13 +389,11 @@ func runTriggeredInvestigation(
 		slog.Warn("triggered investigation failed, falling through to ribbit", "error", err, "summary", result.Summary)
 		return triggeredOutcome{Kind: outcomeFallThrough}
 	}
-	if !sentryCorroborated {
-		// Strip any Sentry IDs the model surfaced (from req.SentryRefs leads,
-		// or inferred from thread text) before they can drive Decide,
-		// ExternalKey, FileOrUpdate, or the ticket footer — see this
-		// function's doc comment.
-		findings.SentryIssueIDs = nil
-	}
+	// See this function's doc comment, and enforceCorroboration's, for the
+	// rule: any Sentry IDs the model surfaced (from req.SentryRefs leads, or
+	// inferred from thread text) must never drive Decide/ExternalKey/
+	// FileOrUpdate/the ticket footer unless sentryCorroborated is true.
+	enforceCorroboration(findings, sentryCorroborated)
 
 	recordID := generateInvestigationID()
 	saveInvestigationRecord(db, recordID, threadTS, msg.Channel, findings)
@@ -542,7 +560,7 @@ func runTicketRequest(
 		saveInvestigationRecord(db, recordID, threadTS, msg.Channel, findings)
 	}
 
-	// Re-apply the corroboration clear here, unconditionally, on the FINAL
+	// Re-apply enforceCorroboration here, unconditionally, on the FINAL
 	// findings value — whether it just came from a fresh investigation above
 	// or was reused from a saved record. A reused record may predate
 	// corroboration filtering, or may have been saved by a different path
@@ -551,9 +569,7 @@ func runTicketRequest(
 	// THIS request's sentryCorroborated value. Never trust a persisted
 	// record's SentryIssueIDs as already-clean; always re-derive from the
 	// current request's own corroboration.
-	if !sentryCorroborated {
-		findings.SentryIssueIDs = nil
-	}
+	enforceCorroboration(findings, sentryCorroborated)
 
 	fileResult, err := ticketEngine.FileOrUpdate(ctx, *findings, msg.Channel, threadTS, recordID, src)
 	if err != nil {
@@ -757,30 +773,23 @@ func handleBotIntake(
 	}
 
 	threadTS := msg.ThreadTS()
-	// The CTA button is suppressed when the tracker can't actually create
-	// issues — post plain text instead of a button that always errors when
-	// clicked.
-	if outcome.Kind == outcomeProposed && ticketEngine.ShouldCreateIssues() {
-		blocks := islack.TicketBlocks(outcome.ReplyText, threadTS)
-		if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, threadTS, outcome.ReplyText, blocks); err != nil {
-			slog.Warn("bot intake investigation reply failed", "error", err)
-		}
-		return
-	}
-	if _, err := slackClient.ReplyInThread(msg.Channel, threadTS, outcome.ReplyText); err != nil {
+	// See ReplyWithOptionalCTA's doc comment: the button is suppressed when
+	// the tracker can't actually create issues.
+	showCTA := outcome.Kind == outcomeProposed && ticketEngine.ShouldCreateIssues()
+	if _, err := slackClient.ReplyWithOptionalCTA(msg.Channel, threadTS, outcome.ReplyText, showCTA); err != nil {
 		slog.Warn("bot intake investigation reply failed", "error", err)
 	}
 }
 
 // digestPostFunc posts a Slack thread reply for the digest propose path,
-// optionally with Block Kit blocks (nil for a plain reply) attached. Kept as
-// an injectable function value — rather than a *islack.Client parameter —
-// so proposeFromDigest's Decide/FileOrUpdate/compose decision logic stays
+// showing the ticket-creation CTA button when showCTA is true. Kept as an
+// injectable function value — rather than a *islack.Client parameter — so
+// proposeFromDigest's Decide/FileOrUpdate/compose decision logic stays
 // directly unit-testable with a fake, consistent with this file's
-// Slack-client-free design (see the package doc comment at the top). Task
-// 15's root.go wires the real implementation over slackClient.ReplyInThread/
-// ReplyInThreadWithBlocks.
-type digestPostFunc func(channel, threadTS, text string, blocks []slack.Block) (string, error)
+// Slack-client-free design (see the package doc comment at the top).
+// root.go wires the real implementation over
+// slackClient.ReplyWithOptionalCTA.
+type digestPostFunc func(channel, threadTS, text string, showCTA bool) (string, error)
 
 // composeDigestProposalText renders the Slack reply text for a digest-
 // sourced finding that didn't clear the auto-file gate (ticket.DecisionPropose).
@@ -830,9 +839,7 @@ func composeDigestProposalText(f investigation.Findings) string {
 // batched) must never auto-file or dedup-key on an unverified Sentry ID.
 func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, db *state.DB, post digestPostFunc,
 	f investigation.Findings, msg digest.Message, sentryCorroborated bool) error {
-	if !sentryCorroborated {
-		f.SentryIssueIDs = nil
-	}
+	enforceCorroboration(&f, sentryCorroborated)
 
 	investigationID := digestInvestigationID(db, msg.ThreadTS)
 	decision, fileResult, err := fileOrProposeFromFindings(ctx, ticketEngine, f, msg.Channel, msg.ThreadTS, investigationID, ticket.SourceDigest)
@@ -841,19 +848,14 @@ func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, db *sta
 	}
 
 	if decision == ticket.DecisionAutoFile {
-		_, err := post(msg.Channel, msg.ThreadTS, composeFiledReply(f, fileResult), nil)
+		_, err := post(msg.Channel, msg.ThreadTS, composeFiledReply(f, fileResult), false)
 		return err
 	}
 
+	// See ReplyWithOptionalCTA's doc comment: the button is suppressed when
+	// the tracker can't actually create issues.
 	text := composeDigestProposalText(f)
-	// The CTA button is suppressed when the tracker can't actually create
-	// issues — post plain text instead of a button that always errors when
-	// clicked.
-	var blocks []slack.Block
-	if ticketEngine.ShouldCreateIssues() {
-		blocks = islack.TicketBlocks(text, msg.ThreadTS)
-	}
-	_, err = post(msg.Channel, msg.ThreadTS, text, blocks)
+	_, err = post(msg.Channel, msg.ThreadTS, text, ticketEngine.ShouldCreateIssues())
 	return err
 }
 
@@ -1014,10 +1016,8 @@ func investigateFromDigest(
 		return nil, err
 	}
 
-	sentryCorroborated := msg.BotID != "" && slices.Contains(botAllowlist, msg.BotID)
-	if !sentryCorroborated {
-		findings.SentryIssueIDs = nil
-	}
+	sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
+	enforceCorroboration(findings, sentryCorroborated)
 
 	saveInvestigationRecord(db, generateInvestigationID(), msg.ThreadTS, msg.Channel, findings)
 

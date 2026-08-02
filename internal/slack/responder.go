@@ -83,6 +83,22 @@ func (c *Client) UpdateMessageWithBlocks(channel, timestamp, fallbackText string
 	return nil
 }
 
+// ReplyWithOptionalCTA posts text as a thread reply, attaching a
+// "Create Linear ticket" button (via TicketBlocks) when showCTA is true, or
+// posting plain text otherwise. This is the single choke point for the
+// "CTA-or-plain reply" pattern repeated across cmd/'s emission sites —
+// callers pass showCTA as their existing condition (e.g. an outcome kind or
+// category check) ANDed with ticketEngine.ShouldCreateIssues(), since the
+// button must never appear when the tracker can't actually create issues
+// (it would always error when clicked).
+func (c *Client) ReplyWithOptionalCTA(channel, threadTS, text string, showCTA bool) (string, error) {
+	if showCTA {
+		blocks := TicketBlocks(text, threadTS)
+		return c.ReplyInThreadWithBlocks(channel, threadTS, text, blocks)
+	}
+	return c.ReplyInThread(channel, threadTS, text)
+}
+
 // ReplyInThread posts a message as a thread reply and tracks it as a toad reply.
 func (c *Client) ReplyInThread(channel, threadTS, text string) (string, error) {
 	if c.pathScrubber != nil {

@@ -27,4 +27,12 @@ type Findings struct {
 	IssueID            string     `json:"issue_id"`    // existing Linear ref, if any
 	FilesFound         []string   `json:"files_found"` // from extractFilePaths
 	Reasoning          string     `json:"reasoning"`   // Slack-postable prose
+
+	// RepoSyncFailed is set by Runner.Run itself when the pre-investigation
+	// repo sync failed, so the investigation proceeded against a possibly-
+	// stale checkout. It is never set from the model's JSON output (json:"-"
+	// keeps ParseFindings from ever trusting agent-supplied text for this
+	// field) — callers (cmd/ticketflow.go's runInvestigation) use it to
+	// append a user-visible staleness caveat.
+	RepoSyncFailed bool `json:"-"`
 }

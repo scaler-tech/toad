@@ -43,15 +43,13 @@ func handleMessage(
 	// toad's own (bot) messages, so the fetched message will have IsBot=true.
 	if msg.IsTicketRequest {
 		slog.Info("handler: ticket requested", "channel", channelName, "thread", msg.ThreadTS())
-		// sentryCorroborated is computed at intake from the SAME rule used
-		// everywhere else in this flow (see runTriggeredInvestigation's doc
-		// comment): external corroboration requires the message to have
-		// arrived from an allowlisted monitoring bot. A ticket-request
-		// reaction fires on toad's OWN reply (msg.BotID is toad's bot ID),
-		// never an allowlisted monitoring bot's, so this is always false in
-		// practice here — computed rather than hardcoded so the rule stays
-		// in one place.
-		sentryCorroborated := msg.IsBot && slices.Contains(botAllowlist, msg.BotID)
+		// sentryCorroborated uses the single corroboration mechanism (see
+		// isSentryCorroborated's doc comment in ticketflow.go). A
+		// ticket-request reaction fires on toad's OWN reply (msg.BotID is
+		// toad's bot ID), never an allowlisted monitoring bot's, so this is
+		// always false in practice here — computed rather than hardcoded so
+		// the rule stays in one place.
+		sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
 		handleTicketRequest(ctx, msg, slackClient, nil, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, ticket.SourceCTA, sentryCorroborated)
 		return
 	}
@@ -107,10 +105,9 @@ func handleMessage(
 
 		slog.Debug("handler: allowlisted bot message, routing to intake", "bot_id", msg.BotID, "channel", channelName)
 		// This message just passed the allowlist check above, so it's the
-		// one case where external corroboration is genuine: the report text
-		// came directly from an allowlisted monitoring bot, not from
-		// human-pasted text or model output.
-		sentryCorroborated := msg.IsBot && slices.Contains(botAllowlist, msg.BotID)
+		// one case where external corroboration is genuine — see
+		// isSentryCorroborated's doc comment (ticketflow.go).
+		sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
 		handleBotIntake(ctx, msg, triageEngine, slackClient, stateManager, channelName, tracker, resolver, investRunner, ticketEngine, investigateSem, sentryCorroborated)
 		return
 	}
@@ -248,13 +245,11 @@ func handleTriggered(
 
 	// sentryCorroborated gates every ticket-identity/automation use of
 	// msg.SentryRefs and the investigation's Findings.SentryIssueIDs below
-	// (see runTriggeredInvestigation's doc comment for the full rule):
-	// external corroboration requires the report to have arrived from an
-	// allowlisted monitoring bot, never from human-pasted text or model
-	// output. This branch is reached for @toad mentions and reaction/keyword
+	// — see isSentryCorroborated's doc comment (ticketflow.go) for the full
+	// rule. This branch is reached for @toad mentions and reaction/keyword
 	// triggers — computed rather than assumed false, since a bot can still
 	// @mention toad directly (handleAppMention sets IsBot from the event).
-	sentryCorroborated := msg.IsBot && slices.Contains(botAllowlist, msg.BotID)
+	sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
 
 	// ESCALATE: triage flagged this as needing a ticket regardless of
 	// category/confidence — route to the same investigate-and-file flow the
@@ -285,16 +280,10 @@ func handleTriggered(
 
 		if outcome.Kind != outcomeFallThrough {
 			slackClient.ClearStatus(msg.Channel, threadTS)
-			// The CTA button is suppressed when the tracker can't actually
-			// create issues (e.g. the default, tracker-less install) — the
-			// findings still post, as plain text, rather than attaching a
-			// button that always errors when clicked.
-			if outcome.Kind == outcomeProposed && ticketEngine.ShouldCreateIssues() {
-				blocks := islack.TicketBlocks(outcome.ReplyText, threadTS)
-				if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, threadTS, outcome.ReplyText, blocks); err != nil {
-					slog.Warn("investigation reply failed", "error", err)
-				}
-			} else if _, err := slackClient.ReplyInThread(msg.Channel, threadTS, outcome.ReplyText); err != nil {
+			// See ReplyWithOptionalCTA's doc comment: the button is
+			// suppressed when the tracker can't actually create issues.
+			showCTA := outcome.Kind == outcomeProposed && ticketEngine.ShouldCreateIssues()
+			if _, err := slackClient.ReplyWithOptionalCTA(msg.Channel, threadTS, outcome.ReplyText, showCTA); err != nil {
 				slog.Warn("investigation reply failed", "error", err)
 			}
 			return
@@ -349,16 +338,11 @@ func handleTriggered(
 	}
 
 	daemonCounters.ribbits.Add(1)
-	// The CTA button is suppressed when the tracker can't actually create
-	// issues (e.g. the default, tracker-less install) — post plain text
-	// instead of a button that always errors when clicked.
-	if (result.Category == "bug" || result.Category == "feature") && ticketEngine.ShouldCreateIssues() {
-		blocks := islack.TicketBlocks(resp.Text, msg.ThreadTS())
-		if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, msg.ThreadTS(), resp.Text, blocks); err != nil {
-			slog.Warn("ribbit reply failed", "error", err)
-		}
-	} else {
-		slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(), resp.Text)
+	// See ReplyWithOptionalCTA's doc comment: the button is suppressed when
+	// the tracker can't actually create issues.
+	showCTA := (result.Category == "bug" || result.Category == "feature") && ticketEngine.ShouldCreateIssues()
+	if _, err := slackClient.ReplyWithOptionalCTA(msg.Channel, msg.ThreadTS(), resp.Text, showCTA); err != nil {
+		slog.Warn("ribbit reply failed", "error", err)
 	}
 	slackClient.React(msg.Channel, msg.Timestamp, "speech_balloon")
 }
@@ -404,12 +388,18 @@ func handlePassive(
 	}
 
 	daemonCounters.ribbits.Add(1)
-	if ticketEngine.ShouldCreateIssues() {
-		blocks := islack.TicketBlocks(resp.Text, msg.ThreadTS())
-		if _, err := slackClient.ReplyInThreadWithBlocks(msg.Channel, msg.Timestamp, resp.Text, blocks); err != nil {
-			slog.Warn("passive ribbit reply failed", "error", err)
-		}
-	} else if _, err := slackClient.ReplyInThread(msg.Channel, msg.Timestamp, resp.Text); err != nil {
+	// NOTE: pre-refactor this branch built its CTA button on msg.ThreadTS()
+	// while posting the reply anchored at msg.Timestamp (the plain-text
+	// branch always used msg.Timestamp too). ReplyWithOptionalCTA uses one
+	// threadTS for both, so this now posts and embeds the button using
+	// msg.Timestamp consistently. Only observable when this passively-
+	// monitored message is itself already a thread reply (ThreadTimestamp
+	// set) — Slack's chat.postMessage normalizes thread_ts to the thread
+	// root regardless of which in-thread ts is passed, so the posted
+	// reply's location is unaffected; the only residual difference is which
+	// exact message the ticket button's later FetchMessage(channel,
+	// threadTS) resolves (the specific reply vs. the thread root).
+	if _, err := slackClient.ReplyWithOptionalCTA(msg.Channel, msg.Timestamp, resp.Text, ticketEngine.ShouldCreateIssues()); err != nil {
 		slog.Warn("passive ribbit reply failed", "error", err)
 	}
 }

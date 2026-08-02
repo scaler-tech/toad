@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/term"
-	"github.com/slack-go/slack"
 	"github.com/spf13/cobra"
 
 	"github.com/scaler-tech/toad/internal/agent"
@@ -210,7 +208,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 	sort.Strings(allowedMCP)
 
-	investRunner := investigation.NewRunner(readOnlyProvider, cfg.Agent.Model, mcpPath, allowedMCP, wrapSync(cfg), repoPaths)
+	investRunner := investigation.NewRunner(readOnlyProvider, cfg.Agent.Model, mcpPath, allowedMCP, SyncRepoNow, repoPaths)
 	ticketEngine := ticket.New(tracker, stateDB, cfg.Ticket, slackClient.GetPermalink)
 
 	// 9. Initialize MCP server if enabled (started after context is created below)
@@ -242,18 +240,11 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			AgentProvider: agentProvider,
 			TriageModel:   cfg.Triage.Model,
 			Propose: func(ctx context.Context, f investigation.Findings, msg digest.Message) error {
-				// External corroboration requires the message to have
-				// arrived from an allowlisted monitoring bot (see
-				// runTriggeredInvestigation's doc comment for the full
-				// rule) — never merely because the digest batched a
+				// See isSentryCorroborated's doc comment (ticketflow.go) for
+				// the full rule — never merely because the digest batched a
 				// message with a Sentry reference in its text.
-				sentryCorroborated := msg.BotID != "" && slices.Contains(cfg.Intake.BotAllowlist, msg.BotID)
-				return proposeFromDigest(ctx, ticketEngine, stateDB, func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
-					if blocks == nil {
-						return slackClient.ReplyInThread(channel, threadTS, text)
-					}
-					return slackClient.ReplyInThreadWithBlocks(channel, threadTS, text, blocks)
-				}, f, msg, sentryCorroborated)
+				sentryCorroborated := isSentryCorroborated(msg.BotID, cfg.Intake.BotAllowlist)
+				return proposeFromDigest(ctx, ticketEngine, stateDB, slackClient.ReplyWithOptionalCTA, f, msg, sentryCorroborated)
 			},
 			Notify: func(channel, threadTS, text string) {
 				slackClient.ReplyInThread(channel, threadTS, text)
@@ -321,20 +312,12 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 					text += "\n\n_Tag a relevant dev if you'd like someone to take a look._"
 				}
 
-				// Post investigation reply, with a CTA button only when the
-				// tracker can actually create issues — otherwise plain text,
-				// rather than a button that always errors when clicked.
+				// See ReplyWithOptionalCTA's doc comment: the button is
+				// suppressed when the tracker can't actually create issues.
 				replyTS := ""
-				if ticketEngine.ShouldCreateIssues() {
-					blocks := islack.TicketBlocks(text, notice.ThreadTS)
-					if ts, err := slackClient.ReplyInThreadWithBlocks(
-						notice.Channel, notice.ThreadTS, text, blocks,
-					); err != nil {
-						slog.Warn("digest investigation reply failed", "error", err)
-					} else {
-						replyTS = ts
-					}
-				} else if ts, err := slackClient.ReplyInThread(notice.Channel, notice.ThreadTS, text); err != nil {
+				if ts, err := slackClient.ReplyWithOptionalCTA(
+					notice.Channel, notice.ThreadTS, text, ticketEngine.ShouldCreateIssues(),
+				); err != nil {
 					slog.Warn("digest investigation reply failed", "error", err)
 				} else {
 					replyTS = ts
@@ -577,28 +560,4 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 
 	return slackErr
-}
-
-// wrapSync adapts SyncRepoNow into an investigation.RepoSyncer for
-// investRunner. cfg is accepted (rather than a bare func(ctx, repo) error)
-// to match the call site's binding signature and leave room for a future
-// per-repo sync policy read from config; SyncRepoNow itself needs nothing
-// beyond the RepoConfig passed per call, so cfg isn't consulted today.
-//
-// On a sync failure, this also flips the goroutine-local staleness flag
-// threaded through ctx by withStaleTracking (ticketflow.go) so the caller
-// can append a one-line staleness caveat to the findings text it posts to
-// Slack — investigation.Runner itself only slog.Warns on a sync failure
-// and otherwise proceeds silently against a possibly-stale checkout (a
-// carried finding from Task 9's review).
-func wrapSync(cfg *config.Config) investigation.RepoSyncer {
-	return func(ctx context.Context, repo config.RepoConfig) error {
-		err := SyncRepoNow(ctx, repo)
-		if err != nil {
-			if stale, ok := ctx.Value(staleFlagKey{}).(*bool); ok {
-				*stale = true
-			}
-		}
-		return err
-	}
 }

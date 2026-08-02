@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/slack-go/slack"
-
 	"github.com/scaler-tech/toad/internal/agent"
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/digest"
@@ -453,13 +451,14 @@ func TestRunTriggeredInvestigation_HumanPastedSentryIDDoesNotAutoFile(t *testing
 
 // Task 9's carried finding: investigation.Runner only slog.Warns on a repo
 // sync failure and otherwise proceeds silently against a possibly-stale
-// checkout. wrapSync (root.go) is supposed to surface that as a one-line
-// staleness caveat on the findings text posted to Slack — this exercises
-// the real wrapSync against a real (non-git) temp dir, so SyncRepoNow's
-// "git fetch" genuinely fails rather than faking the syncer.
+// checkout. Runner.Run is supposed to surface that via the returned
+// Findings.RepoSyncFailed so runInvestigation can append a one-line
+// staleness caveat to the findings text posted to Slack — this exercises
+// the real SyncRepoNow against a real (non-git) temp dir, so its "git fetch"
+// genuinely fails rather than faking the syncer.
 func TestRunInvestigation_AppendsStalenessCaveatOnSyncFailure(t *testing.T) {
 	mockProvider := &agent.MockProvider{RunResult: &agent.RunResult{Result: highConfidenceSentryFindings}}
-	investRunner := investigation.NewRunner(mockProvider, "sonnet", "", nil, wrapSync(&config.Config{}), nil)
+	investRunner := investigation.NewRunner(mockProvider, "sonnet", "", nil, SyncRepoNow, nil)
 	investigateSem := make(chan struct{}, 1)
 	repo := config.RepoConfig{Name: "svc", Path: t.TempDir(), DefaultBranch: "main"} // not a git repo -> fetch fails
 	req := investigation.Request{Text: "x", Repo: &repo, Timeout: time.Minute}
@@ -467,6 +466,9 @@ func TestRunInvestigation_AppendsStalenessCaveatOnSyncFailure(t *testing.T) {
 	findings, err := runInvestigation(context.Background(), investRunner, investigateSem, req)
 	if err != nil {
 		t.Fatalf("runInvestigation: %v", err)
+	}
+	if !findings.RepoSyncFailed {
+		t.Errorf("expected findings.RepoSyncFailed to be true after a failed sync")
 	}
 	if !strings.Contains(findings.Reasoning, "repo sync failed before this investigation") {
 		t.Errorf("expected staleness caveat appended to Reasoning, got %q", findings.Reasoning)
@@ -644,7 +646,7 @@ func TestReuseRecentInvestigation_SkipsInfeasibleFindings(t *testing.T) {
 // client.
 type digestPostCall struct {
 	channel, threadTS, text string
-	blocks                  []slack.Block
+	showCTA                 bool
 }
 
 // (a) A sentry-corroborated, high-confidence finding must auto-file (via
@@ -671,8 +673,8 @@ func TestProposeFromDigest_AutoFilesSentryCorroboratedFinding(t *testing.T) {
 	msg := digest.Message{Channel: "C1", ThreadTS: "100.1", Text: "double refunds", BotID: "B_SENTRY"}
 
 	var calls []digestPostCall
-	post := func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
-		calls = append(calls, digestPostCall{channel, threadTS, text, blocks})
+	post := func(channel, threadTS, text string, showCTA bool) (string, error) {
+		calls = append(calls, digestPostCall{channel, threadTS, text, showCTA})
 		return "999.1", nil
 	}
 
@@ -689,8 +691,8 @@ func TestProposeFromDigest_AutoFilesSentryCorroboratedFinding(t *testing.T) {
 	if !strings.Contains(calls[0].text, "https://linear.app/toad/issue/TOAD-1") {
 		t.Errorf("expected posted notice to contain the filed ticket URL, got %q", calls[0].text)
 	}
-	if calls[0].blocks != nil {
-		t.Errorf("expected a plain reply (no TicketBlocks) for an auto-filed notice, got %d blocks", len(calls[0].blocks))
+	if calls[0].showCTA {
+		t.Errorf("expected a plain reply (no TicketBlocks/CTA) for an auto-filed notice")
 	}
 
 	entry, err := db.GetTicketIndex("sentry:BILLING-42")
@@ -727,8 +729,8 @@ func TestProposeFromDigest_ProposesNonCorroboratedFinding(t *testing.T) {
 	msg := digest.Message{Channel: "C2", ThreadTS: "200.1", Text: "maybe a bug?"}
 
 	var calls []digestPostCall
-	post := func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
-		calls = append(calls, digestPostCall{channel, threadTS, text, blocks})
+	post := func(channel, threadTS, text string, showCTA bool) (string, error) {
+		calls = append(calls, digestPostCall{channel, threadTS, text, showCTA})
 		return "999.2", nil
 	}
 
@@ -742,8 +744,8 @@ func TestProposeFromDigest_ProposesNonCorroboratedFinding(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("expected exactly 1 posted notice, got %d", len(calls))
 	}
-	if len(calls[0].blocks) == 0 {
-		t.Error("expected TicketBlocks to be attached to the proposed notice")
+	if !calls[0].showCTA {
+		t.Error("expected TicketBlocks/CTA to be attached to the proposed notice")
 	}
 	if !strings.Contains(calls[0].text, "Spotted while monitoring") {
 		t.Errorf("expected digest-appropriate copy replacing the v1 :crown: spawn announcement, got %q", calls[0].text)
@@ -809,8 +811,8 @@ func TestDigestFlow_AutoFiledTicketBacklinksInvestigation(t *testing.T) {
 	}
 
 	var calls []digestPostCall
-	post := func(channel, threadTS, text string, blocks []slack.Block) (string, error) {
-		calls = append(calls, digestPostCall{channel, threadTS, text, blocks})
+	post := func(channel, threadTS, text string, showCTA bool) (string, error) {
+		calls = append(calls, digestPostCall{channel, threadTS, text, showCTA})
 		return "999.9", nil
 	}
 

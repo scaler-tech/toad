@@ -68,10 +68,12 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Findings, error) {
 		return nil, errors.New("repo required")
 	}
 
+	syncFailed := false
 	if r.sync != nil {
 		if err := r.sync(ctx, *req.Repo); err != nil {
 			slog.Warn("investigation repo sync failed, continuing with existing checkout",
 				"repo", req.Repo.Name, "error", err)
+			syncFailed = true
 		}
 	} else {
 		slog.Debug("no repo syncer configured, skipping sync", "repo", req.Repo.Name)
@@ -104,6 +106,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Findings, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse investigation findings: %w", err)
 	}
+	findings.RepoSyncFailed = syncFailed
 
 	// ParseFindings only extracts file paths from the parsed JSON's own
 	// problem/root_cause/reasoning fields. The full raw transcript often
