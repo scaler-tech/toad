@@ -65,24 +65,6 @@ func (c *Client) ReplyInThreadWithBlocks(channel, threadTS, fallbackText string,
 	return ts, nil
 }
 
-// UpdateMessageWithBlocks updates an existing message with new blocks.
-func (c *Client) UpdateMessageWithBlocks(channel, timestamp, fallbackText string, blocks []slack.Block) error {
-	if c.pathScrubber != nil {
-		fallbackText = c.pathScrubber(fallbackText)
-	}
-	_, _, _, err := c.api.UpdateMessage(
-		channel,
-		timestamp,
-		slack.MsgOptionText(fallbackText, false),
-		slack.MsgOptionBlocks(blocks...),
-	)
-	if err != nil {
-		slog.Error("failed to update message with blocks", "error", err)
-		return fmt.Errorf("updating message with blocks: %w", err)
-	}
-	return nil
-}
-
 // ReplyInThread posts a message as a thread reply and tracks it as a toad reply.
 func (c *Client) ReplyInThread(channel, threadTS, text string) (string, error) {
 	if c.pathScrubber != nil {
@@ -116,23 +98,6 @@ func (c *Client) React(channel, timestamp, emoji string) error {
 		return fmt.Errorf("adding reaction: %w", err)
 	}
 	return nil
-}
-
-// RemoveReaction removes an emoji reaction from a message. Best-effort.
-func (c *Client) RemoveReaction(channel, timestamp, emoji string) {
-	err := c.api.RemoveReaction(emoji, slack.ItemRef{
-		Channel:   channel,
-		Timestamp: timestamp,
-	})
-	if err != nil && !strings.Contains(err.Error(), "no_reaction") {
-		slog.Debug("failed to remove reaction", "error", err, "emoji", emoji)
-	}
-}
-
-// SwapReaction removes one emoji and adds another on the same message.
-func (c *Client) SwapReaction(channel, timestamp, remove, add string) {
-	c.RemoveReaction(channel, timestamp, remove)
-	c.React(channel, timestamp, add)
 }
 
 // SetStatus shows a native Slack thinking indicator on a thread.
@@ -178,21 +143,4 @@ func (c *Client) GetPermalink(channel, timestamp string) (string, error) {
 		return "", fmt.Errorf("getting permalink: %w", err)
 	}
 	return link, nil
-}
-
-// UpdateMessage edits an existing message (for status updates).
-func (c *Client) UpdateMessage(channel, timestamp, newText string) error {
-	if c.pathScrubber != nil {
-		newText = c.pathScrubber(newText)
-	}
-	_, _, _, err := c.api.UpdateMessage(
-		channel,
-		timestamp,
-		slack.MsgOptionText(newText, false),
-	)
-	if err != nil {
-		slog.Error("failed to update message", "error", err)
-		return fmt.Errorf("updating message: %w", err)
-	}
-	return nil
 }
