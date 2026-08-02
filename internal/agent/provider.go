@@ -33,6 +33,7 @@ type RunOpts struct {
 	AllowedBashCommands []string // bash command prefixes allowed in read-only mode (e.g. ["gh"])
 	MCPConfigPath       string   // path to an MCP config file; emits --mcp-config <path> --strict-mcp-config
 	AllowedMCPTools     []string // MCP tool names appended to --allowedTools (e.g. "mcp__sentry__*")
+	DeniedReadPaths     []string // absolute directory paths the agent may never Read from, regardless of Permissions (e.g. the toad home dir, where the MCP bearer token lives)
 }
 
 // RunResult holds the parsed output of an agent invocation.
@@ -70,4 +71,28 @@ func NewProvider(platform, fallbackEnv string) (Provider, error) {
 	default:
 		return nil, fmt.Errorf("unsupported agent platform: %q", platform)
 	}
+}
+
+// ReadDenyingProvider wraps a Provider and merges a fixed set of
+// DeniedReadPaths into every RunOpts before delegating. It exists so callers
+// that construct a Provider once and hand it to several read-only agent
+// classes (investigations, ribbit) can deny access to a sensitive directory
+// (e.g. the toad home dir, where mcp-config.json and its bearer token live)
+// without threading a new parameter through each of those packages' own
+// RunOpts construction.
+type ReadDenyingProvider struct {
+	Provider
+	DeniedReadPaths []string
+}
+
+// Run merges DeniedReadPaths into opts (preserving any paths the caller
+// already set) before delegating to the wrapped Provider.
+func (p *ReadDenyingProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, error) {
+	if len(p.DeniedReadPaths) > 0 {
+		merged := make([]string, 0, len(opts.DeniedReadPaths)+len(p.DeniedReadPaths))
+		merged = append(merged, opts.DeniedReadPaths...)
+		merged = append(merged, p.DeniedReadPaths...)
+		opts.DeniedReadPaths = merged
+	}
+	return p.Provider.Run(ctx, opts)
 }

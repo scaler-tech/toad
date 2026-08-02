@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -143,7 +144,31 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Initialize issue tracker (before ribbit, which uses it for ticket enrichment)
 	tracker := issuetracker.NewTracker(cfg.IssueTracker)
 
-	ribbitEngine := ribbit.New(agentProvider, cfg, tracker)
+	// Resolve the toad home dir once — it's needed both to write the MCP
+	// config file below and to deny read-only agents access to it (it holds
+	// mcp-config.json and, via AuthTokenEnv-resolved headers, MCP bearer
+	// tokens). A read-only agent (ribbit, investigations) that could Read
+	// arbitrary files would otherwise be able to exfiltrate that token.
+	toadHome, toadHomeErr := toadpath.Home()
+	if toadHomeErr != nil {
+		slog.Warn("resolving toad home failed, investigations/ribbit will run without mcp and without the read-deny guard", "error", toadHomeErr)
+	}
+
+	// readOnlyProvider is handed to every read-only agent class (ribbit,
+	// investigations) instead of the bare agentProvider so buildArgs always
+	// emits a --disallowedTools guard against the toad home dir, regardless
+	// of what each package's own RunOpts construction sets. agentProvider
+	// itself (unwrapped) still goes to triage and the digest engine, whose
+	// runs are PermissionNone (no tool access at all, so nothing to deny).
+	var readOnlyProvider agent.Provider = agentProvider
+	if toadHomeErr == nil {
+		readOnlyProvider = &agent.ReadDenyingProvider{
+			Provider:        agentProvider,
+			DeniedReadPaths: []string{toadHome},
+		}
+	}
+
+	ribbitEngine := ribbit.New(readOnlyProvider, cfg, tracker)
 
 	// Separate concurrency pools: ribbits are fast (seconds), investigations are slow (minutes).
 	// Ribbit pool is generous so Q&A stays responsive even while investigations run.
@@ -165,23 +190,27 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Write the MCP config the investigation agent will run with (e.g. a
 	// Sentry MCP server for pulling issue/Seer detail). WriteMCPConfig
 	// requires its dir to already exist — safe here since state.OpenDB()
-	// above already created the toad home directory. Only the sentry
-	// tools are ever allowed through to the investigation agent, and only
-	// when a "sentry" MCP server is actually configured.
+	// above already created the toad home directory.
 	var mcpPath string
-	if home, err := toadpath.Home(); err != nil {
-		slog.Warn("resolving toad home for mcp config failed, investigations will run without mcp", "error", err)
-	} else if p, err := agent.WriteMCPConfig(home, cfg.Agent.MCPServers); err != nil {
-		slog.Warn("writing mcp config failed, investigations will run without mcp", "error", err)
-	} else {
-		mcpPath = p
-	}
-	var allowedMCP []string
-	if _, ok := cfg.Agent.MCPServers["sentry"]; ok {
-		allowedMCP = []string{"mcp__sentry__*"}
+	if toadHomeErr == nil {
+		if p, err := agent.WriteMCPConfig(toadHome, cfg.Agent.MCPServers); err != nil {
+			slog.Warn("writing mcp config failed, investigations will run without mcp", "error", err)
+		} else {
+			mcpPath = p
+		}
 	}
 
-	investRunner := investigation.NewRunner(agentProvider, cfg.Agent.Model, mcpPath, allowedMCP, wrapSync(cfg), repoPaths)
+	// Build the MCP tool allowlist dynamically from whatever servers are
+	// actually configured (rather than hardcoding "sentry") — every
+	// configured agent.mcp_servers entry gets its own mcp__<name>__*
+	// wildcard. Sorted for deterministic --allowedTools ordering.
+	allowedMCP := make([]string, 0, len(cfg.Agent.MCPServers))
+	for name := range cfg.Agent.MCPServers {
+		allowedMCP = append(allowedMCP, "mcp__"+name+"__*")
+	}
+	sort.Strings(allowedMCP)
+
+	investRunner := investigation.NewRunner(readOnlyProvider, cfg.Agent.Model, mcpPath, allowedMCP, wrapSync(cfg), repoPaths)
 	ticketEngine := ticket.New(tracker, stateDB, cfg.Ticket, slackClient.GetPermalink)
 
 	// 9. Initialize MCP server if enabled (started after context is created below)
