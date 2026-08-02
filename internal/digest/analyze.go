@@ -102,11 +102,11 @@ func (e *Engine) analyze(ctx context.Context, msgs []Message) ([]Opportunity, er
 		repoField = `, "repo": "<name>"`
 	}
 
-	minConf := e.cfg.MinConfidence
-	if minConf <= 0 {
-		minConf = 0.95
+	minConf := 0.95
+	if e.cfg != nil && e.cfg.MinConfidence > 0 {
+		minConf = e.cfg.MinConfidence
 	}
-	if e.cfg.DryRun && e.cfg.CommentInvestigation && minConf > 0.85 {
+	if e.cfg != nil && e.cfg.DryRun && e.cfg.CommentInvestigation && minConf > 0.85 {
 		minConf = 0.85
 	}
 
