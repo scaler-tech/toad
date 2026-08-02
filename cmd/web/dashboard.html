@@ -805,8 +805,16 @@
 
     // Repos & sync
     const repos=cfg.repos||[];
+    const sysNow = d.now || Math.floor(Date.now()/1000);
     let reposHTML = repos.length
-      ? repos.map(r=>`<div class="kv"><span class="mono">${esc(r.name)}</span><span class="val-mono">${esc(r.path)}</span></div>`).join("")
+      ? repos.map(r=>{
+          let syncState;
+          if (r.sync_error) syncState = `<span class="state warn" title="${esc(r.sync_error)}">⚠ sync failing</span>`;
+          else if (r.last_sync_at) syncState = `<span class="state ok">✓ synced ${relTimeAgo(r.last_sync_at, sysNow)}</span>`;
+          else syncState = `<span class="subnote">not yet synced</span>`;
+          return `<div class="kv"><span class="mono">${esc(r.name)}</span><span class="val-mono">${esc(r.path)}</span></div>
+            <div class="kv"><span></span>${syncState}</div>`;
+        }).join("")
       : `<p class="subnote">No repos configured (or daemon offline and no local config).</p>`;
     reposHTML += `<div class="kv" style="margin-top:6px"><span>loaded</span><b>${(d.investigations||[]).length} investigations · ${(d.tickets||[]).length} tickets (last 50 each)</b></div>`;
     $("#sys-repos").innerHTML = reposHTML;
@@ -888,8 +896,18 @@
   const dismissedAlerts = new Set();
   function renderAlerts(d){
     const dm=d.daemon||{};
+    const now = d.now || Math.floor(Date.now()/1000);
     const alertsEl = $("#alerts");
     let html="";
+    if (dm.sync_warning && !dismissedAlerts.has("sync")) {
+      const sw = dm.sync_warning;
+      const lastOk = sw.last_sync_at ? `last synced ${relTimeAgo(sw.last_sync_at, now)}` : "never synced successfully";
+      html += `<div class="alert" data-a="sync">
+        <b>Repo sync failing</b> — <span class="mono">${esc(sw.repo)}</span> ${esc(lastOk)}; investigations run with a staleness caveat
+        <span class="spacer"></span>
+        <button class="dismiss" data-d="sync" aria-label="dismiss">✕</button>
+      </div>`;
+    }
     if (dm.update_available && !dismissedAlerts.has("upd")) {
       // d.auto_update may be absent (e.g. offline payload with no daemon
       // state yet) — treat anything but a literal true as off, same as the

@@ -733,14 +733,31 @@ type DaemonStats struct {
 	MCPHost           string           `json:"mcp_host,omitempty"`
 	MCPPort           int              `json:"mcp_port,omitempty"`
 
-	// Concurrency gauges — placeholders for the dashboard's "Live now" card.
-	// Zero-valued (and omitted) until the daemon's investigate/ribbit
-	// semaphore call sites are wired to populate them; the dashboard treats
-	// their absence as "unknown", not "idle".
+	// Concurrency gauges for the dashboard's "Live now" card. Populated every
+	// 10s (root.go's stats ticker) from the live occupancy/capacity of the
+	// ribbit/investigate semaphore channels.
 	InvestigateSlots    int `json:"investigate_slots,omitempty"`
 	InvestigateInFlight int `json:"investigate_in_flight,omitempty"`
 	RibbitSlots         int `json:"ribbit_slots,omitempty"`
 	RibbitInFlight      int `json:"ribbit_in_flight,omitempty"`
+
+	// RepoSync holds the last known sync outcome per configured repo name,
+	// backing the dashboard's per-repo sync freshness display and its
+	// sync-warning attention-strip alert. Updated by every repo sync attempt
+	// (the periodic background sync and the on-demand pre-investigation sync
+	// alike — see cmd's repoSyncTracker) and snapshotted here alongside the
+	// other gauges. Absent until a sync has been attempted at least once.
+	RepoSync map[string]RepoSyncStatus `json:"repo_sync,omitempty"`
+}
+
+// RepoSyncStatus is the last known outcome of syncing one configured repo's
+// local checkout. LastSyncAt is the most recent *successful* sync; LastError
+// is the most recent failure's message and is cleared on the next success.
+// Both may be zero/empty if no sync has been attempted yet.
+type RepoSyncStatus struct {
+	LastSyncAt time.Time `json:"last_sync_at,omitempty"`
+	LastError  string    `json:"last_error,omitempty"`
+	CheckedAt  time.Time `json:"checked_at,omitempty"`
 }
 
 // WriteDaemonStats upserts the daemon's live stats (single row).

@@ -47,6 +47,13 @@ type ClaudeProvider struct {
 	// throttled, Run retries once with ANTHROPIC_API_KEY set from this
 	// variable's value (at metered API cost) so intake keeps flowing.
 	FallbackAPIKeyEnv string
+
+	// OnSeatFallback, if set, is invoked (synchronously, before the fallback
+	// retry runs) every time a seat-throttle triggers the API-key fallback
+	// path. It exists so cmd/ can count fallback activations (dashboard
+	// metric) without this package importing internal/state — keep it cheap
+	// and non-blocking; Run does not recover from a panic in it.
+	OnSeatFallback func()
 }
 
 func (c *ClaudeProvider) Check() error {
@@ -84,6 +91,9 @@ func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, err
 	}
 
 	slog.Warn("claude seat throttled, retrying via API key", "env", c.FallbackAPIKeyEnv)
+	if c.OnSeatFallback != nil {
+		c.OnSeatFallback()
+	}
 	return c.runOnce(ctx, opts, []string{"ANTHROPIC_API_KEY=" + apiKey})
 }
 

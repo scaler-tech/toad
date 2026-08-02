@@ -231,3 +231,145 @@ func TestApiDataHandler_EmptyDBDegradesGracefully(t *testing.T) {
 		t.Errorf("expected daemon.running=false with no heartbeat written, got %+v", resp.Daemon)
 	}
 }
+
+// TestApiDataHandler_PopulatesConcurrencyGaugesAndSyncStatus is C2's
+// end-to-end check that the gauges/sync fields DaemonStats already carried
+// (written by root.go's stats ticker via state.RepoSyncStatus,
+// concurrencyGauge, etc.) surface correctly through /api/data: the
+// investigate/ribbit slot gauges, the per-repo sync_error/last_sync_at on
+// apiConfig.Repos, and the derived daemon.sync_warning alert field.
+func TestApiDataHandler_PopulatesConcurrencyGaugesAndSyncStatus(t *testing.T) {
+	db := newTestDB(t)
+
+	now := time.Now()
+	if err := db.WriteDaemonStats(&state.DaemonStats{
+		Heartbeat:           now,
+		StartedAt:           now,
+		PID:                 1234,
+		InvestigateSlots:    2,
+		InvestigateInFlight: 1,
+		RibbitSlots:         6,
+		RibbitInFlight:      0,
+		RepoSync: map[string]state.RepoSyncStatus{
+			"app":      {LastSyncAt: now.Add(-4 * time.Minute), CheckedAt: now.Add(-4 * time.Minute)},
+			"platform": {LastError: "fetch failed: network unreachable", CheckedAt: now.Add(-2 * time.Minute)},
+		},
+	}); err != nil {
+		t.Fatalf("WriteDaemonStats: %v", err)
+	}
+
+	cfg := &config.Config{
+		Repos: config.ReposConfig{List: []config.RepoConfig{
+			{Name: "app", Path: "/repos/app"},
+			{Name: "platform", Path: "/repos/platform"},
+		}},
+	}
+	handler := apiDataHandler(db, cfg)
+
+	req := httptest.NewRequest("GET", "/api/data", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status code: got %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp apiResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v, body=%s", err, rec.Body.String())
+	}
+
+	if !resp.Daemon.Running {
+		t.Fatal("expected daemon.running=true with a fresh heartbeat")
+	}
+	if resp.Daemon.InvestigateSlots != 2 || resp.Daemon.InvestigateInFlight != 1 {
+		t.Errorf("investigate gauges: got slots=%d inFlight=%d, want 2,1", resp.Daemon.InvestigateSlots, resp.Daemon.InvestigateInFlight)
+	}
+	if resp.Daemon.RibbitSlots != 6 || resp.Daemon.RibbitInFlight != 0 {
+		t.Errorf("ribbit gauges: got slots=%d inFlight=%d, want 6,0", resp.Daemon.RibbitSlots, resp.Daemon.RibbitInFlight)
+	}
+
+	if resp.Daemon.SyncWarning == nil {
+		t.Fatal("expected sync_warning to surface the failing 'platform' repo")
+	}
+	if resp.Daemon.SyncWarning.Repo != "platform" {
+		t.Errorf("sync_warning.repo = %q, want %q", resp.Daemon.SyncWarning.Repo, "platform")
+	}
+	if resp.Daemon.SyncWarning.Error != "fetch failed: network unreachable" {
+		t.Errorf("sync_warning.error = %q", resp.Daemon.SyncWarning.Error)
+	}
+
+	if resp.Config == nil || len(resp.Config.Repos) != 2 {
+		t.Fatalf("expected 2 repos in config, got %+v", resp.Config)
+	}
+	byName := map[string]apiConfigRepo{}
+	for _, r := range resp.Config.Repos {
+		byName[r.Name] = r
+	}
+	if byName["app"].LastSyncAt == 0 {
+		t.Error("expected 'app' to have a non-zero last_sync_at")
+	}
+	if byName["app"].SyncError != "" {
+		t.Errorf("expected 'app' to have no sync_error, got %q", byName["app"].SyncError)
+	}
+	if byName["platform"].SyncError != "fetch failed: network unreachable" {
+		t.Errorf("platform sync_error = %q", byName["platform"].SyncError)
+	}
+}
+
+// TestApiDataHandler_NoSyncFailuresMeansNoWarning verifies a healthy
+// (all-successful, or never-attempted) RepoSync map produces no
+// sync_warning — the alert must not fire on data that isn't actually a
+// problem.
+func TestApiDataHandler_NoSyncFailuresMeansNoWarning(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	if err := db.WriteDaemonStats(&state.DaemonStats{
+		Heartbeat: now,
+		StartedAt: now,
+		PID:       1234,
+		RepoSync: map[string]state.RepoSyncStatus{
+			"app": {LastSyncAt: now, CheckedAt: now},
+		},
+	}); err != nil {
+		t.Fatalf("WriteDaemonStats: %v", err)
+	}
+
+	handler := apiDataHandler(db, &config.Config{})
+	req := httptest.NewRequest("GET", "/api/data", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	var resp apiResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v, body=%s", err, rec.Body.String())
+	}
+	if resp.Daemon.SyncWarning != nil {
+		t.Errorf("expected no sync_warning when nothing failed, got %+v", resp.Daemon.SyncWarning)
+	}
+}
+
+// TestSyncWarningFor covers the tie-break rule directly: with multiple
+// concurrently-failing repos, the most recently-checked failure wins.
+func TestSyncWarningFor(t *testing.T) {
+	now := time.Now()
+	repoSync := map[string]state.RepoSyncStatus{
+		"older-failure": {LastError: "stale error", CheckedAt: now.Add(-10 * time.Minute)},
+		"newer-failure": {LastError: "fresh error", CheckedAt: now.Add(-1 * time.Minute)},
+		"healthy":       {LastSyncAt: now, CheckedAt: now},
+	}
+	got := syncWarningFor(repoSync)
+	if got == nil {
+		t.Fatal("expected a warning, got nil")
+	}
+	if got.Repo != "newer-failure" {
+		t.Errorf("expected the more recently checked failure to win, got repo=%q", got.Repo)
+	}
+
+	if got := syncWarningFor(nil); got != nil {
+		t.Errorf("expected nil for an empty map, got %+v", got)
+	}
+	if got := syncWarningFor(map[string]state.RepoSyncStatus{"ok": {LastSyncAt: now}}); got != nil {
+		t.Errorf("expected nil when nothing has an error, got %+v", got)
+	}
+}

@@ -163,18 +163,41 @@ type apiDaemon struct {
 	UpdateAvailable  bool             `json:"update_available,omitempty"`
 	LatestVersion    string           `json:"latest_version,omitempty"`
 
-	// Concurrency gauges for the dashboard's "Live now" card. Zero/omitted
-	// until the daemon's investigate/ribbit semaphore call sites (owned by
-	// another lane) are wired to populate the matching DaemonStats fields.
+	// Concurrency gauges for the dashboard's "Live now" card, sourced from
+	// DaemonStats.Investigate/RibbitSlots/InFlight (root.go's stats ticker
+	// populates them from the live occupancy/capacity of the semaphore
+	// channels every 10s). Zero/omitted only if the daemon hasn't written a
+	// heartbeat yet.
 	InvestigateSlots    int `json:"investigate_slots,omitempty"`
 	InvestigateInFlight int `json:"investigate_in_flight,omitempty"`
 	RibbitSlots         int `json:"ribbit_slots,omitempty"`
 	RibbitInFlight      int `json:"ribbit_in_flight,omitempty"`
+
+	// SyncWarning surfaces the most recently failing repo sync (if any) for
+	// the attention-strip alert. nil when every configured repo's last sync
+	// attempt succeeded (or none has been attempted yet).
+	SyncWarning *apiSyncWarning `json:"sync_warning,omitempty"`
+}
+
+// apiSyncWarning names one repo whose most recent background/pre-investigation
+// sync attempt failed, backing the dashboard's "Repo sync failing" alert.
+type apiSyncWarning struct {
+	Repo       string `json:"repo"`
+	LastSyncAt int64  `json:"last_sync_at,omitempty"` // 0 if never successfully synced
+	Error      string `json:"error"`
 }
 
 type apiConfigRepo struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
+
+	// LastSyncAt/SyncError reflect the daemon's live repo-sync tracker
+	// (state.DaemonStats.RepoSync, keyed by repo name). Both zero/absent
+	// when the daemon is offline or hasn't attempted a sync for this repo
+	// yet — the dashboard shows a neutral "not yet synced" state, not a
+	// fabricated success.
+	LastSyncAt int64  `json:"last_sync_at,omitempty"`
+	SyncError  string `json:"sync_error,omitempty"`
 }
 
 type apiConfig struct {
@@ -391,6 +414,29 @@ func buildRangeAggregate(investTimes []time.Time, filings []ticketFilingRow, sin
 	return agg
 }
 
+// syncWarningFor picks the repo sync failure to surface in the attention
+// strip, if any. When multiple repos are currently failing, the most
+// recently-checked failure wins (most likely to still be relevant). Returns
+// nil when repoSync is empty or every tracked repo's last attempt succeeded.
+func syncWarningFor(repoSync map[string]state.RepoSyncStatus) *apiSyncWarning {
+	var worst *apiSyncWarning
+	var worstCheckedAt time.Time
+	for name, s := range repoSync {
+		if s.LastError == "" {
+			continue
+		}
+		if worst != nil && !s.CheckedAt.After(worstCheckedAt) {
+			continue
+		}
+		worst = &apiSyncWarning{Repo: name, Error: s.LastError}
+		if !s.LastSyncAt.IsZero() {
+			worst.LastSyncAt = s.LastSyncAt.Unix()
+		}
+		worstCheckedAt = s.CheckedAt
+	}
+	return worst
+}
+
 func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
@@ -426,6 +472,7 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 			daemon.InvestigateInFlight = daemonStats.InvestigateInFlight
 			daemon.RibbitSlots = daemonStats.RibbitSlots
 			daemon.RibbitInFlight = daemonStats.RibbitInFlight
+			daemon.SyncWarning = syncWarningFor(daemonStats.RepoSync)
 		}
 		if info := checkVersion(); info != nil && info.Available {
 			daemon.UpdateAvailable = true
@@ -524,7 +571,16 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 				DigestComment:  cfg.Digest.CommentInvestigation,
 			}
 			for _, rp := range cfg.Repos.List {
-				ac.Repos = append(ac.Repos, apiConfigRepo{Name: rp.Name, Path: rp.Path})
+				repo := apiConfigRepo{Name: rp.Name, Path: rp.Path}
+				if daemonStats != nil {
+					if sync, ok := daemonStats.RepoSync[rp.Name]; ok {
+						if !sync.LastSyncAt.IsZero() {
+							repo.LastSyncAt = sync.LastSyncAt.Unix()
+						}
+						repo.SyncError = sync.LastError
+					}
+				}
+				ac.Repos = append(ac.Repos, repo)
 			}
 			if cfg.Digest.Enabled {
 				ac.DigestInterval = cfg.Digest.BatchMinutes

@@ -10,6 +10,41 @@ import (
 	"testing"
 )
 
+// TestNewProvider_WiresOnSeatFallback verifies the callback passed to
+// NewProvider ends up on the constructed ClaudeProvider's OnSeatFallback
+// field, since root.go relies on this to observe fallback activations
+// without internal/agent importing internal/state.
+func TestNewProvider_WiresOnSeatFallback(t *testing.T) {
+	called := false
+	p, err := NewProvider("claude", "", func() { called = true })
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	cp, ok := p.(*ClaudeProvider)
+	if !ok {
+		t.Fatalf("expected *ClaudeProvider, got %T", p)
+	}
+	if cp.OnSeatFallback == nil {
+		t.Fatal("expected OnSeatFallback to be wired, got nil")
+	}
+	cp.OnSeatFallback()
+	if !called {
+		t.Error("wired OnSeatFallback did not invoke the provided callback")
+	}
+}
+
+// TestNewProvider_NilOnSeatFallback verifies passing nil (the common case for
+// callers that don't need the hook) doesn't blow up construction or Run.
+func TestNewProvider_NilOnSeatFallback(t *testing.T) {
+	p, err := NewProvider("claude", "", nil)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if _, ok := p.(*ClaudeProvider); !ok {
+		t.Fatalf("expected *ClaudeProvider, got %T", p)
+	}
+}
+
 func TestParseEnvelope_Valid(t *testing.T) {
 	output := []byte(`{"result":"hello world","is_error":false,"session_id":"abc123","total_cost_usd":0.05,"subtype":""}`)
 	r, err := parseEnvelope(output)
@@ -359,6 +394,60 @@ func TestRun_ThrottleFallback_Success(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("second execution env missing ANTHROPIC_API_KEY=sk-ant-test-value, got %v", second.Env)
+	}
+}
+
+// TestRun_ThrottleFallback_InvokesCallback verifies OnSeatFallback fires
+// exactly once, synchronously before the retry, when a seat-throttle engages
+// the API-key fallback — this is the hook cmd/root.go wires to
+// incrementMetric(db, "seat_fallback") for the dashboard's fallback-activation
+// counter (internal/agent must not import internal/state directly).
+func TestRun_ThrottleFallback_InvokesCallback(t *testing.T) {
+	_, fake := newFakeExecCommand(t, []fakeScript{
+		{stderr: "Claude AI usage limit reached, retry later", exitCode: 1},
+		{stdout: `{"result":"done via fallback","is_error":false}`, exitCode: 0},
+	})
+	origExecCommand := execCommand
+	execCommand = fake
+	defer func() { execCommand = origExecCommand }()
+
+	t.Setenv("FAKE_ANTHROPIC_KEY", "sk-ant-test-value")
+
+	var calls int
+	p := &ClaudeProvider{
+		FallbackAPIKeyEnv: "FAKE_ANTHROPIC_KEY",
+		OnSeatFallback:    func() { calls++ },
+	}
+	if _, err := p.Run(context.Background(), RunOpts{Prompt: "do work"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("OnSeatFallback called %d times, want 1", calls)
+	}
+}
+
+// TestRun_NonThrottleError_DoesNotInvokeCallback guards against the callback
+// firing on unrelated failures or errors that never reach the fallback path.
+func TestRun_NonThrottleError_DoesNotInvokeCallback(t *testing.T) {
+	_, fake := newFakeExecCommand(t, []fakeScript{
+		{stderr: "something unrelated broke", exitCode: 1},
+	})
+	origExecCommand := execCommand
+	execCommand = fake
+	defer func() { execCommand = origExecCommand }()
+
+	t.Setenv("FAKE_ANTHROPIC_KEY", "sk-ant-test-value")
+
+	var calls int
+	p := &ClaudeProvider{
+		FallbackAPIKeyEnv: "FAKE_ANTHROPIC_KEY",
+		OnSeatFallback:    func() { calls++ },
+	}
+	if _, err := p.Run(context.Background(), RunOpts{Prompt: "do work"}); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if calls != 0 {
+		t.Errorf("OnSeatFallback called %d times, want 0 for a non-throttle error", calls)
 	}
 }
 

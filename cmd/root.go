@@ -102,8 +102,19 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		slog.Warn("update available", "current", info.Current, "latest", info.Latest)
 	}
 
+	// 6. Initialize components — opened before the agent provider below so
+	// its seat-fallback callback (which records a dashboard metric) has a DB
+	// to write to.
+	stateDB, err := state.OpenDB()
+	if err != nil {
+		return fmt.Errorf("opening state db: %w", err)
+	}
+	defer stateDB.Close()
+
 	// 6. Check required CLI tools
-	agentProvider, err := agent.NewProvider(cfg.Agent.Platform, cfg.Agent.FallbackAPIKeyEnv)
+	agentProvider, err := agent.NewProvider(cfg.Agent.Platform, cfg.Agent.FallbackAPIKeyEnv, func() {
+		incrementMetric(stateDB, "seat_fallback")
+	})
 	if err != nil {
 		return fmt.Errorf("agent config: %w", err)
 	}
@@ -114,13 +125,6 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("vcs config: %w", err)
 	}
-
-	// 6. Initialize components
-	stateDB, err := state.OpenDB()
-	if err != nil {
-		return fmt.Errorf("opening state db: %w", err)
-	}
-	defer stateDB.Close()
 
 	// Recover any stale runs from a previous crash
 	recovery, err := state.RecoverOnStartup(stateDB)
@@ -208,7 +212,14 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 	sort.Strings(allowedMCP)
 
-	investRunner := investigation.NewRunner(readOnlyProvider, cfg.Agent.Model, mcpPath, allowedMCP, SyncRepoNow, repoPaths)
+	// repoSync tracks the outcome of every repo sync attempt (this
+	// pre-investigation sync and the periodic background sync below) so the
+	// dashboard can show per-repo freshness and a sync-warning alert. See its
+	// doc comment (helpers.go).
+	repoSync := newRepoSyncTracker()
+	trackedSyncRepoNow := repoSync.wrap(SyncRepoNow)
+
+	investRunner := investigation.NewRunner(readOnlyProvider, cfg.Agent.Model, mcpPath, allowedMCP, investigation.RepoSyncer(trackedSyncRepoNow), repoPaths)
 	ticketEngine := ticket.New(tracker, stateDB, cfg.Ticket, slackClient.GetPermalink)
 
 	// flowDeps bundles the six dependencies every investigate-and-file entry
@@ -427,7 +438,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Start periodic repo sync if enabled
 	if cfg.Repos.SyncMinutes > 0 {
 		interval := time.Duration(cfg.Repos.SyncMinutes) * time.Minute
-		go syncRepos(ctx, cfg.Repos.List, interval)
+		go syncRepos(ctx, cfg.Repos.List, interval, trackedSyncRepoNow)
 	}
 
 	// Start digest engine (Toad King) if enabled
@@ -509,7 +520,10 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 				MCPEnabled:        cfg.MCP.Enabled,
 				MCPHost:           cfg.MCP.Host,
 				MCPPort:           cfg.MCP.Port,
+				RepoSync:          repoSync.snapshot(),
 			}
+			ds.InvestigateSlots, ds.InvestigateInFlight = concurrencyGauge(investigateSem)
+			ds.RibbitSlots, ds.RibbitInFlight = concurrencyGauge(ribbitSem)
 			if digestEngine != nil {
 				dstats := digestEngine.Stats()
 				ds.DigestBuffer = dstats.BufferSize

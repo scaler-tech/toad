@@ -6,10 +6,12 @@ import (
 	"log/slog"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/vcs"
 )
 
@@ -76,32 +78,127 @@ func enrichWithIssueDetails(ctx context.Context, tracker issuetracker.Tracker, t
 	return append(threadContext, enriched...), fetched
 }
 
+// repoSyncer matches SyncRepoNow's signature (and investigation.RepoSyncer's)
+// without importing internal/investigation here just for the type.
+type repoSyncer func(ctx context.Context, repo config.RepoConfig) error
+
 // syncRepos periodically fetches and fast-forward pulls all configured repos.
 // This keeps the local checkout fresh for ribbit (read-only Q&A) and digest
-// investigations, which operate on the working tree without fetching.
-func syncRepos(ctx context.Context, repos []config.RepoConfig, interval time.Duration) {
+// investigations, which operate on the working tree without fetching. sync is
+// normally a repoSyncTracker-wrapped SyncRepoNow (see root.go) so every
+// attempt's outcome is recorded for the dashboard.
+func syncRepos(ctx context.Context, repos []config.RepoConfig, interval time.Duration, sync repoSyncer) {
 	slog.Info("repo sync started", "interval", interval, "repos", len(repos))
 
 	// Run immediately on startup, then on ticker.
-	syncAll(ctx, repos)
+	syncAll(ctx, repos, sync)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			syncAll(ctx, repos)
+			syncAll(ctx, repos, sync)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func syncAll(ctx context.Context, repos []config.RepoConfig) {
+func syncAll(ctx context.Context, repos []config.RepoConfig, sync repoSyncer) {
 	for _, repo := range repos {
-		if err := SyncRepoNow(ctx, repo); err != nil {
+		if err := sync(ctx, repo); err != nil {
 			slog.Warn("repo sync failed", "repo", repo.Name, "error", err)
 		}
+	}
+}
+
+// repoSyncTracker records the outcome of every repo sync attempt (periodic
+// background sync and the on-demand pre-investigation sync alike, since both
+// ultimately call SyncRepoNow) keyed by repo name, and snapshots into
+// state.DaemonStats.RepoSync every 10s (root.go's stats ticker) for the
+// dashboard's per-repo freshness display and sync-warning alert. Safe for
+// concurrent use — sync attempts and the stats ticker run on different
+// goroutines.
+type repoSyncTracker struct {
+	mu     sync.Mutex
+	status map[string]state.RepoSyncStatus
+}
+
+func newRepoSyncTracker() *repoSyncTracker {
+	return &repoSyncTracker{status: make(map[string]state.RepoSyncStatus)}
+}
+
+// record updates the tracked status for repo after one sync attempt. err nil
+// means success (refreshes LastSyncAt, clears LastError); non-nil means
+// failure (LastError set, LastSyncAt left at its previous value).
+func (t *repoSyncTracker) record(repo string, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st := t.status[repo]
+	st.CheckedAt = time.Now()
+	if err != nil {
+		st.LastError = err.Error()
+	} else {
+		st.LastSyncAt = st.CheckedAt
+		st.LastError = ""
+	}
+	t.status[repo] = st
+}
+
+// snapshot returns a copy of the tracked statuses, safe to embed in a
+// state.DaemonStats for JSON marshaling without holding t's lock. Returns nil
+// (which marshals as an absent/omitted field, matching the "no sync
+// attempted yet" case) when nothing has been recorded.
+func (t *repoSyncTracker) snapshot() map[string]state.RepoSyncStatus {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.status) == 0 {
+		return nil
+	}
+	out := make(map[string]state.RepoSyncStatus, len(t.status))
+	for k, v := range t.status {
+		out[k] = v
+	}
+	return out
+}
+
+// wrap adapts a repoSyncer (normally SyncRepoNow) to record every attempt's
+// outcome in t before returning it to the caller unchanged.
+func (t *repoSyncTracker) wrap(sync repoSyncer) repoSyncer {
+	return func(ctx context.Context, repo config.RepoConfig) error {
+		err := sync(ctx, repo)
+		t.record(repo.Name, err)
+		return err
+	}
+}
+
+// concurrencyGauge reports the current occupancy of a counting semaphore —
+// a buffered channel used with the acquire-then-release (send-then-receive)
+// pattern, as ribbitSem/investigateSem are throughout cmd/. slots is the
+// channel's fixed capacity; inFlight is how many slots are currently held.
+// Reading len/cap on a channel concurrently with other goroutines sending to
+// or receiving from it is well-defined and race-free (they're simple field
+// reads on the runtime's channel header), so this needs no extra locking —
+// deliberately simpler than a parallel atomic-counter registry, which would
+// risk drifting from the semaphore's actual occupancy and wouldn't cover the
+// MCP ask tool's use of the same ribbitSem instance (internal/mcp/tools.go)
+// without new cross-package plumbing.
+func concurrencyGauge(sem chan struct{}) (slots, inFlight int) {
+	return cap(sem), len(sem)
+}
+
+// incrementMetric bumps a dashboard trend-series counter (see
+// state.DB.IncrementMetric), tolerating a nil db (in-memory
+// state.NewManager(), used by tests/CLI one-shots with no persistent DB) and
+// any write failure — these are best-effort telemetry and must never affect
+// the main flow.
+func incrementMetric(db *state.DB, name string) {
+	if db == nil {
+		return
+	}
+	if err := db.IncrementMetric(name, time.Now()); err != nil {
+		slog.Debug("metric increment failed", "metric", name, "error", err)
 	}
 }
 

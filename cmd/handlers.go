@@ -12,6 +12,7 @@ import (
 	"github.com/scaler-tech/toad/internal/issuetracker"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
+	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/ticket"
 	"github.com/scaler-tech/toad/internal/triage"
 )
@@ -28,6 +29,12 @@ func handleMessage(
 	repoPaths map[string]string,
 	botAllowlist []string,
 ) {
+	// "messages seen" for the dashboard's Intake pipeline stage/sparkline —
+	// every message toad's handler dispatches on, regardless of what happens
+	// next (triaged, filtered, routed to digest, etc.). Best-effort; never
+	// blocks the flow (see incrementMetric's doc comment).
+	incrementMetric(deps.stateManager.DB(), "intake")
+
 	// Resolve channel name for context
 	channelName := slackClient.ResolveChannelName(msg.Channel)
 
@@ -123,7 +130,7 @@ func handleMessage(
 	}
 
 	slog.Debug("handler: passive path", "channel", channelName, "user", msg.User)
-	handlePassive(ctx, msg, triageEngine, ribbitEngine, slackClient, channelName, deps.resolver, repoPaths, deps.ticketEngine)
+	handlePassive(ctx, msg, triageEngine, ribbitEngine, slackClient, channelName, deps.resolver, repoPaths, deps.ticketEngine, deps.stateManager.DB())
 }
 
 func handleTriggered(
@@ -333,6 +340,7 @@ func handleTriggered(
 	}
 
 	daemonCounters.ribbits.Add(1)
+	incrementMetric(deps.stateManager.DB(), "qa")
 	// See ReplyWithOptionalCTA's doc comment: the button is suppressed when
 	// the tracker can't actually create issues.
 	showCTA := (result.Category == "bug" || result.Category == "feature") && deps.ticketEngine.ShouldCreateIssues()
@@ -352,6 +360,7 @@ func handlePassive(
 	resolver *config.Resolver,
 	repoPaths map[string]string,
 	ticketEngine *ticket.Engine,
+	db *state.DB,
 ) {
 	result, err := triageEngine.Classify(ctx, msg, channelName)
 	if err != nil {
@@ -383,6 +392,7 @@ func handlePassive(
 	}
 
 	daemonCounters.ribbits.Add(1)
+	incrementMetric(db, "qa")
 	// NOTE: pre-refactor this branch built its CTA button on msg.ThreadTS()
 	// while posting the reply anchored at msg.Timestamp (the plain-text
 	// branch always used msg.Timestamp too). ReplyWithOptionalCTA uses one

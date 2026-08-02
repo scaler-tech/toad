@@ -56,11 +56,14 @@ type Provider interface {
 // NewProvider returns a Provider for the given platform name. fallbackEnv
 // names an environment variable holding an Anthropic API key to fall back to
 // when the subscription seat is throttled (Claude platform only); pass "" to
-// disable the fallback.
-func NewProvider(platform, fallbackEnv string) (Provider, error) {
+// disable the fallback. onSeatFallback, if non-nil, is wired to the
+// resulting provider's seat-throttle fallback hook (Claude platform only;
+// harmlessly ignored by other platforms) — pass nil if the caller doesn't
+// need to observe fallback activations.
+func NewProvider(platform, fallbackEnv string, onSeatFallback func()) (Provider, error) {
 	switch strings.ToLower(platform) {
 	case "claude", "":
-		return &ClaudeProvider{FallbackAPIKeyEnv: fallbackEnv}, nil
+		return &ClaudeProvider{FallbackAPIKeyEnv: fallbackEnv, OnSeatFallback: onSeatFallback}, nil
 	default:
 		return nil, fmt.Errorf("unsupported agent platform: %q", platform)
 	}
