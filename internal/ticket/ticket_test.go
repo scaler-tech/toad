@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/investigation"
@@ -453,5 +454,114 @@ func TestFileOrUpdate_PermalinkErrorIsBestEffort(t *testing.T) {
 	}
 	if result.AlreadyExisted {
 		t.Errorf("AlreadyExisted = true, want false")
+	}
+}
+
+// TestFileOrUpdate_ReobserveHitPostCommentErrorPropagates covers reobserve's
+// (the hit-path helper inside FileOrUpdate) DIFFERENT-from-cmd-package
+// semantics: unlike cmd/ticketflow.go's preInvestigationTicketCheck, which
+// swallows a PostComment failure during its own idempotency pre-check and
+// logs it, reobserve here PROPAGATES the error wrapped with "posting
+// re-observation comment on %s: %w" — this is what makes FileOrUpdate return
+// an error on this path, which callers (e.g. fileOrProposeFromFindings) turn
+// into outcomeFilingFailed. Retires fakeTracker.postErr, previously defined
+// but never set by any test in this file.
+func TestFileOrUpdate_ReobserveHitPostCommentErrorPropagates(t *testing.T) {
+	tracker := &fakeTracker{nextID: "TOAD-7"}
+	store := newFakeStore()
+	e := New(tracker, store, config.TicketConfig{}, nil)
+
+	// Seed the index directly so FileOrUpdate takes the hit (reobserve)
+	// branch on its very first call, rather than needing two calls.
+	seeded := &state.TicketIndexEntry{
+		ExternalKey: "sentry:BILLING-2291",
+		IssueID:     "TOAD-EXISTING",
+		IssueURL:    "https://linear.app/toad/issue/TOAD-EXISTING",
+		Source:      string(SourceAuto),
+		CreatedAt:   time.Now(),
+		LastSeenAt:  time.Now(),
+	}
+	if err := store.UpsertTicketIndex(seeded); err != nil {
+		t.Fatalf("seeding ticket index: %v", err)
+	}
+
+	wantErr := errors.New("linear comment api unavailable")
+	tracker.postErr = wantErr
+
+	f := investigation.Findings{
+		Problem:        "Export fails again for empty accounts.",
+		SentryIssueIDs: []string{"BILLING-2291"},
+	}
+
+	result, err := e.FileOrUpdate(context.Background(), f, "C123", "1722.0001", "inv-2", SourceDigest)
+	if err == nil {
+		t.Fatal("expected FileOrUpdate to propagate the PostComment error, got nil")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("expected the returned error to wrap postErr (errors.Is), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "posting re-observation comment on TOAD-EXISTING") {
+		t.Errorf("expected error to describe the re-observation-comment failure point, got %q", err.Error())
+	}
+	if result != nil {
+		t.Errorf("expected nil result on error, got %+v", result)
+	}
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected no CreateIssue call on the re-observe (hit) path, got %d", len(tracker.createCalls))
+	}
+
+	// The index entry must be left as seeded — the failed comment must not
+	// have been followed by a bump to LastSeenAt (UpsertTicketIndex happens
+	// AFTER PostComment in reobserve, so it's never reached on this error).
+	entry, err := store.GetTicketIndex("sentry:BILLING-2291")
+	if err != nil {
+		t.Fatalf("GetTicketIndex() error = %v", err)
+	}
+	if entry.IssueID != "TOAD-EXISTING" {
+		t.Errorf("entry.IssueID = %q, want unchanged TOAD-EXISTING", entry.IssueID)
+	}
+}
+
+// TestFileOrUpdate_CreateIssueErrorPropagates covers the miss-path sibling of
+// the reobserve test above: file()'s CreateIssue failure is wrapped with
+// "creating issue for %s: %w" and propagated out of FileOrUpdate. Retires
+// fakeTracker.createErr, previously defined but never set by any test in
+// this file.
+func TestFileOrUpdate_CreateIssueErrorPropagates(t *testing.T) {
+	tracker := &fakeTracker{}
+	store := newFakeStore()
+	e := New(tracker, store, config.TicketConfig{}, nil)
+
+	wantErr := errors.New("linear api unavailable")
+	tracker.createErr = wantErr
+
+	f := investigation.Findings{
+		Problem:        "Export fails for empty accounts.",
+		SentryIssueIDs: []string{"BILLING-3001"},
+	}
+
+	result, err := e.FileOrUpdate(context.Background(), f, "C1", "1.0", "inv-1", SourceAuto)
+	if err == nil {
+		t.Fatal("expected FileOrUpdate to propagate the CreateIssue error, got nil")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("expected the returned error to wrap createErr (errors.Is), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "creating issue for sentry:BILLING-3001") {
+		t.Errorf("expected error to describe the create-issue failure point, got %q", err.Error())
+	}
+	if result != nil {
+		t.Errorf("expected nil result on error, got %+v", result)
+	}
+	if len(tracker.commentCalls) != 0 {
+		t.Errorf("expected no PostComment call on the create (miss) path, got %d", len(tracker.commentCalls))
+	}
+
+	entry, err := store.GetTicketIndex("sentry:BILLING-3001")
+	if err != nil {
+		t.Fatalf("GetTicketIndex() error = %v", err)
+	}
+	if entry != nil {
+		t.Errorf("expected no ticket index entry to be created on a CreateIssue failure, got %+v", entry)
 	}
 }
