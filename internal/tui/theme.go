@@ -27,9 +27,6 @@ var (
 			Foreground(ColorPrimary).
 			Bold(true)
 
-	SubtitleStyle = lipgloss.NewStyle().
-			Foreground(ColorDim)
-
 	SelectedStyle = lipgloss.NewStyle().
 			Foreground(ColorPrimary).
 			Bold(true)
@@ -50,9 +47,6 @@ var (
 
 	HelpStyle = lipgloss.NewStyle().
 			Foreground(ColorDim)
-
-	BorderStyle = lipgloss.NewStyle().
-			Foreground(ColorBorder)
 
 	AccentStyle = lipgloss.NewStyle().
 			Foreground(ColorAccent)
@@ -82,36 +76,5 @@ func RenderProgressBar(steps []string, current int) string {
 			b.WriteString(DimStyle.Render("  →  "))
 		}
 	}
-	return b.String()
-}
-
-// RenderFrame wraps content in a bordered frame with a label.
-func RenderFrame(content string, width int, label string) string {
-	var b strings.Builder
-	pad := "  "
-
-	// Top border with label
-	labelStr := fmt.Sprintf(" %s ", label)
-	leftLen := 2
-	rightLen := width - leftLen - len(labelStr)
-	if rightLen < 2 {
-		rightLen = 2
-	}
-	b.WriteString(pad)
-	b.WriteString(BorderStyle.Render(strings.Repeat("─", leftLen) + labelStr + strings.Repeat("─", rightLen)))
-	b.WriteString("\n")
-
-	// Content
-	for _, line := range strings.Split(content, "\n") {
-		b.WriteString(pad)
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-
-	// Bottom border
-	b.WriteString(pad)
-	b.WriteString(BorderStyle.Render(strings.Repeat("─", width)))
-	b.WriteString("\n")
-
 	return b.String()
 }

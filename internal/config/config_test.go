@@ -26,9 +26,6 @@ func TestDefaults(t *testing.T) {
 	if cfg.Limits.TimeoutMinutes != 10 {
 		t.Errorf("default timeout should be 10, got %d", cfg.Limits.TimeoutMinutes)
 	}
-	if cfg.Limits.MaxRetries != 1 {
-		t.Errorf("default max_retries should be 1, got %d", cfg.Limits.MaxRetries)
-	}
 	if cfg.Triage.Model != "haiku" {
 		t.Errorf("default triage model should be 'haiku', got %q", cfg.Triage.Model)
 	}
@@ -488,8 +485,8 @@ personality:
 // TestYAMLOverlay_RemovedKeysIgnored verifies that a config file containing
 // several keys deleted from Config/RepoConfig in the F-C config sweep (dead
 // tadpole/worktree-era fields: limits.max_turns, limits.max_files_changed,
-// limits.worktree_ttl_hours, triage.auto_spawn, digest.investigate_max_turns,
-// repos[].test_command/lint_command/auto_merge/pr_labels/services) still
+// limits.max_retries, limits.worktree_ttl_hours, triage.auto_spawn,
+// digest.investigate_max_turns, repos[].test_command/lint_command/auto_merge/pr_labels/services) still
 // loads without error — yaml.v3 silently ignores unknown keys during
 // unmarshal, so operators upgrading an old .toad.yaml don't hit a hard
 // failure at startup.
@@ -515,6 +512,7 @@ repos:
 limits:
   max_turns: 30
   max_files_changed: 5
+  max_retries: 1
   max_review_rounds: 3
   max_ci_fix_rounds: 2
   review_bots: ["greptile[bot]"]

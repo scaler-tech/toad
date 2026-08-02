@@ -1,13 +1,19 @@
 # VCS Providers
 
-Toad uses a `Provider` interface for version control platform operations — creating PRs, checking CI status, reading review comments, and merging. Each repo can use a different provider via per-repo `vcs:` config overrides.
+Toad v2 dropped tadpole coding/shipping in favor of an investigation agent that
+files Linear tickets. VCS involvement shrank accordingly: the `Provider`
+interface is now a thin, read-only abstraction used to sanity-check that the
+platform CLI is available and to suggest reviewers for investigation output.
+It no longer manages PR/MR lifecycle (creation, merging, CI status, review
+comments, bot-PR cleanup) — that logic belonged to the tadpole/reviewer
+subsystems, which no longer exist.
 
 ## Current Providers
 
 | Provider | Platform key | CLI tool | Status |
 |----------|-------------|----------|--------|
 | GitHub | `github` | `gh` | Implemented |
-| GitLab | `gitlab` | `glab` | Implemented (including self-hosted) |
+| GitLab | `gitlab` | `glab` | Implemented (including self-hosted); `GetSuggestedReviewers` is a stub returning `nil` |
 
 ## Possible Additions
 
@@ -22,45 +28,23 @@ Toad uses a `Provider` interface for version control platform operations — cre
 ```go
 type Provider interface {
     Check() error
-    CreatePR(ctx context.Context, opts CreatePROpts) (string, error)
-    EnableAutoMerge(ctx context.Context, repoPath, branch string) error
-    GetPRState(ctx context.Context, prNumber int, repoPath string) (string, error)
-    GetMergeability(ctx context.Context, prNumber int, repoPath string) (string, error)
-    GetCIStatus(ctx context.Context, prNumber int, repoPath string) (*CIStatus, error)
-    GetCIFailureLogs(ctx context.Context, failedRunIDs []string, repoPath string) string
-    GetPRComments(ctx context.Context, prNumber int, repoPath string) ([]PRComment, error)
-    AddCommentReaction(ctx context.Context, prNumber, commentID int, source, reaction, repoPath string) error
-    ListBotPRs(ctx context.Context, branch, repoPath string) ([]int, error)
-    MergePR(ctx context.Context, prNumber int, repoPath string) error
-    ExtractPRNumber(prURL string) (int, error)
-    ExtractRunID(detailsURL string) string
-    PRNoun() string
+    GetSuggestedReviewers(ctx context.Context, repoPath string, files []string, botNames map[string]bool, max int) []string
 }
 ```
 
-This is the largest provider interface in Toad (14 methods) because the PR review watcher needs deep VCS integration. Here's what each group does:
+**`Check`** verifies the platform CLI tool is installed and in `PATH`. Called once per unique provider config at `Resolver` construction time (preflight-style fail-fast).
 
-**Core PR lifecycle:** `CreatePR`, `EnableAutoMerge`, `MergePR`, `PRNoun`
-
-**PR state inspection:** `GetPRState`, `GetMergeability` — used by the reviewer to detect merged/closed PRs and merge conflicts
-
-**CI integration:** `GetCIStatus`, `GetCIFailureLogs`, `ExtractRunID` — used by the reviewer to detect CI failures and spawn fix tadpoles with failure logs
-
-**Review comments:** `GetPRComments`, `AddCommentReaction` — used by the reviewer to read human feedback and react when fixes are applied
-
-**Bot PR management:** `ListBotPRs` — used to find and auto-merge bot-authored PRs (e.g., Renovate) targeting toad branches
-
-**URL parsing:** `ExtractPRNumber` — used to extract PR numbers from URLs returned by `CreatePR`
+**`GetSuggestedReviewers`** looks at recent git history for a set of files and returns up to `max` login handles of likely owners, excluding bots. It's used to enrich investigation output/Linear tickets with "who should look at this" signal — no PR is created or required.
 
 ## Architecture: Resolver Pattern
 
-Unlike the agent and issue tracker (one instance per daemon), VCS uses a `Resolver` because each repo can have a different provider:
+VCS uses a `Resolver` because each repo can have a different provider:
 
 ```go
 type Resolver func(repoPath string) Provider
 ```
 
-`NewResolver` pre-builds providers from per-repo configs, deduplicates identical configs to share instances, and Check()-s each unique provider once at startup.
+`NewResolver` pre-builds providers from per-repo configs, deduplicates identical configs to share instances, and `Check()`-s each unique provider once at startup.
 
 Config example with per-repo overrides:
 ```yaml
@@ -82,7 +66,7 @@ repos:
 
 ### 1. Create the provider file
 
-Create `internal/vcs/<name>.go` implementing all 14 `Provider` methods. Use `github.go` or `gitlab.go` as reference — they follow the same pattern of shelling out to a CLI tool and parsing JSON output.
+Create `internal/vcs/<name>.go` implementing both `Provider` methods. Use `github.go` or `gitlab.go` as reference.
 
 ```go
 type BitbucketProvider struct {
@@ -93,11 +77,10 @@ func (b *BitbucketProvider) Check() error {
     // Verify CLI tool is installed
 }
 
-func (b *BitbucketProvider) CreatePR(ctx context.Context, opts CreatePROpts) (string, error) {
-    // Shell out to CLI or REST API
+func (b *BitbucketProvider) GetSuggestedReviewers(ctx context.Context, repoPath string, files []string, botNames map[string]bool, max int) []string {
+    // Walk recent commit history per file and rank contributors, or
+    // return nil if not implemented yet (see GitLabProvider's stub).
 }
-
-// ... implement remaining 12 methods
 ```
 
 ### 2. Register in the factory
@@ -119,17 +102,10 @@ validPlatforms := map[string]bool{"github": true, "gitlab": true, "bitbucket": t
 
 ### 4. Write tests
 
-See `github_test.go` / `gitlab_test.go` for the pattern. Key test areas:
-- PR creation with labels
-- CI status parsing
-- Comment parsing with user types
-- URL extraction (PR numbers, run IDs)
-- `PRNoun()` return value
+`resolver_test.go` covers `Resolver`/`NewResolver`/`configKey` and is provider-agnostic (skips if the relevant CLI isn't installed). Add provider-specific tests alongside your new file if `GetSuggestedReviewers` has real logic worth covering (see `github.go`'s scoring-by-file-specificity approach).
 
 ## Implementation Notes
 
 - Both existing providers shell out to their respective CLI tools (`gh`, `glab`) rather than using REST APIs directly. This keeps auth simple — users configure the CLI tool once, and Toad inherits the credentials.
-- `GetCIFailureLogs` truncates output to a reasonable size (included in retry prompts for fix tadpoles). Keep log output practical — a few hundred lines max.
-- `PRNoun()` returns `"PR"` for GitHub and `"MR"` for GitLab. Used in user-facing Slack messages.
-- `repoPath` is passed to most methods so the CLI tool runs in the correct repo context (`cmd.Dir`).
-- The `Source` field on `PRComment` (`"review"` or `"issue"`) is GitHub-specific — it determines which API endpoint to use for reactions. New providers may not need this distinction.
+- `repoPath` is passed to `GetSuggestedReviewers` so the CLI/git commands run in the correct repo context (`cmd.Dir`).
+- `botNames` lets callers exclude known bot accounts (e.g. Renovate, Dependabot) from suggested-reviewer results.

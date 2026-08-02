@@ -20,8 +20,39 @@ type Result struct {
 // Run executes all preflight checks and returns errors for failures.
 func Run(cfg *config.Config) []Result {
 	var results []Result
-	results = append(results, checkGH()...)
+	results = append(results, checkVCS(cfg)...)
 	results = append(results, checkRepos(cfg.Repos.List)...)
+	return results
+}
+
+// checkVCS runs gh/glab CLI auth checks only for platforms actually in use
+// across the global VCS config and any per-repo overrides.
+func checkVCS(cfg *config.Config) []Result {
+	var results []Result
+
+	needsGitHub, needsGitLab := false, false
+	switch strings.ToLower(config.ResolvedVCS(nil, cfg.VCS).Platform) {
+	case "gitlab":
+		needsGitLab = true
+	default:
+		needsGitHub = true
+	}
+	for _, r := range cfg.Repos.List {
+		switch strings.ToLower(config.ResolvedVCS(&r, cfg.VCS).Platform) {
+		case "gitlab":
+			needsGitLab = true
+		default:
+			needsGitHub = true
+		}
+	}
+
+	if needsGitHub {
+		results = append(results, checkGH()...)
+	}
+	if needsGitLab {
+		results = append(results, checkGlab()...)
+	}
+
 	return results
 }
 
@@ -38,6 +69,24 @@ func checkGH() []Result {
 		})
 	} else {
 		results = append(results, Result{Name: "gh auth", OK: true})
+	}
+
+	return results
+}
+
+func checkGlab() []Result {
+	var results []Result
+
+	// Check glab is installed and authenticated
+	out, err := exec.Command("glab", "auth", "status").CombinedOutput()
+	if err != nil {
+		results = append(results, Result{
+			Name:   "glab auth",
+			OK:     false,
+			Detail: fmt.Sprintf("glab auth status failed: %s", strings.TrimSpace(string(out))),
+		})
+	} else {
+		results = append(results, Result{Name: "glab auth", OK: true})
 	}
 
 	return results

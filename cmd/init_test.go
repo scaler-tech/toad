@@ -30,7 +30,6 @@ func TestRenderConfig(t *testing.T) {
 		Limits: limitsTemplateData{
 			MaxConcurrent:  2,
 			TimeoutMinutes: 10,
-			MaxRetries:     1,
 		},
 		Triage: triageTemplateData{Model: "haiku"},
 		Agent:  agentTemplateData{Model: "sonnet"},
@@ -98,7 +97,7 @@ func TestRenderConfig_NoChannels(t *testing.T) {
 		Repos: []repoTemplateData{
 			{Name: "app", Path: "/app", DefaultBranch: "main"},
 		},
-		Limits: limitsTemplateData{MaxConcurrent: 2, TimeoutMinutes: 10, MaxRetries: 1},
+		Limits: limitsTemplateData{MaxConcurrent: 2, TimeoutMinutes: 10},
 		Triage: triageTemplateData{Model: "haiku"},
 		Agent:  agentTemplateData{Model: "sonnet"},
 		Digest: digestTemplateData{Enabled: false},
@@ -132,7 +131,7 @@ func TestRenderConfig_IssueTrackerDisabled(t *testing.T) {
 		Repos: []repoTemplateData{
 			{Name: "app", Path: "/app", DefaultBranch: "main"},
 		},
-		Limits:       limitsTemplateData{MaxConcurrent: 2, TimeoutMinutes: 10, MaxRetries: 1},
+		Limits:       limitsTemplateData{MaxConcurrent: 2, TimeoutMinutes: 10},
 		Triage:       triageTemplateData{Model: "haiku"},
 		Agent:        agentTemplateData{Model: "sonnet"},
 		Digest:       digestTemplateData{Enabled: false},
@@ -167,7 +166,7 @@ func TestRenderConfig_CommentsPresent(t *testing.T) {
 		Repos: []repoTemplateData{
 			{Name: "app", Path: "/app", DefaultBranch: "main"},
 		},
-		Limits: limitsTemplateData{MaxConcurrent: 2, TimeoutMinutes: 10, MaxRetries: 1},
+		Limits: limitsTemplateData{MaxConcurrent: 2, TimeoutMinutes: 10},
 		Triage: triageTemplateData{Model: "haiku"},
 		Agent:  agentTemplateData{Model: "sonnet"},
 		Digest: digestTemplateData{Enabled: true, DryRun: true},

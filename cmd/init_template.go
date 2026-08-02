@@ -38,7 +38,6 @@ type repoTemplateData struct {
 type limitsTemplateData struct {
 	MaxConcurrent  int
 	TimeoutMinutes int
-	MaxRetries     int
 }
 
 type triageTemplateData struct {
@@ -115,7 +114,6 @@ repos:
 limits:
   max_concurrent: {{ .Limits.MaxConcurrent }}
   timeout_minutes: {{ .Limits.TimeoutMinutes }}
-  max_retries: {{ .Limits.MaxRetries }}
   # history_size: 50          # Max completed runs to keep in state
 
 # ──────────────────────────────────────────────

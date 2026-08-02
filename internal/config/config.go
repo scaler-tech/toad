@@ -57,7 +57,6 @@ type RepoConfig struct {
 type LimitsConfig struct {
 	MaxConcurrent  int `yaml:"max_concurrent"`
 	TimeoutMinutes int `yaml:"timeout_minutes"`
-	MaxRetries     int `yaml:"max_retries"`
 	HistorySize    int `yaml:"history_size"`
 }
 
@@ -160,7 +159,6 @@ func defaults() *Config {
 		Limits: LimitsConfig{
 			MaxConcurrent:  2,
 			TimeoutMinutes: 10,
-			MaxRetries:     1,
 			HistorySize:    50,
 		},
 		Triage: TriageConfig{

@@ -352,7 +352,7 @@ var frogJokes = []string{
 	// Science & education
 	"Why are frogs so good at math? They love log-arithms. :abacus:",
 	"What subject do frogs study at school? Biology — it's the only class where dissecting the teacher is acceptable. :microscope:",
-	"Why did the tadpole feel lonely? Because he was going through a phase. :crescent_moon:",
+	"What do you call a toad who's great at chemistry? A litmus toad. :test_tube:",
 	"What's a frog's blood type? Bee positive. :bee:",
 	"Why did the frog go to night school? He wanted a toad-al education. :mortar_board:",
 
