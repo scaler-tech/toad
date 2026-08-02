@@ -25,9 +25,6 @@ func TestNewResolver_FallbackForUnknownRepo(t *testing.T) {
 	if p == nil {
 		t.Fatal("expected non-nil provider for unknown path")
 	}
-	if p.PRNoun() != "PR" {
-		t.Errorf("expected PR noun from GitHub fallback, got %q", p.PRNoun())
-	}
 }
 
 func TestNewResolver_RepoSpecificLookup(t *testing.T) {
@@ -104,9 +101,6 @@ func TestNewResolver_EmptyRepoPath(t *testing.T) {
 	p := r("")
 	if p == nil {
 		t.Fatal("expected non-nil provider for empty path")
-	}
-	if p.PRNoun() != "PR" {
-		t.Errorf("expected PR from fallback, got %q", p.PRNoun())
 	}
 }
 

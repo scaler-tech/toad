@@ -20,7 +20,6 @@ import (
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/toadpath"
 	"github.com/scaler-tech/toad/internal/update"
-	"github.com/scaler-tech/toad/internal/vcs"
 )
 
 var statusPort int
@@ -244,15 +243,9 @@ type ccExtra struct {
 }
 
 func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
-	// Resolve PR noun once at construction time.
+	// PR noun resolution (per-platform "PR" vs "MR") was dropped from the vcs
+	// Provider interface in v2; always report "PR".
 	prNoun := "PR"
-	if cfg != nil {
-		primaryRepo := config.PrimaryRepo(cfg.Repos.List)
-		resolved := config.ResolvedVCS(primaryRepo, cfg.VCS)
-		if p, err := vcs.NewProvider(vcs.ProviderConfig{Platform: resolved.Platform}); err == nil {
-			prNoun = p.PRNoun()
-		}
-	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		stats, err := db.Stats()
