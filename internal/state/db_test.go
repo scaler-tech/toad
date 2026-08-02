@@ -1,8 +1,12 @@
 package state
 
 import (
+	"bytes"
+	"database/sql"
 	"fmt"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -965,15 +969,15 @@ func TestDB_MergeStats(t *testing.T) {
 	}
 }
 
-func TestDB_MigratesToSchemaVersion10(t *testing.T) {
+func TestDB_MigratesToSchemaVersion11(t *testing.T) {
 	db := openTestDB(t)
 
 	version, err := db.GetSetting("schema_version")
 	if err != nil {
 		t.Fatalf("GetSetting(schema_version): %v", err)
 	}
-	if version != "10" {
-		t.Errorf("schema_version: got %q, want %q", version, "10")
+	if version != "11" {
+		t.Errorf("schema_version: got %q, want %q", version, "11")
 	}
 
 	// Tables introduced in migration 10 must exist and be queryable.
@@ -982,6 +986,214 @@ func TestDB_MigratesToSchemaVersion10(t *testing.T) {
 	}
 	if _, err := db.db.Exec("SELECT id, thread_ts, channel, repo, findings_json, created_at FROM investigations"); err != nil {
 		t.Errorf("investigations table not usable: %v", err)
+	}
+
+	// Columns introduced in migration 11 must exist and be queryable.
+	if _, err := db.db.Exec("SELECT token, expires_at FROM mcp_tokens"); err != nil {
+		t.Errorf("mcp_tokens.expires_at column not usable: %v", err)
+	}
+	if _, err := db.db.Exec("SELECT external_key, last_state_type FROM ticket_index"); err != nil {
+		t.Errorf("ticket_index.last_state_type column not usable: %v", err)
+	}
+}
+
+// tableColumns returns the column names of a table via PRAGMA table_info,
+// for asserting a column does or doesn't exist yet.
+func tableColumns(t *testing.T, db *sql.DB, table string) map[string]bool {
+	t.Helper()
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		t.Fatalf("pragma_table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scanning pragma_table_info(%s): %v", table, err)
+		}
+		cols[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating pragma_table_info(%s): %v", table, err)
+	}
+	return cols
+}
+
+// TestDB_MigrationV11_ForcesTokenRotation exercises the real upgrade path: a
+// file-backed DB built with the genuine pre-v11 physical schema (mcp_tokens
+// with no expires_at column, ticket_index with no last_state_type column,
+// schema_version explicitly at "10"), seeded with a plaintext-era token row
+// and a ticket_index row, then migrated via the package's actual migration
+// entry point.
+//
+// Building this fixture via openTestDB (a fresh OpenDBAt(":memory:")) would
+// be circular: the unconditional base-schema CREATE TABLE statements already
+// include expires_at/last_state_type (see the v11 migration comment on why
+// fresh DBs need those columns in the base schema, not just the ALTERs), so
+// a fresh DB already has both columns before migrate() ever reaches the
+// numbered-migrations loop. Forcing schema_version back to "10" on such a
+// DB doesn't undo that — it just makes the v11 ALTER TABLE ... ADD COLUMN
+// statements fail with "duplicate column name", which the migration loop
+// only logs (slog.Warn) rather than returning as an error. The test would
+// then still pass on a completely broken ALTER statement, since DELETE FROM
+// mcp_tokens and the schema_version bump don't depend on the ALTERs having
+// worked. Hence the raw CREATE TABLE fixture below, plus an explicit
+// assertion that no such warning occurred.
+func TestDB_MigrationV11_ForcesTokenRotation(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("opening raw fixture db: %v", err)
+	}
+	defer rawDB.Close()
+
+	// Genuine pre-v11 physical schema: no expires_at, no last_state_type.
+	if _, err := rawDB.Exec(`
+		CREATE TABLE mcp_tokens (
+			token TEXT PRIMARY KEY,
+			slack_user_id TEXT NOT NULL,
+			slack_user TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'user',
+			created_at DATETIME NOT NULL,
+			last_used_at DATETIME
+		);
+		CREATE TABLE ticket_index (
+			external_key      TEXT PRIMARY KEY,
+			issue_id          TEXT NOT NULL,
+			issue_url         TEXT,
+			source            TEXT DEFAULT '',
+			investigation_id  TEXT DEFAULT '',
+			created_at        DATETIME NOT NULL,
+			last_seen_at      DATETIME NOT NULL,
+			last_status       TEXT DEFAULT '',
+			status_checked_at DATETIME
+		);
+		CREATE TABLE settings (
+			key   TEXT PRIMARY KEY,
+			value TEXT NOT NULL
+		);
+	`); err != nil {
+		t.Fatalf("creating pre-v11 fixture schema: %v", err)
+	}
+	if _, err := rawDB.Exec(`INSERT INTO settings (key, value) VALUES ('schema_version', '10')`); err != nil {
+		t.Fatalf("seeding schema_version=10: %v", err)
+	}
+	if _, err := rawDB.Exec(
+		`INSERT INTO mcp_tokens (token, slack_user_id, slack_user, role, created_at) VALUES (?, ?, ?, ?, ?)`,
+		"plaintext-legacy-token", "U1", "alice", "user", time.Now(),
+	); err != nil {
+		t.Fatalf("seeding legacy plaintext token: %v", err)
+	}
+	if _, err := rawDB.Exec(
+		`INSERT INTO ticket_index (external_key, issue_id, source, created_at, last_seen_at, last_status) VALUES (?, ?, ?, ?, ?, ?)`,
+		"sentry:BILLING-2291", "SCL-100", "auto", time.Now(), time.Now(), "In Progress",
+	); err != nil {
+		t.Fatalf("seeding pre-v11 ticket_index row: %v", err)
+	}
+
+	// Confirm the fixture genuinely predates v11 before migrating.
+	if cols := tableColumns(t, rawDB, "mcp_tokens"); cols["expires_at"] {
+		t.Fatal("fixture bug: mcp_tokens already has expires_at before migrate")
+	}
+	if cols := tableColumns(t, rawDB, "ticket_index"); cols["last_state_type"] {
+		t.Fatal("fixture bug: ticket_index already has last_state_type before migrate")
+	}
+
+	// Capture slog output so a swallowed "duplicate column name" warning
+	// (which would mean the ALTER statements didn't actually apply) fails
+	// the test instead of passing silently.
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	defer slog.SetDefault(prevLogger)
+
+	if err := migrate(rawDB); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	if strings.Contains(strings.ToLower(logBuf.String()), "duplicate column") {
+		t.Errorf("migrate logged a duplicate-column warning — the v11 ALTER statements did not apply cleanly:\n%s", logBuf.String())
+	}
+
+	// mcp_tokens is wiped (forced rotation).
+	var count int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM mcp_tokens`).Scan(&count); err != nil {
+		t.Fatalf("counting mcp_tokens: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected v11 migration to wipe mcp_tokens, found %d rows", count)
+	}
+
+	// expires_at now exists and is queryable.
+	if cols := tableColumns(t, rawDB, "mcp_tokens"); !cols["expires_at"] {
+		t.Error("expected mcp_tokens.expires_at to exist after migrate")
+	}
+
+	// last_state_type now exists, and the surviving ticket_index row picked
+	// up the '' default.
+	if cols := tableColumns(t, rawDB, "ticket_index"); !cols["last_state_type"] {
+		t.Fatal("expected ticket_index.last_state_type to exist after migrate")
+	}
+	var existingType string
+	if err := rawDB.QueryRow(
+		`SELECT last_state_type FROM ticket_index WHERE external_key = ?`, "sentry:BILLING-2291",
+	).Scan(&existingType); err != nil {
+		t.Fatalf("reading last_state_type on surviving row: %v", err)
+	}
+	if existingType != "" {
+		t.Errorf("surviving ticket_index row: last_state_type = %q, want \"\"", existingType)
+	}
+
+	// Re-insert and read back a fresh row to confirm the column's default
+	// applies going forward too, not just as an ALTER-time backfill.
+	if _, err := rawDB.Exec(
+		`INSERT INTO ticket_index (external_key, issue_id, source, created_at, last_seen_at, last_status) VALUES (?, ?, ?, ?, ?, ?)`,
+		"sentry:BILLING-3000", "SCL-200", "auto", time.Now(), time.Now(), "Todo",
+	); err != nil {
+		t.Fatalf("inserting post-migration ticket_index row: %v", err)
+	}
+	var newType string
+	if err := rawDB.QueryRow(
+		`SELECT last_state_type FROM ticket_index WHERE external_key = ?`, "sentry:BILLING-3000",
+	).Scan(&newType); err != nil {
+		t.Fatalf("reading last_state_type on new row: %v", err)
+	}
+	if newType != "" {
+		t.Errorf("new ticket_index row: last_state_type = %q, want \"\"", newType)
+	}
+
+	var version string
+	if err := rawDB.QueryRow(`SELECT value FROM settings WHERE key = 'schema_version'`).Scan(&version); err != nil {
+		t.Fatalf("reading schema_version: %v", err)
+	}
+	if version != "11" {
+		t.Errorf("schema_version after migrate: got %q, want %q", version, "11")
+	}
+}
+
+// TestDB_Migrate_SecondCallOnFreshDBIsNoOp confirms migrate() can be safely
+// re-invoked on a DB that OpenDBAt already fully migrated (e.g. a daemon
+// restart) without erroring. Because a fresh DB's base schema already
+// contains everything through v11 (see the v11 migration comment), this
+// exercises the schema_version gate short-circuiting every migration —
+// it does NOT exercise the v11 ALTER statements themselves on a genuine
+// pre-v11 schema; TestDB_MigrationV11_ForcesTokenRotation covers that.
+func TestDB_Migrate_SecondCallOnFreshDBIsNoOp(t *testing.T) {
+	db := openTestDB(t) // already migrated to v11 by OpenDBAt
+
+	if err := migrate(db.db); err != nil {
+		t.Fatalf("second migrate call should be a no-op, got error: %v", err)
+	}
+
+	version, err := db.GetSetting("schema_version")
+	if err != nil {
+		t.Fatalf("GetSetting(schema_version): %v", err)
+	}
+	if version != "11" {
+		t.Errorf("schema_version after second migrate: got %q, want %q", version, "11")
 	}
 }
 
@@ -1019,8 +1231,8 @@ func TestDB_MigrationIdempotent_ReopenFileBackedDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSetting(schema_version): %v", err)
 	}
-	if version != "10" {
-		t.Errorf("schema_version after reopen: got %q, want %q", version, "10")
+	if version != "11" {
+		t.Errorf("schema_version after reopen: got %q, want %q", version, "11")
 	}
 
 	entry, err := db2.GetTicketIndex("thread:C123:1722500000.000100")
@@ -1257,7 +1469,7 @@ func TestDB_UpdateTicketStatus(t *testing.T) {
 		t.Fatalf("UpsertTicketIndex: %v", err)
 	}
 
-	if err := db.UpdateTicketStatus("sentry:BILLING-2291", "in_progress"); err != nil {
+	if err := db.UpdateTicketStatus("sentry:BILLING-2291", "in_progress", "started"); err != nil {
 		t.Fatalf("UpdateTicketStatus: %v", err)
 	}
 
@@ -1270,6 +1482,9 @@ func TestDB_UpdateTicketStatus(t *testing.T) {
 	}
 	if entry.LastStatus != "in_progress" {
 		t.Errorf("LastStatus: got %q, want %q", entry.LastStatus, "in_progress")
+	}
+	if entry.LastStateType != "started" {
+		t.Errorf("LastStateType: got %q, want %q", entry.LastStateType, "started")
 	}
 	if entry.StatusCheckedAt.IsZero() {
 		t.Error("expected StatusCheckedAt to be set")

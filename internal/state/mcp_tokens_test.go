@@ -90,6 +90,126 @@ func TestMCPToken_Revoke(t *testing.T) {
 	}
 }
 
+// TestMCPToken_HashedAtRest confirms the token is stored as a SHA-256 hash,
+// never in plaintext, while still validating against the original
+// plaintext bearer value.
+func TestMCPToken_HashedAtRest(t *testing.T) {
+	db := openTestDB(t)
+
+	plain := "toad_supersecretbearervalue"
+	tok := &MCPToken{
+		Token:       plain,
+		SlackUserID: "U4",
+		SlackUser:   "dave",
+		Role:        "user",
+		CreatedAt:   time.Now(),
+	}
+	if err := db.SaveMCPToken(tok); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	got, err := db.ValidateMCPToken(plain)
+	if err != nil {
+		t.Fatalf("validate with plaintext: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected token to validate against the plaintext bearer")
+	}
+
+	var stored string
+	if err := db.db.QueryRow(`SELECT token FROM mcp_tokens WHERE slack_user_id = ?`, "U4").Scan(&stored); err != nil {
+		t.Fatalf("querying stored token row: %v", err)
+	}
+	if stored == plain {
+		t.Fatal("expected stored token column to be hashed, found plaintext")
+	}
+	if len(stored) != 64 {
+		t.Errorf("expected a 64-char SHA-256 hex digest, got %d chars: %q", len(stored), stored)
+	}
+}
+
+// TestMCPToken_ExpiredRejected confirms an expired token is treated as not
+// found by ValidateMCPToken.
+func TestMCPToken_ExpiredRejected(t *testing.T) {
+	db := openTestDB(t)
+
+	tok := &MCPToken{
+		Token:       "tok-expired",
+		SlackUserID: "U5",
+		SlackUser:   "erin",
+		Role:        "user",
+		CreatedAt:   time.Now().Add(-48 * time.Hour),
+		ExpiresAt:   time.Now().Add(-1 * time.Hour),
+	}
+	if err := db.SaveMCPToken(tok); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	got, err := db.ValidateMCPToken("tok-expired")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected expired token to be rejected, got %+v", got)
+	}
+}
+
+// TestMCPToken_UnexpiredAccepted confirms a token with a future expiry
+// still validates normally.
+func TestMCPToken_UnexpiredAccepted(t *testing.T) {
+	db := openTestDB(t)
+
+	tok := &MCPToken{
+		Token:       "tok-unexpired",
+		SlackUserID: "U6",
+		SlackUser:   "frank",
+		Role:        "user",
+		CreatedAt:   time.Now(),
+		ExpiresAt:   time.Now().Add(24 * time.Hour),
+	}
+	if err := db.SaveMCPToken(tok); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	got, err := db.ValidateMCPToken("tok-unexpired")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected unexpired token to validate")
+	}
+}
+
+// TestMCPToken_NilExpiresAtAccepted confirms a NULL expires_at (token
+// issued with token_ttl_days=0, or issued before expiry existed) is
+// treated as "never expires" rather than immediately expired.
+func TestMCPToken_NilExpiresAtAccepted(t *testing.T) {
+	db := openTestDB(t)
+
+	tok := &MCPToken{
+		Token:       "tok-no-expiry",
+		SlackUserID: "U7",
+		SlackUser:   "grace",
+		Role:        "user",
+		CreatedAt:   time.Now(),
+		// ExpiresAt intentionally left zero.
+	}
+	if err := db.SaveMCPToken(tok); err != nil {
+		t.Fatalf("save token: %v", err)
+	}
+
+	got, err := db.ValidateMCPToken("tok-no-expiry")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected token with no expiry to validate")
+	}
+	if !got.ExpiresAt.IsZero() {
+		t.Errorf("expected ExpiresAt to remain zero, got %v", got.ExpiresAt)
+	}
+}
+
 func TestMCPToken_SaveReplace(t *testing.T) {
 	db := openTestDB(t)
 

@@ -174,12 +174,18 @@ func (h *SlashCommandHandler) handleMCPConnect(cmd slack.SlashCommand) {
 	// Revoke any existing tokens before issuing a new one
 	_ = h.db.RevokeMCPToken(cmd.UserID)
 
+	var expiresAt time.Time
+	if h.cfg.TokenTTLDays > 0 {
+		expiresAt = time.Now().Add(time.Duration(h.cfg.TokenTTLDays) * 24 * time.Hour)
+	}
+
 	tok := &state.MCPToken{
 		Token:       token,
 		SlackUserID: cmd.UserID,
 		SlackUser:   cmd.UserName,
 		Role:        role,
 		CreatedAt:   time.Now(),
+		ExpiresAt:   expiresAt,
 	}
 	if err := h.db.SaveMCPToken(tok); err != nil {
 		slog.Error("failed to save MCP token", "error", err)
@@ -204,11 +210,18 @@ func (h *SlashCommandHandler) handleMCPConnect(cmd slack.SlashCommand) {
 
 	codeCmd := fmt.Sprintf("claude mcp add toad %s --transport http -H \"Authorization: Bearer %s\"", endpoint, token)
 
+	expiryNote := "This token does not expire."
+	if !expiresAt.IsZero() {
+		expiryNote = fmt.Sprintf("This token expires on %s (in %d days). Reconnect with `/toad mcp connect` to refresh it.",
+			expiresAt.Format("2006-01-02"), h.cfg.TokenTTLDays)
+	}
+
 	text := fmt.Sprintf("Your MCP token has been created (role: *%s*).\n\n"+
 		"*Claude Code* — run this in your terminal:\n```\n%s\n```\n\n"+
 		"*Claude Desktop* — add this to your config (`claude_desktop_config.json`):\n```\n%s\n```\n\n"+
+		"%s\n\n"+
 		":warning: Keep this token secret — it grants access to toad on your behalf.",
-		role, codeCmd, desktopSnippet)
+		role, codeCmd, desktopSnippet, expiryNote)
 	if h.cfg.Message != "" {
 		text += "\n\n" + h.cfg.Message
 	}
@@ -244,13 +257,20 @@ func (h *SlashCommandHandler) handleMCPStatus(cmd slack.SlashCommand) {
 		lastUsed = tok.LastUsedAt.Format(time.RFC3339)
 	}
 
+	expires := "never"
+	if !tok.ExpiresAt.IsZero() {
+		expires = tok.ExpiresAt.Format(time.RFC3339)
+	}
+
 	text := fmt.Sprintf("*MCP Token Status*\n"+
 		"• Role: *%s*\n"+
 		"• Created: %s\n"+
+		"• Expires: %s\n"+
 		"• Last used: %s\n"+
 		"• Endpoint: `%s://%s:%d/mcp`",
 		tok.Role,
 		tok.CreatedAt.Format(time.RFC3339),
+		expires,
 		lastUsed,
 		h.mcpScheme(), h.cfg.Host, h.cfg.Port,
 	)

@@ -44,6 +44,9 @@ func TestDefaults(t *testing.T) {
 	if cfg.Log.Level != "info" {
 		t.Errorf("default log level should be 'info', got %q", cfg.Log.Level)
 	}
+	if cfg.MCP.TokenTTLDays != 90 {
+		t.Errorf("default mcp.token_ttl_days should be 90, got %d", cfg.MCP.TokenTTLDays)
+	}
 }
 
 func TestValidate_MissingAppToken(t *testing.T) {
@@ -628,5 +631,63 @@ func TestValidate_MCPServerValidWithCommand(t *testing.T) {
 	err := Validate(cfg)
 	if err != nil {
 		t.Errorf("expected no error for valid MCP server with Command, got: %v", err)
+	}
+}
+
+func TestValidate_MCPTLSMissingCertAndKey(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.MCP.TLS = true
+
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error when mcp.tls is enabled without cert_file/key_file")
+	}
+	if !strings.Contains(err.Error(), "mcp.cert_file") || !strings.Contains(err.Error(), "mcp.key_file") {
+		t.Errorf("expected error to name both missing keys, got: %v", err)
+	}
+}
+
+func TestValidate_MCPTLSMissingKeyOnly(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.MCP.TLS = true
+	cfg.MCP.CertFile = "/etc/toad/cert.pem"
+
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected error when mcp.tls is enabled without key_file")
+	}
+	if !strings.Contains(err.Error(), "mcp.key_file") {
+		t.Errorf("expected error to name the missing key_file, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "mcp.cert_file") {
+		t.Errorf("cert_file was provided and should not be listed as missing, got: %v", err)
+	}
+}
+
+func TestValidate_MCPTLSWithCertAndKey(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.MCP.TLS = true
+	cfg.MCP.CertFile = "/etc/toad/cert.pem"
+	cfg.MCP.KeyFile = "/etc/toad/key.pem"
+
+	if err := Validate(cfg); err != nil {
+		t.Errorf("expected no error when mcp.tls has both cert_file and key_file, got: %v", err)
+	}
+}
+
+func TestValidate_MCPTLSFalseDoesNotRequireCertFiles(t *testing.T) {
+	cfg := validTestCfg()
+	cfg.Slack.AppToken = "xapp-test"
+	cfg.Slack.BotToken = "xoxb-test"
+	cfg.MCP.TLS = false
+
+	if err := Validate(cfg); err != nil {
+		t.Errorf("expected no error when mcp.tls is disabled, got: %v", err)
 	}
 }

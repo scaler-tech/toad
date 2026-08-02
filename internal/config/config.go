@@ -139,12 +139,15 @@ type LogConfig struct {
 }
 
 type MCPConfig struct {
-	Enabled bool     `yaml:"enabled"`
-	Host    string   `yaml:"host"`
-	Port    int      `yaml:"port"`
-	TLS     bool     `yaml:"tls"`
-	Devs    []string `yaml:"devs"`
-	Message string   `yaml:"message"` // optional message included in the connect DM
+	Enabled      bool     `yaml:"enabled"`
+	Host         string   `yaml:"host"`
+	Port         int      `yaml:"port"`
+	TLS          bool     `yaml:"tls"`
+	CertFile     string   `yaml:"cert_file"`      // required when tls is true
+	KeyFile      string   `yaml:"key_file"`       // required when tls is true
+	TokenTTLDays int      `yaml:"token_ttl_days"` // MCP token lifetime in days; 0 = no expiry (default 90)
+	Devs         []string `yaml:"devs"`
+	Message      string   `yaml:"message"` // optional message included in the connect DM
 }
 
 type IntakeConfig struct {
@@ -221,9 +224,10 @@ func defaults() *Config {
 			File:  filepath.Join(home, "toad.log"),
 		},
 		MCP: MCPConfig{
-			Enabled: false,
-			Host:    "localhost",
-			Port:    8099,
+			Enabled:      false,
+			Host:         "localhost",
+			Port:         8099,
+			TokenTTLDays: 90,
 		},
 		Ticket: TicketConfig{
 			AutoFile:           true,
@@ -364,6 +368,20 @@ func Validate(cfg *Config) error {
 	for name, mcp := range cfg.Agent.MCPServers {
 		if mcp.URL == "" && mcp.Command == "" {
 			return fmt.Errorf("agent.mcp_servers.%s: url or command required", name)
+		}
+	}
+	// TLS is either real or off — cfg.MCP.TLS being cosmetic (accepted but
+	// never used to actually serve TLS) is exactly the footgun this closes.
+	if cfg.MCP.TLS {
+		var missing []string
+		if cfg.MCP.CertFile == "" {
+			missing = append(missing, "mcp.cert_file")
+		}
+		if cfg.MCP.KeyFile == "" {
+			missing = append(missing, "mcp.key_file")
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("%s required when mcp.tls is enabled", strings.Join(missing, " and "))
 		}
 	}
 	return nil

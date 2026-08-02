@@ -399,6 +399,15 @@ type queryArgs struct {
 	Limit int    `json:"limit,omitempty" jsonschema:"Maximum rows to return (default 100, max 1000)"`
 }
 
+// mcpQueryDenylistRe blocks write/schema/pragma statements as whole words
+// (not substrings of identifiers like "personality_adjustments"). PRAGMA can
+// mutate connection- and database-level settings (e.g. journal_mode,
+// writable_schema) and ANALYZE writes to sqlite_stat tables, so both are
+// blocked alongside the DML/DDL keywords even though neither is a classic
+// write statement. Package-level so it's compiled once and directly
+// testable.
+var mcpQueryDenylistRe = regexp.MustCompile(`\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|VACUUM|REINDEX|PRAGMA|ANALYZE)\b`)
+
 // RegisterQueryTool registers a read-only SQL query tool on the given MCP server.
 func RegisterQueryTool(srv *gomcp.Server, db *state.DB) {
 	gomcp.AddTool(srv, &gomcp.Tool{
@@ -408,7 +417,7 @@ func RegisterQueryTool(srv *gomcp.Server, db *state.DB) {
 Tables: runs, thread_memory, daemon_stats, settings, ticket_index, investigations
 
 runs columns: id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json, updated_at
-ticket_index columns: external_key, issue_id, issue_url, source, investigation_id, created_at, last_seen_at, last_status, status_checked_at
+ticket_index columns: external_key, issue_id, issue_url, source, investigation_id, created_at, last_seen_at, last_status, last_state_type, status_checked_at
 investigations columns: id, thread_ts, channel, repo, findings_json, created_at`,
 	}, func(ctx context.Context, req *gomcp.CallToolRequest, args queryArgs) (*gomcp.CallToolResult, any, error) {
 		tok := tokenFromContext(ctx)
@@ -427,8 +436,7 @@ investigations columns: id, thread_ts, channel, repo, findings_json, created_at`
 		// Block write operations by checking for keywords as whole words
 		// (not substrings of identifiers like "personality_adjustments").
 		upper := strings.ToUpper(sql)
-		writeRe := regexp.MustCompile(`\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|ATTACH|DETACH|VACUUM|REINDEX)\b`)
-		if writeRe.MatchString(upper) {
+		if mcpQueryDenylistRe.MatchString(upper) {
 			return &gomcp.CallToolResult{
 				Content: []gomcp.Content{&gomcp.TextContent{Text: "Only read-only (SELECT) queries are allowed."}},
 				IsError: true,

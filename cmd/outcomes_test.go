@@ -192,10 +192,86 @@ func TestRunOutcomePoller_ExitsOnCtxDone(t *testing.T) {
 	}
 }
 
+// TestClassifyOutcome covers the full Linear state-type matrix plus the
+// name-matching fallback used when no state type is available (older
+// persisted rows, or a tracker that doesn't supply Linear-style types).
+func TestClassifyOutcome(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    string
+		stateType string
+		want      string
+	}{
+		{"empty status is always filed, regardless of type", "", "started", "filed"},
+		{"empty status and empty type is filed", "", "", "filed"},
+
+		// Type-based classification (takes precedence when present).
+		{"completed type", "Done", "completed", "done"},
+		{"canceled type (American spelling)", "Canceled", "canceled", "rejected"},
+		{"cancelled type (British spelling)", "Cancelled", "cancelled", "rejected"},
+		{"triage type", "Needs Triage", "triage", "pending"},
+		{"backlog type", "Backlog", "backlog", "accepted"},
+		{"unstarted type", "Todo", "unstarted", "accepted"},
+		{"started type", "In Progress", "started", "accepted"},
+		{"type matching is case-insensitive", "Done", "COMPLETED", "done"},
+
+		// Unrecognized non-empty type falls through to name matching, same
+		// as if type were empty.
+		{"unrecognized type falls back to name matching", "Done", "some_custom_type", "done"},
+
+		// Name-matching fallback (empty type).
+		{"name fallback: done", "Done", "", "done"},
+		{"name fallback: cancelled", "Cancelled", "", "rejected"},
+		{"name fallback: canceled", "Canceled", "", "rejected"},
+		{"name fallback: duplicate", "Duplicate", "", "rejected"},
+		{"name fallback: unmatched status is unknown", "In Progress", "", "unknown"},
+		{"name fallback is case-insensitive", "DONE", "", "done"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyOutcome(tt.status, tt.stateType)
+			if got != tt.want {
+				t.Errorf("classifyOutcome(%q, %q) = %q, want %q", tt.status, tt.stateType, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPollOnce_PersistsStateType confirms the poller persists both the raw
+// status name and the tracker's state type on ticket_index, not just the
+// name.
+func TestPollOnce_PersistsStateType(t *testing.T) {
+	db := newTestDB(t)
+	seedTicket(t, db, "thread:C3:1", "TOAD-20", "Todo", time.Time{})
+
+	fake := &outcomeTrackerFake{
+		statuses: map[string]issuetracker.IssueStatus{
+			"TOAD-20": {State: "In Progress", StateType: "started"},
+		},
+	}
+
+	pollOnce(context.Background(), db, fake, time.Hour)
+
+	entry, err := db.GetTicketIndex("thread:C3:1")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected ticket index entry to exist")
+	}
+	if entry.LastStatus != "In Progress" {
+		t.Errorf("LastStatus = %q, want %q", entry.LastStatus, "In Progress")
+	}
+	if entry.LastStateType != "started" {
+		t.Errorf("LastStateType = %q, want %q", entry.LastStateType, "started")
+	}
+}
+
 func TestOutcomeCounts(t *testing.T) {
 	db := newTestDB(t)
 	seedTicket(t, db, "thread:C2:1", "TOAD-10", "", time.Time{})           // filed
-	seedTicket(t, db, "thread:C2:2", "TOAD-11", "Done", time.Now())        // accepted
+	seedTicket(t, db, "thread:C2:2", "TOAD-11", "Done", time.Now())        // done (name fallback, no state type)
 	seedTicket(t, db, "thread:C2:3", "TOAD-12", "Duplicate", time.Now())   // rejected
 	seedTicket(t, db, "thread:C2:4", "TOAD-13", "Canceled", time.Now())    // rejected
 	seedTicket(t, db, "thread:C2:5", "TOAD-14", "In Progress", time.Now()) // unknown
@@ -205,7 +281,7 @@ func TestOutcomeCounts(t *testing.T) {
 		t.Fatalf("outcomeCounts: %v", err)
 	}
 
-	want := map[string]int{"filed": 1, "accepted": 1, "rejected": 2, "unknown": 1}
+	want := map[string]int{"filed": 1, "done": 1, "rejected": 2, "unknown": 1}
 	for k, v := range want {
 		if counts[k] != v {
 			t.Errorf("counts[%q] = %d, want %d (full: %+v)", k, counts[k], v, counts)

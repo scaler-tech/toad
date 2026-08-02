@@ -10,6 +10,50 @@ import (
 	"github.com/scaler-tech/toad/internal/state"
 )
 
+// TestMCPQueryDenylist covers the write/schema/pragma keywords the query
+// tool blocks, including PRAGMA and ANALYZE (added alongside the MCP
+// hardening pass — PRAGMA can mutate connection/database settings and
+// ANALYZE writes to sqlite_stat tables, so both are treated as writes even
+// though neither is classic DML/DDL).
+func TestMCPQueryDenylist(t *testing.T) {
+	blocked := []string{
+		"INSERT INTO runs VALUES (1)",
+		"UPDATE runs SET status = 'x'",
+		"DELETE FROM runs",
+		"DROP TABLE runs",
+		"ALTER TABLE runs ADD COLUMN x",
+		"CREATE TABLE x (id INTEGER)",
+		"REPLACE INTO runs VALUES (1)",
+		"ATTACH DATABASE 'x' AS y",
+		"DETACH DATABASE y",
+		"VACUUM",
+		"REINDEX",
+		"PRAGMA journal_mode=DELETE",
+		"PRAGMA writable_schema=1",
+		"ANALYZE runs",
+	}
+	for _, sql := range blocked {
+		t.Run(sql, func(t *testing.T) {
+			if !mcpQueryDenylistRe.MatchString(strings.ToUpper(sql)) {
+				t.Errorf("expected %q to be blocked by the query denylist", sql)
+			}
+		})
+	}
+
+	allowed := []string{
+		"SELECT * FROM runs",
+		"SELECT * FROM personality_adjustments",
+		"SELECT id, status FROM runs WHERE status = 'done'",
+	}
+	for _, sql := range allowed {
+		t.Run(sql, func(t *testing.T) {
+			if mcpQueryDenylistRe.MatchString(strings.ToUpper(sql)) {
+				t.Errorf("expected %q to be allowed by the query denylist", sql)
+			}
+		})
+	}
+}
+
 func TestReadLogs(t *testing.T) {
 	dir := t.TempDir()
 	logFile := filepath.Join(dir, "toad.log")

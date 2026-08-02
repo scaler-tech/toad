@@ -2,7 +2,9 @@ package state
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -167,6 +169,7 @@ func migrate(db *sql.DB) error {
 			created_at        DATETIME NOT NULL,
 			last_seen_at      DATETIME NOT NULL,
 			last_status       TEXT DEFAULT '',
+			last_state_type   TEXT DEFAULT '',
 			status_checked_at DATETIME
 		);
 
@@ -190,7 +193,8 @@ func migrate(db *sql.DB) error {
 		slack_user TEXT NOT NULL,
 		role TEXT NOT NULL DEFAULT 'user',
 		created_at DATETIME NOT NULL,
-		last_used_at DATETIME
+		last_used_at DATETIME,
+		expires_at DATETIME
 	)`)
 	if err != nil {
 		return fmt.Errorf("creating mcp_tokens table: %w", err)
@@ -248,6 +252,26 @@ func migrate(db *sql.DB) error {
 			  id TEXT PRIMARY KEY, thread_ts TEXT, channel TEXT, repo TEXT,
 			  findings_json TEXT NOT NULL, created_at DATETIME NOT NULL);
 			  CREATE INDEX IF NOT EXISTS idx_invest_thread ON investigations(thread_ts)`},
+		// v11: MCP token hardening + Linear state-type outcome classification.
+		//
+		// mcp_tokens previously stored bearer tokens in plaintext (token TEXT
+		// PRIMARY KEY held the raw "toad_<hex>" value). Existing rows can't be
+		// hashed retroactively in a way that stays compatible with the plaintext
+		// bearer a client already holds, and rotating is cheap (`/toad-mcp
+		// connect` reissues a fresh token in one command), so this migration
+		// forces rotation by wiping the table outright rather than attempting an
+		// in-place rehash. From this point forward SaveMCPToken/ValidateMCPToken
+		// store and look up the SHA-256 hex digest of the token, never the
+		// plaintext. expires_at supports the new token_ttl_days config knob;
+		// NULL means "no expiry" for tokens issued before this existed.
+		//
+		// ticket_index.last_state_type stores the Linear workflow state TYPE
+		// (triage/backlog/unstarted/started/completed/canceled) alongside the
+		// existing last_status name, so outcome classification can key off the
+		// stable type instead of guessing from custom workflow state names.
+		{11, `DELETE FROM mcp_tokens;
+			  ALTER TABLE mcp_tokens ADD COLUMN expires_at DATETIME;
+			  ALTER TABLE ticket_index ADD COLUMN last_state_type TEXT DEFAULT ''`},
 	}
 
 	// Read current schema version. If no version is stored, detect whether
@@ -880,30 +904,45 @@ func (d *DB) ClearDaemonStats() error {
 	return err
 }
 
-// SaveMCPToken inserts or replaces an MCP token.
+// hashMCPToken returns the SHA-256 hex digest of a bearer token. Tokens are
+// stored and looked up by this digest, never in plaintext — see the v11
+// migration comment for why existing plaintext rows can't be rehashed
+// in place.
+func hashMCPToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// SaveMCPToken inserts or replaces an MCP token. tok.Token must be the
+// plaintext bearer token; it is hashed before storage.
 func (d *DB) SaveMCPToken(tok *MCPToken) error {
 	ctx, cancel := dbCtx()
 	defer cancel()
 	_, err := d.db.ExecContext(ctx, `
-		INSERT OR REPLACE INTO mcp_tokens (token, slack_user_id, slack_user, role, created_at, last_used_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		tok.Token, tok.SlackUserID, tok.SlackUser, tok.Role, tok.CreatedAt, tok.LastUsedAt,
+		INSERT OR REPLACE INTO mcp_tokens (token, slack_user_id, slack_user, role, created_at, last_used_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		hashMCPToken(tok.Token), tok.SlackUserID, tok.SlackUser, tok.Role, tok.CreatedAt, tok.LastUsedAt, nullableTime(tok.ExpiresAt),
 	)
 	return err
 }
 
-// ValidateMCPToken looks up a token and updates its last_used_at timestamp.
-// Returns nil, nil if the token is not found.
+// ValidateMCPToken looks up a token (by its hash) and updates its
+// last_used_at timestamp. Returns nil, nil if the token is not found or has
+// expired. A NULL expires_at (tokens issued before expiry existed, or issued
+// with token_ttl_days=0) is treated as "never expires".
 func (d *DB) ValidateMCPToken(token string) (*MCPToken, error) {
 	ctx, cancel := dbCtx()
 	defer cancel()
 
+	hash := hashMCPToken(token)
+
 	var tok MCPToken
 	var lastUsed sql.NullTime
+	var expiresAt sql.NullTime
 	err := d.db.QueryRowContext(ctx,
-		"SELECT token, slack_user_id, slack_user, role, created_at, last_used_at FROM mcp_tokens WHERE token = ?",
-		token,
-	).Scan(&tok.Token, &tok.SlackUserID, &tok.SlackUser, &tok.Role, &tok.CreatedAt, &lastUsed)
+		"SELECT token, slack_user_id, slack_user, role, created_at, last_used_at, expires_at FROM mcp_tokens WHERE token = ?",
+		hash,
+	).Scan(&tok.Token, &tok.SlackUserID, &tok.SlackUser, &tok.Role, &tok.CreatedAt, &lastUsed, &expiresAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -913,10 +952,16 @@ func (d *DB) ValidateMCPToken(token string) (*MCPToken, error) {
 	if lastUsed.Valid {
 		tok.LastUsedAt = lastUsed.Time
 	}
+	if expiresAt.Valid {
+		tok.ExpiresAt = expiresAt.Time
+		if time.Now().After(tok.ExpiresAt) {
+			return nil, nil
+		}
+	}
 
 	// Update last_used_at
 	now := time.Now()
-	_, _ = d.db.ExecContext(ctx, "UPDATE mcp_tokens SET last_used_at = ? WHERE token = ?", now, token)
+	_, _ = d.db.ExecContext(ctx, "UPDATE mcp_tokens SET last_used_at = ? WHERE token = ?", now, hash)
 	tok.LastUsedAt = now
 
 	return &tok, nil
@@ -929,10 +974,11 @@ func (d *DB) GetMCPTokenByUser(slackUserID string) (*MCPToken, error) {
 
 	var tok MCPToken
 	var lastUsed sql.NullTime
+	var expiresAt sql.NullTime
 	err := d.db.QueryRowContext(ctx,
-		"SELECT token, slack_user_id, slack_user, role, created_at, last_used_at FROM mcp_tokens WHERE slack_user_id = ?",
+		"SELECT token, slack_user_id, slack_user, role, created_at, last_used_at, expires_at FROM mcp_tokens WHERE slack_user_id = ?",
 		slackUserID,
-	).Scan(&tok.Token, &tok.SlackUserID, &tok.SlackUser, &tok.Role, &tok.CreatedAt, &lastUsed)
+	).Scan(&tok.Token, &tok.SlackUserID, &tok.SlackUser, &tok.Role, &tok.CreatedAt, &lastUsed, &expiresAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -941,6 +987,9 @@ func (d *DB) GetMCPTokenByUser(slackUserID string) (*MCPToken, error) {
 	}
 	if lastUsed.Valid {
 		tok.LastUsedAt = lastUsed.Time
+	}
+	if expiresAt.Valid {
+		tok.ExpiresAt = expiresAt.Time
 	}
 	return &tok, nil
 }
@@ -1030,7 +1079,8 @@ type TicketIndexEntry struct {
 	InvestigationID string
 	CreatedAt       time.Time
 	LastSeenAt      time.Time
-	LastStatus      string
+	LastStatus      string // raw status name, e.g. "In Progress", "Done"
+	LastStateType   string // Linear workflow state type: triage/backlog/unstarted/started/completed/canceled
 	StatusCheckedAt time.Time
 }
 
@@ -1060,8 +1110,8 @@ func (d *DB) UpsertTicketIndex(e *TicketIndexEntry) error {
 		ctx, cancel := dbCtx()
 		defer cancel()
 		_, err := d.db.ExecContext(ctx, `
-			INSERT INTO ticket_index (external_key, issue_id, issue_url, source, investigation_id, created_at, last_seen_at, last_status, status_checked_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO ticket_index (external_key, issue_id, issue_url, source, investigation_id, created_at, last_seen_at, last_status, last_state_type, status_checked_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(external_key) DO UPDATE SET
 				issue_id = excluded.issue_id,
 				issue_url = excluded.issue_url,
@@ -1069,9 +1119,10 @@ func (d *DB) UpsertTicketIndex(e *TicketIndexEntry) error {
 				last_seen_at = excluded.last_seen_at,
 				investigation_id = COALESCE(NULLIF(excluded.investigation_id, ''), ticket_index.investigation_id),
 				last_status = COALESCE(NULLIF(excluded.last_status, ''), ticket_index.last_status),
+				last_state_type = COALESCE(NULLIF(excluded.last_state_type, ''), ticket_index.last_state_type),
 				status_checked_at = COALESCE(excluded.status_checked_at, ticket_index.status_checked_at)`,
 			e.ExternalKey, e.IssueID, e.IssueURL, e.Source, e.InvestigationID,
-			e.CreatedAt, e.LastSeenAt, e.LastStatus, nullableTime(e.StatusCheckedAt),
+			e.CreatedAt, e.LastSeenAt, e.LastStatus, e.LastStateType, nullableTime(e.StatusCheckedAt),
 		)
 		return err
 	})
@@ -1084,7 +1135,7 @@ func (d *DB) GetTicketIndex(externalKey string) (*TicketIndexEntry, error) {
 	defer cancel()
 	row := d.db.QueryRowContext(ctx,
 		`SELECT external_key, issue_id, COALESCE(issue_url,''), COALESCE(source,''), COALESCE(investigation_id,''),
-		        created_at, last_seen_at, COALESCE(last_status,''), status_checked_at
+		        created_at, last_seen_at, COALESCE(last_status,''), COALESCE(last_state_type,''), status_checked_at
 		 FROM ticket_index WHERE external_key = ?`,
 		externalKey,
 	)
@@ -1097,7 +1148,7 @@ func (d *DB) RecentTicketIndex(limit int) ([]*TicketIndexEntry, error) {
 	defer cancel()
 	rows, err := d.db.QueryContext(ctx,
 		`SELECT external_key, issue_id, COALESCE(issue_url,''), COALESCE(source,''), COALESCE(investigation_id,''),
-		        created_at, last_seen_at, COALESCE(last_status,''), status_checked_at
+		        created_at, last_seen_at, COALESCE(last_status,''), COALESCE(last_state_type,''), status_checked_at
 		 FROM ticket_index ORDER BY last_seen_at DESC LIMIT ?`,
 		limit,
 	)
@@ -1117,13 +1168,14 @@ func (d *DB) RecentTicketIndex(limit int) ([]*TicketIndexEntry, error) {
 	return entries, rows.Err()
 }
 
-// UpdateTicketStatus updates the last known status of a tracked ticket.
-func (d *DB) UpdateTicketStatus(externalKey, status string) error {
+// UpdateTicketStatus updates the last known status (and Linear state type,
+// when known) of a tracked ticket.
+func (d *DB) UpdateTicketStatus(externalKey, status, stateType string) error {
 	ctx, cancel := dbCtx()
 	defer cancel()
 	_, err := d.db.ExecContext(ctx,
-		"UPDATE ticket_index SET last_status = ?, status_checked_at = ? WHERE external_key = ?",
-		status, time.Now(), externalKey,
+		"UPDATE ticket_index SET last_status = ?, last_state_type = ?, status_checked_at = ? WHERE external_key = ?",
+		status, stateType, time.Now(), externalKey,
 	)
 	return err
 }
@@ -1149,7 +1201,7 @@ func scanTicketIndexRow(row scanner) (*TicketIndexEntry, error) {
 	var statusCheckedAt sql.NullTime
 	err := row.Scan(
 		&e.ExternalKey, &e.IssueID, &e.IssueURL, &e.Source, &e.InvestigationID,
-		&e.CreatedAt, &e.LastSeenAt, &e.LastStatus, &statusCheckedAt,
+		&e.CreatedAt, &e.LastSeenAt, &e.LastStatus, &e.LastStateType, &statusCheckedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -1273,6 +1325,9 @@ type PRWatch struct {
 }
 
 // MCPToken represents an MCP authentication token linked to a Slack user.
+// Token holds the plaintext bearer value when constructed for issuance
+// (SaveMCPToken hashes it before storage); when returned from a lookup it
+// holds the stored hash, not the original plaintext.
 type MCPToken struct {
 	Token       string
 	SlackUserID string
@@ -1280,6 +1335,7 @@ type MCPToken struct {
 	Role        string // "dev" or "user"
 	CreatedAt   time.Time
 	LastUsedAt  time.Time
+	ExpiresAt   time.Time // zero = no expiry
 }
 
 // ThreadMemory holds cached context for a Slack thread.
