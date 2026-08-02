@@ -186,6 +186,55 @@ func TestBuildArgs_NoMCPConfigPath(t *testing.T) {
 	assertNotContains(t, args, "--strict-mcp-config")
 }
 
+func TestBuildArgs_DeniedReadPaths(t *testing.T) {
+	args := buildArgs(RunOpts{
+		Prompt:          "investigate",
+		Permissions:     PermissionReadOnly,
+		DeniedReadPaths: []string{"/home/user/.toad"},
+	})
+
+	var denied string
+	for i, a := range args {
+		if a == "--disallowedTools" && i+1 < len(args) {
+			denied = args[i+1]
+			break
+		}
+	}
+	if denied == "" {
+		t.Fatal("expected --disallowedTools flag")
+	}
+	if !strings.Contains(denied, "Read(//"+"/home/user/.toad"+"/**)") {
+		t.Errorf("expected denied tools to contain Read(///home/user/.toad/**), got %q", denied)
+	}
+}
+
+func TestBuildArgs_DeniedReadPaths_Multiple(t *testing.T) {
+	args := buildArgs(RunOpts{
+		Prompt:          "investigate",
+		DeniedReadPaths: []string{"/a", "/b"},
+	})
+
+	var denied string
+	for i, a := range args {
+		if a == "--disallowedTools" && i+1 < len(args) {
+			denied = args[i+1]
+			break
+		}
+	}
+	if denied == "" {
+		t.Fatal("expected --disallowedTools flag")
+	}
+	want := "Read(///a/**),Read(///b/**)"
+	if denied != want {
+		t.Errorf("denied tools = %q, want %q", denied, want)
+	}
+}
+
+func TestBuildArgs_NoDeniedReadPaths(t *testing.T) {
+	args := buildArgs(RunOpts{Prompt: "test"})
+	assertNotContains(t, args, "--disallowedTools")
+}
+
 func TestBuildArgs_PermissionReadOnlyWithMCPTools(t *testing.T) {
 	args := buildArgs(RunOpts{
 		Model:           "sonnet",
@@ -362,6 +411,34 @@ func TestRun_ThrottleFallbackEnvUnset_ReturnsOriginalError(t *testing.T) {
 	}
 	if len(*calls) != 1 {
 		t.Fatalf("expected exactly 1 execution (no fallback without env value), got %d", len(*calls))
+	}
+}
+
+// TestRun_EnvelopeErrorRateLimit_NoThrottleRetry is the regression for the
+// throttle-pattern anchoring fix: an envelope `is_error: true` result whose
+// Result text happens to mention "rate limit" (the AGENT's own free-form
+// output — e.g. summarizing a finding about rate limiting) must never trigger
+// the paid API-key fallback retry. Only process/stderr-level failures are
+// eligible for that.
+func TestRun_EnvelopeErrorRateLimit_NoThrottleRetry(t *testing.T) {
+	calls, fake := newFakeExecCommand(t, []fakeScript{
+		{stdout: `{"result":"I found that the service hits its rate limit under load","is_error":true}`, exitCode: 0},
+	})
+	origExecCommand := execCommand
+	execCommand = fake
+	defer func() { execCommand = origExecCommand }()
+
+	t.Setenv("FAKE_ANTHROPIC_KEY", "sk-ant-test-value")
+	p := &ClaudeProvider{FallbackAPIKeyEnv: "FAKE_ANTHROPIC_KEY"}
+	_, err := p.Run(context.Background(), RunOpts{Prompt: "do work"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "rate limit under load") {
+		t.Errorf("expected original envelope error preserved, got: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected exactly 1 execution (no throttle retry for envelope result), got %d", len(*calls))
 	}
 }
 

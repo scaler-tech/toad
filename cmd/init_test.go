@@ -24,21 +24,15 @@ func TestRenderConfig(t *testing.T) {
 			{
 				Name:          "my-app",
 				Path:          "/home/dev/my-app",
-				TestCommand:   "go test ./...",
-				LintCommand:   "golangci-lint run",
 				DefaultBranch: "main",
-				AutoMerge:     false,
-				PRLabels:      []string{"toad"},
 			},
 		},
 		Limits: limitsTemplateData{
-			MaxConcurrent:   2,
-			MaxTurns:        30,
-			TimeoutMinutes:  10,
-			MaxFilesChanged: 5,
-			MaxRetries:      1,
+			MaxConcurrent:  2,
+			TimeoutMinutes: 10,
+			MaxRetries:     1,
 		},
-		Triage: triageTemplateData{Model: "haiku", AutoSpawn: false},
+		Triage: triageTemplateData{Model: "haiku"},
 		Agent:  agentTemplateData{Model: "sonnet"},
 		Digest: digestTemplateData{Enabled: true, DryRun: true},
 		IssueTracker: issueTrackerTemplateData{
@@ -73,16 +67,10 @@ func TestRenderConfig(t *testing.T) {
 		`- "toad fix"`,
 		`name: "my-app"`,
 		`path: "/home/dev/my-app"`,
-		`test_command: "go test ./..."`,
-		`lint_command: "golangci-lint run"`,
 		`default_branch: "main"`,
-		`auto_merge: false`,
-		`- "toad"`,
 		`max_concurrent: 2`,
-		`max_turns: 30`,
 		`timeout_minutes: 10`,
 		`model: "haiku"`,
-		`auto_spawn: false`,
 		`model: "sonnet"`,
 		`enabled: true`,
 		`dry_run: true`,
@@ -110,7 +98,7 @@ func TestRenderConfig_NoChannels(t *testing.T) {
 		Repos: []repoTemplateData{
 			{Name: "app", Path: "/app", DefaultBranch: "main"},
 		},
-		Limits: limitsTemplateData{MaxConcurrent: 2, MaxTurns: 30, TimeoutMinutes: 10, MaxFilesChanged: 5, MaxRetries: 1},
+		Limits: limitsTemplateData{MaxConcurrent: 2, TimeoutMinutes: 10, MaxRetries: 1},
 		Triage: triageTemplateData{Model: "haiku"},
 		Agent:  agentTemplateData{Model: "sonnet"},
 		Digest: digestTemplateData{Enabled: false},
@@ -144,7 +132,7 @@ func TestRenderConfig_IssueTrackerDisabled(t *testing.T) {
 		Repos: []repoTemplateData{
 			{Name: "app", Path: "/app", DefaultBranch: "main"},
 		},
-		Limits:       limitsTemplateData{MaxConcurrent: 2, MaxTurns: 30, TimeoutMinutes: 10, MaxFilesChanged: 5, MaxRetries: 1},
+		Limits:       limitsTemplateData{MaxConcurrent: 2, TimeoutMinutes: 10, MaxRetries: 1},
 		Triage:       triageTemplateData{Model: "haiku"},
 		Agent:        agentTemplateData{Model: "sonnet"},
 		Digest:       digestTemplateData{Enabled: false},
@@ -179,7 +167,7 @@ func TestRenderConfig_CommentsPresent(t *testing.T) {
 		Repos: []repoTemplateData{
 			{Name: "app", Path: "/app", DefaultBranch: "main"},
 		},
-		Limits: limitsTemplateData{MaxConcurrent: 2, MaxTurns: 30, TimeoutMinutes: 10, MaxFilesChanged: 5, MaxRetries: 1},
+		Limits: limitsTemplateData{MaxConcurrent: 2, TimeoutMinutes: 10, MaxRetries: 1},
 		Triage: triageTemplateData{Model: "haiku"},
 		Agent:  agentTemplateData{Model: "sonnet"},
 		Digest: digestTemplateData{Enabled: true, DryRun: true},
@@ -195,13 +183,10 @@ func TestRenderConfig_CommentsPresent(t *testing.T) {
 
 	// Check advanced options are commented out
 	commentedOptions := []string{
-		"# max_review_rounds:",
-		"# max_ci_fix_rounds:",
 		"# history_size:",
 		"# append_system_prompt:",
 		"# batch_minutes:",
 		"# min_confidence:",
-		"# services:",
 	}
 	for _, opt := range commentedOptions {
 		if !strings.Contains(result, opt) {

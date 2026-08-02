@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,8 +20,25 @@ var execCommand = exec.CommandContext
 
 // seatThrottlePattern matches Claude CLI error text indicating the
 // subscription-seat usage limit has been hit (as opposed to some other
-// failure), which is the only condition eligible for API-key fallback.
+// failure), which is the only condition eligible for API-key fallback. It
+// must only ever be applied to process/stderr-level failures (see
+// envelopeResultError) — never to an envelope is_error result, whose Result
+// text is the AGENT's own free-form output and can legitimately contain
+// phrases like "rate limit" while summarizing an unrelated finding.
 var seatThrottlePattern = regexp.MustCompile(`(?i)(usage limit|rate limit|out of extra usage)`)
+
+// envelopeResultError wraps a Claude CLI `is_error: true` envelope result —
+// i.e. the CLI ran fine as a process, but the agent's own result reports
+// failure. This is distinct from a process/stderr-level failure (non-zero
+// exit, timeout, unparseable output) and must never be matched against
+// seatThrottlePattern: the agent's result text is free-form and frequently
+// discusses topics (like "rate limit") that have nothing to do with the
+// CLI's own subscription-seat throttling.
+type envelopeResultError struct {
+	msg string
+}
+
+func (e *envelopeResultError) Error() string { return e.msg }
 
 // ClaudeProvider implements Provider using the Claude Code CLI.
 type ClaudeProvider struct {
@@ -43,6 +61,15 @@ func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, err
 	result, err := c.runOnce(ctx, opts, nil)
 	if err == nil {
 		return result, nil
+	}
+
+	// Envelope-level failures (the agent's own is_error result) are never
+	// eligible for throttle-pattern retry — only process/stderr-level
+	// failures are, since the envelope Result text is free-form agent
+	// output rather than a CLI diagnostic. See envelopeResultError's doc.
+	var envErr *envelopeResultError
+	if errors.As(err, &envErr) {
+		return nil, err
 	}
 
 	if !seatThrottlePattern.MatchString(err.Error()) {
@@ -191,6 +218,17 @@ func buildArgs(opts RunOpts) []string {
 		args = append(args, "--allowedTools", tools)
 	}
 
+	if len(opts.DeniedReadPaths) > 0 {
+		denied := make([]string, 0, len(opts.DeniedReadPaths))
+		for _, p := range opts.DeniedReadPaths {
+			// "//" anchors the rule to an absolute filesystem path (Claude
+			// Code permission-rule syntax) rather than one relative to the
+			// project/settings directory.
+			denied = append(denied, fmt.Sprintf("Read(//%s/**)", p))
+		}
+		args = append(args, "--disallowedTools", strings.Join(denied, ","))
+	}
+
 	if opts.MCPConfigPath != "" {
 		args = append(args, "--mcp-config", opts.MCPConfigPath, "--strict-mcp-config")
 	}
@@ -228,7 +266,7 @@ func parseEnvelope(output []byte) (*RunResult, error) {
 	}
 
 	if env.IsError {
-		return nil, fmt.Errorf("claude returned error: %s", env.Result)
+		return nil, &envelopeResultError{msg: fmt.Sprintf("claude returned error: %s", env.Result)}
 	}
 
 	return &RunResult{

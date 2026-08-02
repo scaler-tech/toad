@@ -51,12 +51,21 @@ func ExtractSentryRefs(fullText string) []string {
 
 	for _, m := range sentryRefRe.FindAllStringSubmatch(fullText, -1) {
 		if m[1] != "" {
-			// Slack-wrapped link: prefer the label if it looks like a Sentry
-			// short-id, else fall back to the id embedded in the URL.
+			// Slack-wrapped link: the wrapped URL must itself resolve to a
+			// real Sentry issue path before the label is trusted at all —
+			// otherwise a host-matching but path-less URL (e.g.
+			// "<https://sentry.io|FAKE-1>") would let an attacker spoof any
+			// short-id label they like. Only once that's confirmed do we
+			// prefer the label (if it looks like a short-id) or fall back to
+			// the id embedded in the URL.
 			url, label := m[1], m[2]
+			idm := sentryIssueIDRe.FindStringSubmatch(url)
+			if idm == nil {
+				continue
+			}
 			if sentryShortIDRe.MatchString(label) {
 				add(label)
-			} else if idm := sentryIssueIDRe.FindStringSubmatch(url); idm != nil {
+			} else {
 				add(idm[1])
 			}
 			continue

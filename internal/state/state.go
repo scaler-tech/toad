@@ -272,18 +272,3 @@ func (m *Manager) History() []*Run {
 	}
 	return out
 }
-
-// SetWorktreeInfo updates the branch and worktree path for a tracked run.
-func (m *Manager) SetWorktreeInfo(runID, branch, wtPath string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if run, ok := m.runs[runID]; ok {
-		run.Branch = branch
-		run.WorktreePath = wtPath
-		if m.db != nil {
-			if err := m.db.SaveRun(run); err != nil {
-				slog.Error("failed to persist worktree info", "id", runID, "error", err)
-			}
-		}
-	}
-}

@@ -6,13 +6,13 @@ import (
 
 func (e *Engine) passesGuardrails(opp Opportunity) bool {
 	// Confidence check
-	minConf := e.cfg.MinConfidence
-	if minConf <= 0 {
-		minConf = 0.95
+	minConf := 0.95
+	if e.cfg != nil && e.cfg.MinConfidence > 0 {
+		minConf = e.cfg.MinConfidence
 	}
 	// In comment mode (dry-run + comment investigation), lower the floor —
 	// posting investigation findings has no downside so we can be more inclusive.
-	if e.cfg.DryRun && e.cfg.CommentInvestigation && minConf > 0.85 {
+	if e.cfg != nil && e.cfg.DryRun && e.cfg.CommentInvestigation && minConf > 0.85 {
 		minConf = 0.85
 	}
 	if opp.Confidence < minConf {

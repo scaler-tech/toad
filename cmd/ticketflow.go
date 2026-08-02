@@ -163,8 +163,11 @@ func buildTicketContextBlock(ctx context.Context, tracker issuetracker.Tracker, 
 }
 
 // preInvestigationTicketCheck looks up the ticket index for the external key
-// this report would map to — using only intake-time Sentry refs, before any
-// investigation runs. A hit means a ticket already tracks this exact
+// this report would map to, before any investigation runs — keyed by
+// intake-time Sentry refs when sentryRefs is non-empty, or (via
+// ticket.ExternalKey's own fallback) by the channel+threadTS pair when it's
+// empty, e.g. because the caller hasn't corroborated a Sentry reference for
+// this report. A hit means a ticket already tracks this exact
 // problem, so a fresh (expensive) investigation would be redundant: this
 // posts a re-observation comment on the existing ticket and returns its
 // index entry so the caller can reply with the link and skip investigating
@@ -617,8 +620,8 @@ func handleTicketRequest(
 ) {
 	threadTS := msg.ThreadTS()
 
-	// The CTA/reaction path already set a "Spawning tadpole..." (legacy
-	// name) thread status before dispatching here (internal/slack/interactive.go).
+	// The CTA/reaction path already set a ":ticket: Creating ticket..."
+	// thread status before dispatching here (internal/slack/interactive.go).
 	// ReplyInThread does not clear it, so it must be cleared before we're
 	// done, regardless of which branch below is taken.
 	defer slackClient.ClearStatus(msg.Channel, threadTS)

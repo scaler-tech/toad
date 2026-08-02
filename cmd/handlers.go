@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/scaler-tech/toad/internal/config"
@@ -61,15 +60,19 @@ func handleMessage(
 	if msg.IsMention || msg.IsTriggered {
 		slog.Debug("handler: triggered path", "mention", msg.IsMention, "triggered", msg.IsTriggered, "channel", channelName)
 
-		// Limit concurrent agent calls
+		// Limit concurrent agent calls. The slot is released inside
+		// handleTriggered itself (not deferred here) — see its doc comment:
+		// a message that turns into a long investigation releases ribbitSem
+		// early (investigateSem bounds that part instead) so it doesn't
+		// starve Q&A behind it; a message that stays on the ribbit-answer
+		// path keeps the slot for its whole (short) duration.
 		select {
 		case ribbitSem <- struct{}{}:
-			defer func() { <-ribbitSem }()
 		case <-ctx.Done():
 			return
 		}
 
-		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, channelName, tracker, resolver, repoPaths, investRunner, ticketEngine, investigateSem, botAllowlist)
+		handleTriggered(ctx, msg, triageEngine, ribbitEngine, slackClient, stateManager, channelName, tracker, resolver, repoPaths, investRunner, ticketEngine, ribbitSem, investigateSem, botAllowlist)
 		return
 	}
 
@@ -143,20 +146,31 @@ func handleTriggered(
 	repoPaths map[string]string,
 	investRunner *investigation.Runner,
 	ticketEngine *ticket.Engine,
+	ribbitSem chan struct{},
 	investigateSem chan struct{},
 	botAllowlist []string,
 ) {
-	// Check if already working on this thread
-	threadTS := msg.ThreadTS()
-	if existing := stateManager.GetByThread(threadTS); len(existing) > 0 {
-		statuses := make([]string, len(existing))
-		for i, r := range existing {
-			statuses[i] = r.Status
+	// The caller (handleMessage) has already acquired ribbitSem before
+	// dispatching here. Single-release discipline: releaseRibbitSem is the
+	// only place that gives the slot back, guarded by released so it's a
+	// no-op if called twice. It's called explicitly right before either
+	// investigation-shaped branch below (escalate, investigate-and-file) —
+	// both are bounded by investigateSem instead and can run for minutes,
+	// so holding ribbitSem for that duration would starve concurrent
+	// ribbit Q&A behind it — and is NEVER re-acquired afterward, even if an
+	// investigation falls through to the ribbit path below. The deferred
+	// call is what releases it for the (fast) plain ribbit-answer path,
+	// where neither investigation branch runs.
+	released := false
+	releaseRibbitSem := func() {
+		if !released {
+			released = true
+			<-ribbitSem
 		}
-		slackClient.ReplyInThread(msg.Channel, threadTS,
-			fmt.Sprintf(":frog: Already working on this thread (%d active: %s)", len(existing), strings.Join(statuses, ", ")))
-		return
 	}
+	defer releaseRibbitSem()
+
+	threadTS := msg.ThreadTS()
 
 	// Acknowledge
 	slackClient.SetStatus(msg.Channel, threadTS, "Triaging message...")
@@ -247,6 +261,7 @@ func handleTriggered(
 	// CTA button uses, just with a different Source for the ticket index.
 	if result.Escalate {
 		slog.Info("triage escalate flag set, routing to ticket flow", "summary", result.Summary)
+		releaseRibbitSem()
 		handleTicketRequest(ctx, msg, slackClient, result, stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, channelName, ticket.SourceEscalation, sentryCorroborated)
 		return
 	}
@@ -263,6 +278,7 @@ func handleTriggered(
 
 		slog.Info("investigating before filing", "summary", result.Summary, "category", result.Category)
 		slackClient.SetStatus(msg.Channel, threadTS, "Investigating the codebase...")
+		releaseRibbitSem()
 
 		outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS,
 			stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, sentryCorroborated)

@@ -96,6 +96,22 @@ func TestExtractSentryRefs_RejectsSentryIOInPathNotHost(t *testing.T) {
 	}
 }
 
+// TestExtractSentryRefs_RejectsWrappedLinkWithoutIssuesPath is the regression
+// for the wrapped-label spoof: the <url|LABEL> branch previously trusted the
+// label whenever the wrapped URL's HOST was sentry.io, even with no
+// /issues/ (or /organizations/.../issues/) path — so a crafted
+// "<https://sentry.io|FAKE-1>" would yield "FAKE-1" as if it were a real
+// Sentry short-id. The wrapped URL must now match the issues-path pattern
+// before the label is trusted at all.
+func TestExtractSentryRefs_RejectsWrappedLinkWithoutIssuesPath(t *testing.T) {
+	text := "<https://sentry.io|FAKE-1>"
+
+	got := ExtractSentryRefs(text)
+	if len(got) != 0 {
+		t.Errorf("expected no refs for wrapped link with no issues path, got %#v", got)
+	}
+}
+
 func TestExtractSentryRefs_SubdomainHostStillMatches(t *testing.T) {
 	text := "https://acme.sentry.io/issues/123"
 
