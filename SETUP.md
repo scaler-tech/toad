@@ -302,10 +302,16 @@ mcp:
   enabled: false
   host: localhost
   port: 8099
-  # tls: false     # set true if the endpoint is served behind TLS (e.g. a reverse proxy) — affects the URL shown in /toad mcp connect DMs
+  # tls: false            # serves the endpoint over real TLS — requires cert_file/key_file below,
+  #                       # and affects the URL shown in /toad mcp connect DMs
+  # cert_file: ""         # TLS certificate path; required when tls is true
+  # key_file: ""          # TLS private key path; required when tls is true
+  # token_ttl_days: 90    # MCP bearer token lifetime in days; 0 = tokens never expire
   devs: []         # Slack user IDs granted the logs/query/investigations dev role
   message: ""      # optional message included in the connect DM
 ```
+
+`tls` isn't cosmetic: when set, toad actually serves HTTPS on `mcp.host`/`mcp.port`, and startup validation fails closed if `cert_file` or `key_file` is missing. `token_ttl_days` bounds how long a `/toad mcp connect`-issued bearer token stays valid (default 90 days); set it to `0` for tokens that never expire.
 
 ---
 
@@ -370,6 +376,8 @@ autorestart=true
 ```
 
 `toad status` (optionally `--port <n>`) opens a live dashboard reading directly from SQLite — it works even while the daemon is stopped. `toad restart` gracefully restarts a running daemon (useful after config changes). `toad update` self-updates via Homebrew when available.
+
+**Upgrading and MCP tokens:** the schema migration that hardens MCP token storage (hashing at rest, expiry) wipes any existing MCP bearer tokens as part of the upgrade — this is a one-time effect of that migration, not something later upgrades repeat. After upgrading past it, anyone using `/toad mcp connect` (Claude Desktop/Code, Biome, etc.) needs to re-run it in Slack to get a fresh token.
 
 ---
 

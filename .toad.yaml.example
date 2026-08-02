@@ -143,8 +143,12 @@ log:
 #   enabled: false
 #   host: "localhost"
 #   port: 8099
-#   # tls: false                 # true if served behind TLS (e.g. reverse proxy) —
-#                                 # affects the URL shown in /toad mcp connect DMs
+#   # tls: false                 # serve the MCP endpoint over real TLS (not just cosmetic) —
+#                                 # requires cert_file and key_file below, and affects the URL
+#                                 # shown in /toad mcp connect DMs
+#   # cert_file: ""              # TLS certificate path; required when tls is true
+#   # key_file: ""               # TLS private key path; required when tls is true
+#   # token_ttl_days: 90         # MCP bearer token lifetime in days; 0 = tokens never expire
 #   devs:                        # Slack user IDs with dev role (logs/query/investigations)
 #     - "U0123456789"
 #   message: ""                  # optional message included in the connect DM
