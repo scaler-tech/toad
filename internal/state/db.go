@@ -179,9 +179,17 @@ func migrate(db *sql.DB) error {
 			channel       TEXT,
 			repo          TEXT,
 			findings_json TEXT NOT NULL,
+			duration_ms   INTEGER DEFAULT 0,
 			created_at    DATETIME NOT NULL
 		);
 		CREATE INDEX IF NOT EXISTS idx_invest_thread ON investigations(thread_ts);
+
+		CREATE TABLE IF NOT EXISTS metrics_hourly (
+			bucket TEXT NOT NULL,
+			name   TEXT NOT NULL,
+			count  INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (bucket, name)
+		);
 	`)
 	if err != nil {
 		return err
@@ -272,6 +280,17 @@ func migrate(db *sql.DB) error {
 		{11, `DELETE FROM mcp_tokens;
 			  ALTER TABLE mcp_tokens ADD COLUMN expires_at DATETIME;
 			  ALTER TABLE ticket_index ADD COLUMN last_state_type TEXT DEFAULT ''`},
+		// v12: hourly metrics counters (for dashboard trend sparklines) plus
+		// investigation duration tracking. metrics_hourly is a brand-new
+		// table so CREATE TABLE IF NOT EXISTS is safe to replay here even
+		// though the base schema block above also creates it for fresh DBs
+		// (same dual-path convention as migration 10's ticket_index/
+		// investigations tables). investigations.duration_ms is likewise
+		// mirrored into the base CREATE TABLE above for fresh installs.
+		{12, `CREATE TABLE IF NOT EXISTS metrics_hourly (
+				  bucket TEXT NOT NULL, name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+				  PRIMARY KEY (bucket, name));
+			  ALTER TABLE investigations ADD COLUMN duration_ms INTEGER DEFAULT 0`},
 	}
 
 	// Read current schema version. If no version is stored, detect whether
@@ -315,120 +334,6 @@ func migrate(db *sql.DB) error {
 	}
 
 	return nil
-}
-
-// SaveRun inserts or replaces a run in the database.
-func (d *DB) SaveRun(run *Run) error {
-	var resultJSON []byte
-	if run.Result != nil {
-		var err error
-		resultJSON, err = json.Marshal(run.Result)
-		if err != nil {
-			return fmt.Errorf("marshaling result: %w", err)
-		}
-	}
-
-	return dbRetry(func() error {
-		ctx, cancel := dbCtx()
-		defer cancel()
-		_, err := d.db.ExecContext(ctx, `
-			INSERT OR REPLACE INTO runs (id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			run.ID, run.Status, run.SlackChannel, run.SlackThreadTS,
-			run.Branch, run.WorktreePath, run.Task, run.RepoName, run.ClaimScope, run.StartedAt,
-			string(resultJSON), time.Now(),
-		)
-		return err
-	})
-}
-
-// UpdateStatus updates the status of a run.
-func (d *DB) UpdateStatus(runID, status string) error {
-	ctx, cancel := dbCtx()
-	defer cancel()
-	_, err := d.db.ExecContext(ctx,
-		"UPDATE runs SET status = ?, updated_at = ? WHERE id = ?",
-		status, time.Now(), runID,
-	)
-	return err
-}
-
-// CompleteRun marks a run as done or failed with a result.
-func (d *DB) CompleteRun(runID string, result *RunResult) error {
-	status := "done"
-	if !result.Success {
-		status = "failed"
-	}
-
-	resultJSON, err := json.Marshal(result)
-	if err != nil {
-		return fmt.Errorf("marshaling result: %w", err)
-	}
-
-	ctx, cancel := dbCtx()
-	defer cancel()
-	_, err = d.db.ExecContext(ctx,
-		"UPDATE runs SET status = ?, result_json = ?, updated_at = ? WHERE id = ?",
-		status, string(resultJSON), time.Now(), runID,
-	)
-	return err
-}
-
-// GetByThread looks up a run by its Slack thread timestamp.
-// Returns nil if not found.
-func (d *DB) GetByThread(threadTS string) (*Run, error) {
-	ctx, cancel := dbCtx()
-	defer cancel()
-	row := d.db.QueryRowContext(ctx,
-		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json FROM runs WHERE slack_thread = ? AND status NOT IN ('done', 'failed') LIMIT 1",
-		threadTS,
-	)
-	return scanRun(row)
-}
-
-// ActiveRuns returns all runs in active states.
-func (d *DB) ActiveRuns() ([]*Run, error) {
-	ctx, cancel := dbCtx()
-	defer cancel()
-	rows, err := d.db.QueryContext(ctx,
-		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json FROM runs WHERE status NOT IN ('done', 'failed') ORDER BY started_at",
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanRuns(rows)
-}
-
-// History returns completed runs, most recent first.
-func (d *DB) History(limit int) ([]*Run, error) {
-	ctx, cancel := dbCtx()
-	defer cancel()
-	rows, err := d.db.QueryContext(ctx,
-		"SELECT id, status, slack_channel, slack_thread, branch, worktree_path, task, repo_name, claim_scope, started_at, result_json FROM runs WHERE status IN ('done', 'failed') ORDER BY started_at DESC LIMIT ?",
-		limit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanRuns(rows)
-}
-
-// HasWorktree checks if any active run references the given worktree path.
-func (d *DB) HasWorktree(path string) bool {
-	ctx, cancel := dbCtx()
-	defer cancel()
-	var count int
-	err := d.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM runs WHERE worktree_path = ? AND status NOT IN ('done', 'failed')",
-		path,
-	).Scan(&count)
-	if err != nil {
-		slog.Warn("HasWorktree query failed, assuming not tracked", "path", path, "error", err)
-		return false
-	}
-	return count > 0
 }
 
 // SaveThreadMemory stores triage + response context for a thread.
@@ -479,128 +384,118 @@ func (d *DB) PruneThreadMemory(olderThan time.Duration) (int, error) {
 	return int(n), err
 }
 
-// SavePRWatch registers a PR for review comment monitoring.
-func (d *DB) SavePRWatch(prNumber int, prURL, branch, runID, slackChannel, slackThread, repoPath, originalSummary, originalDescription string) error {
+// ThreadMemoryCount returns the number of thread memory rows currently
+// stored — a genuinely-live count (unlike the old runs-derived Stats),
+// surfaced on the dashboard as a lightweight "active context" signal.
+func (d *DB) ThreadMemoryCount() (int, error) {
 	ctx, cancel := dbCtx()
 	defer cancel()
-	_, err := d.db.ExecContext(ctx, `
-		INSERT INTO pr_watches (pr_number, pr_url, branch, run_id, slack_channel, slack_thread, repo_path, original_summary, original_description, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(pr_number) DO UPDATE SET
-			pr_url = excluded.pr_url,
-			branch = excluded.branch,
-			run_id = excluded.run_id,
-			slack_channel = excluded.slack_channel,
-			slack_thread = excluded.slack_thread,
-			repo_path = excluded.repo_path,
-			original_summary = excluded.original_summary,
-			original_description = excluded.original_description`,
-		prNumber, prURL, branch, runID, slackChannel, slackThread, repoPath, originalSummary, originalDescription, time.Now(),
-	)
-	return err
+	var count int
+	if err := d.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM thread_memory").Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting threads: %w", err)
+	}
+	return count, nil
 }
 
-// ClosePRWatch marks a PR watch as closed with its final state (e.g. "MERGED", "CLOSED").
-func (d *DB) ClosePRWatch(prNumber int, finalState string) error {
+// metricBucketFormat is the UTC-hour bucket key layout used by
+// metrics_hourly, e.g. "2026-08-02T14".
+const metricBucketFormat = "2006-01-02T15"
+
+// IncrementMetric bumps the counter for name in the UTC-hour bucket
+// containing t (upsert +1). Used for lightweight event counters (e.g.
+// intake events, questions answered) that back the dashboard's trend
+// sparklines; an empty/missing table degrades gracefully since
+// MetricSeries and MetricSeriesDaily just zero-fill on query errors.
+func (d *DB) IncrementMetric(name string, t time.Time) error {
+	bucket := t.UTC().Format(metricBucketFormat)
+	return dbRetry(func() error {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		_, err := d.db.ExecContext(ctx, `
+			INSERT INTO metrics_hourly (bucket, name, count) VALUES (?, ?, 1)
+			ON CONFLICT(bucket, name) DO UPDATE SET count = count + 1`,
+			bucket, name,
+		)
+		return err
+	})
+}
+
+// MetricSeries returns the last `buckets` hourly counts for name, oldest
+// first, ending in the UTC hour containing now. Hours with no recorded
+// events are zero-filled, so the result is always exactly `buckets` long.
+// A query error (e.g. table not yet migrated) degrades to an all-zero
+// series rather than failing the caller.
+func (d *DB) MetricSeries(name string, buckets int, now time.Time) []int {
+	series := make([]int, buckets)
+	if buckets <= 0 {
+		return series
+	}
+
+	counts := make(map[string]int, buckets)
 	ctx, cancel := dbCtx()
 	defer cancel()
-	_, err := d.db.ExecContext(ctx, "UPDATE pr_watches SET closed = TRUE, final_state = ? WHERE pr_number = ?", finalState, prNumber)
-	return err
-}
 
-// Stats holds aggregate metrics across all completed runs.
-type Stats struct {
-	TotalRuns   int
-	Succeeded   int
-	Failed      int
-	TotalCost   float64
-	AvgDuration time.Duration
-	ThreadCount int
-}
-
-// Stats returns aggregate metrics for completed runs and thread memory count.
-func (d *DB) Stats() (*Stats, error) {
-	ctx, cancel := dbCtx()
-	defer cancel()
+	oldest := now.UTC().Add(-time.Duration(buckets-1) * time.Hour).Format(metricBucketFormat)
 	rows, err := d.db.QueryContext(ctx,
-		"SELECT status, result_json FROM runs WHERE status IN ('done', 'failed')",
+		"SELECT bucket, count FROM metrics_hourly WHERE name = ? AND bucket >= ?",
+		name, oldest,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("querying runs: %w", err)
+		return series
 	}
 	defer rows.Close()
-
-	var s Stats
-	var totalDuration time.Duration
 	for rows.Next() {
-		var status string
-		var resultJSON sql.NullString
-		if err := rows.Scan(&status, &resultJSON); err != nil {
-			return nil, fmt.Errorf("scanning run: %w", err)
+		var bucket string
+		var count int
+		if err := rows.Scan(&bucket, &count); err != nil {
+			continue
 		}
-		s.TotalRuns++
-		if status == "done" {
-			s.Succeeded++
-		} else {
-			s.Failed++
-		}
-		if resultJSON.Valid && resultJSON.String != "" {
-			var result RunResult
-			if err := json.Unmarshal([]byte(resultJSON.String), &result); err == nil {
-				s.TotalCost += result.Cost
-				totalDuration += result.Duration
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating runs: %w", err)
+		counts[bucket] = count
 	}
 
-	if s.TotalRuns > 0 {
-		s.AvgDuration = totalDuration / time.Duration(s.TotalRuns)
+	for i := 0; i < buckets; i++ {
+		hour := now.UTC().Add(-time.Duration(buckets-1-i) * time.Hour)
+		series[i] = counts[hour.Format(metricBucketFormat)]
 	}
-
-	if err := d.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM thread_memory").Scan(&s.ThreadCount); err != nil {
-		return nil, fmt.Errorf("counting threads: %w", err)
-	}
-
-	return &s, nil
+	return series
 }
 
-// MergeStats holds aggregate PR outcome metrics.
-type MergeStats struct {
-	PRsCreated int
-	PRsMerged  int
-	PRsClosed  int
-	PRsOpen    int
-}
-
-// MergeRate returns the merge rate as a percentage (0-100), or -1 if no PRs exist.
-func (s *MergeStats) MergeRate() float64 {
-	total := s.PRsMerged + s.PRsClosed
-	if total == 0 {
-		return -1
+// MetricSeriesDaily returns the last `days` daily counts for name, oldest
+// first, summing each day's hourly buckets. Zero-filled and error-tolerant
+// the same way as MetricSeries.
+func (d *DB) MetricSeriesDaily(name string, days int, now time.Time) []int {
+	series := make([]int, days)
+	if days <= 0 {
+		return series
 	}
-	return float64(s.PRsMerged) / float64(total) * 100
-}
 
-// MergeStats returns aggregate PR outcome metrics from pr_watches.
-func (d *DB) MergeStats() (*MergeStats, error) {
+	counts := make(map[string]int, days)
 	ctx, cancel := dbCtx()
 	defer cancel()
-	var s MergeStats
-	err := d.db.QueryRowContext(ctx, `
-		SELECT
-			COUNT(*),
-			COALESCE(SUM(CASE WHEN UPPER(final_state) = 'MERGED' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN closed = TRUE AND UPPER(final_state) != 'MERGED' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN closed = FALSE THEN 1 ELSE 0 END), 0)
-		FROM pr_watches`,
-	).Scan(&s.PRsCreated, &s.PRsMerged, &s.PRsClosed, &s.PRsOpen)
+
+	oldestDay := now.UTC().AddDate(0, 0, -(days - 1)).Format("2006-01-02")
+	rows, err := d.db.QueryContext(ctx,
+		"SELECT substr(bucket, 1, 10) AS day, SUM(count) FROM metrics_hourly WHERE name = ? AND bucket >= ? GROUP BY day",
+		name, oldestDay,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("querying merge stats: %w", err)
+		return series
 	}
-	return &s, nil
+	defer rows.Close()
+	for rows.Next() {
+		var day string
+		var count int
+		if err := rows.Scan(&day, &count); err != nil {
+			continue
+		}
+		counts[day] = count
+	}
+
+	for i := 0; i < days; i++ {
+		day := now.UTC().AddDate(0, 0, -(days - 1 - i)).Format("2006-01-02")
+		series[i] = counts[day]
+	}
+	return series
 }
 
 // DigestOpportunity represents a potential one-shot fix found by the digest engine.
@@ -837,6 +732,15 @@ type DaemonStats struct {
 	MCPEnabled        bool             `json:"mcp_enabled,omitempty"`
 	MCPHost           string           `json:"mcp_host,omitempty"`
 	MCPPort           int              `json:"mcp_port,omitempty"`
+
+	// Concurrency gauges — placeholders for the dashboard's "Live now" card.
+	// Zero-valued (and omitted) until the daemon's investigate/ribbit
+	// semaphore call sites are wired to populate them; the dashboard treats
+	// their absence as "unknown", not "idle".
+	InvestigateSlots    int `json:"investigate_slots,omitempty"`
+	InvestigateInFlight int `json:"investigate_in_flight,omitempty"`
+	RibbitSlots         int `json:"ribbit_slots,omitempty"`
+	RibbitInFlight      int `json:"ribbit_in_flight,omitempty"`
 }
 
 // WriteDaemonStats upserts the daemon's live stats (single row).
@@ -1221,6 +1125,7 @@ type InvestigationRecord struct {
 	Channel      string
 	Repo         string
 	FindingsJSON string
+	DurationMs   int64
 	CreatedAt    time.Time
 }
 
@@ -1230,9 +1135,9 @@ func (d *DB) SaveInvestigation(rec *InvestigationRecord) error {
 		ctx, cancel := dbCtx()
 		defer cancel()
 		_, err := d.db.ExecContext(ctx, `
-			INSERT OR REPLACE INTO investigations (id, thread_ts, channel, repo, findings_json, created_at)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			rec.ID, rec.ThreadTS, rec.Channel, rec.Repo, rec.FindingsJSON, rec.CreatedAt,
+			INSERT OR REPLACE INTO investigations (id, thread_ts, channel, repo, findings_json, duration_ms, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			rec.ID, rec.ThreadTS, rec.Channel, rec.Repo, rec.FindingsJSON, rec.DurationMs, rec.CreatedAt,
 		)
 		return err
 	})
@@ -1244,7 +1149,7 @@ func (d *DB) GetInvestigationByThread(threadTS string) (*InvestigationRecord, er
 	ctx, cancel := dbCtx()
 	defer cancel()
 	row := d.db.QueryRowContext(ctx,
-		"SELECT id, thread_ts, channel, repo, findings_json, created_at FROM investigations WHERE thread_ts = ? ORDER BY created_at DESC LIMIT 1",
+		"SELECT id, thread_ts, channel, repo, findings_json, COALESCE(duration_ms,0), created_at FROM investigations WHERE thread_ts = ? ORDER BY created_at DESC LIMIT 1",
 		threadTS,
 	)
 	return scanInvestigation(row)
@@ -1257,7 +1162,7 @@ func (d *DB) FindInvestigationByTicket(issueID string) (*InvestigationRecord, er
 	ctx, cancel := dbCtx()
 	defer cancel()
 	row := d.db.QueryRowContext(ctx, `
-		SELECT i.id, i.thread_ts, i.channel, i.repo, i.findings_json, i.created_at
+		SELECT i.id, i.thread_ts, i.channel, i.repo, i.findings_json, COALESCE(i.duration_ms,0), i.created_at
 		FROM investigations i
 		JOIN ticket_index t ON t.investigation_id = i.id
 		WHERE t.issue_id = ?
@@ -1267,9 +1172,52 @@ func (d *DB) FindInvestigationByTicket(issueID string) (*InvestigationRecord, er
 	return scanInvestigation(row)
 }
 
+// RecentInvestigations returns the most recently created investigation
+// records, newest first, for the dashboard's Investigations tab.
+func (d *DB) RecentInvestigations(limit int) ([]*InvestigationRecord, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := d.db.QueryContext(ctx,
+		"SELECT id, thread_ts, channel, repo, findings_json, COALESCE(duration_ms,0), created_at FROM investigations ORDER BY created_at DESC LIMIT ?",
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var recs []*InvestigationRecord
+	for rows.Next() {
+		var rec InvestigationRecord
+		if err := rows.Scan(&rec.ID, &rec.ThreadTS, &rec.Channel, &rec.Repo, &rec.FindingsJSON, &rec.DurationMs, &rec.CreatedAt); err != nil {
+			return nil, err
+		}
+		recs = append(recs, &rec)
+	}
+	return recs, rows.Err()
+}
+
+// TicketForInvestigation resolves the tracking ticket filed for an
+// investigation — the reverse join of FindInvestigationByTicket. Returns
+// nil, nil if no ticket_index row references this investigation.
+func (d *DB) TicketForInvestigation(investigationID string) (*TicketIndexEntry, error) {
+	if investigationID == "" {
+		return nil, nil
+	}
+	ctx, cancel := dbCtx()
+	defer cancel()
+	row := d.db.QueryRowContext(ctx, `
+		SELECT external_key, issue_id, COALESCE(issue_url,''), COALESCE(source,''), COALESCE(investigation_id,''),
+		       created_at, last_seen_at, COALESCE(last_status,''), COALESCE(last_state_type,''), status_checked_at
+		FROM ticket_index WHERE investigation_id = ? ORDER BY last_seen_at DESC LIMIT 1`,
+		investigationID,
+	)
+	return scanTicketIndex(row)
+}
+
 func scanInvestigation(row *sql.Row) (*InvestigationRecord, error) {
 	var rec InvestigationRecord
-	err := row.Scan(&rec.ID, &rec.ThreadTS, &rec.Channel, &rec.Repo, &rec.FindingsJSON, &rec.CreatedAt)
+	err := row.Scan(&rec.ID, &rec.ThreadTS, &rec.Channel, &rec.Repo, &rec.FindingsJSON, &rec.DurationMs, &rec.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1292,25 +1240,6 @@ func (d *DB) QueryContext(ctx context.Context, query string, args ...interface{}
 // Close closes the database connection.
 func (d *DB) Close() error {
 	return d.db.Close()
-}
-
-// PRWatch represents a monitored toad PR.
-type PRWatch struct {
-	PRNumber            int
-	PRURL               string
-	Branch              string
-	RunID               string
-	SlackChannel        string
-	SlackThread         string
-	LastCommentID       int
-	FixCount            int
-	CIFixCount          int
-	ConflictFixCount    int
-	RepoPath            string
-	CIExhaustedNotified bool
-	OriginalSummary     string
-	OriginalDescription string
-	CreatedAt           time.Time
 }
 
 // MCPToken represents an MCP authentication token linked to a Slack user.
@@ -1338,48 +1267,3 @@ type ThreadMemory struct {
 
 // ThreadMemoryTTL is how long thread memories are kept.
 const ThreadMemoryTTL = 24 * time.Hour
-
-func scanRun(row *sql.Row) (*Run, error) {
-	run, err := scanRunRow(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return run, nil
-}
-
-func scanRuns(rows *sql.Rows) ([]*Run, error) {
-	var runs []*Run
-	for rows.Next() {
-		run, err := scanRunRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		runs = append(runs, run)
-	}
-	return runs, rows.Err()
-}
-
-// scanRunRow scans a single Run row (the 11 columns shared by scanRun's
-// single-row query and scanRuns' multi-row query) — see the scanner
-// interface's doc comment above.
-func scanRunRow(row scanner) (*Run, error) {
-	var run Run
-	var resultJSON sql.NullString
-	err := row.Scan(
-		&run.ID, &run.Status, &run.SlackChannel, &run.SlackThreadTS,
-		&run.Branch, &run.WorktreePath, &run.Task, &run.RepoName, &run.ClaimScope, &run.StartedAt, &resultJSON,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if resultJSON.Valid && resultJSON.String != "" {
-		var result RunResult
-		if err := json.Unmarshal([]byte(resultJSON.String), &result); err == nil {
-			run.Result = &result
-		}
-	}
-	return &run, nil
-}

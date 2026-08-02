@@ -1,92 +1,39 @@
-// Package state manages in-memory and SQLite-persisted run state.
+// Package state manages in-memory and SQLite-persisted daemon state.
 package state
 
 import (
-	"log/slog"
 	"sync"
-	"time"
 )
 
-// Run represents an active or completed investigation run.
-type Run struct {
-	ID            string
-	Status        string // "starting", "investigating", "done", "failed"
-	SlackChannel  string
-	SlackThreadTS string
-	Branch        string
-	WorktreePath  string
-	Task          string
-	RepoName      string
-	ClaimScope    string
-	StartedAt     time.Time
-	Result        *RunResult
-}
-
-type RunResult struct {
-	Success      bool
-	PRUrl        string
-	Error        string
-	FilesChanged int
-	Duration     time.Duration
-	Cost         float64
-}
-
-// Manager tracks investigation runs and maps Slack threads to runs.
+// Manager tracks in-flight Slack thread claims, guarding against duplicate
+// concurrent investigations/tickets for the same thread. It previously also
+// tracked a full runs pipeline (Track/Update/Complete/Active/History) left
+// over from the v1 tadpole architecture; that pipeline had zero production
+// callers once toad dropped coding in favor of the investigation-to-ticket
+// flow, so it was removed. The `runs` DB table itself is left in the schema
+// (harmless, unused) rather than dropped.
 type Manager struct {
-	mu          sync.RWMutex
-	db          *DB // nil for in-memory only (tests, CLI)
-	runs        map[string]*Run
-	threads     map[string]map[string]string // slackThreadTS → scope → runID
-	history     []*Run
-	historySize int
+	mu      sync.RWMutex
+	db      *DB                          // nil for in-memory only (tests, CLI)
+	threads map[string]map[string]string // slackThreadTS -> scope -> runID (runID is always "" now; see Claim)
 }
 
 // NewManager creates an in-memory-only manager (for tests and CLI).
 func NewManager() *Manager {
 	return &Manager{
-		runs:    make(map[string]*Run),
 		threads: make(map[string]map[string]string),
 	}
 }
 
-// NewPersistentManager creates a manager backed by SQLite.
-// It hydrates in-memory state from the database on creation.
-// historySize controls how many completed runs to keep (0 = use default of 50).
+// NewPersistentManager creates a manager backed by SQLite. historySize is
+// accepted for backward-compatible call sites but is unused now that the
+// runs/history pipeline has been removed.
 func NewPersistentManager(db *DB, historySize int) (*Manager, error) {
-	if historySize <= 0 {
-		historySize = 50
-	}
-	m := &Manager{
-		db:          db,
-		runs:        make(map[string]*Run),
-		threads:     make(map[string]map[string]string),
-		historySize: historySize,
-	}
-
-	// Hydrate active runs from DB
-	active, err := db.ActiveRuns()
-	if err != nil {
-		return nil, err
-	}
-	for _, run := range active {
-		m.runs[run.ID] = run
-		if run.SlackThreadTS != "" {
-			if m.threads[run.SlackThreadTS] == nil {
-				m.threads[run.SlackThreadTS] = make(map[string]string)
-			}
-			m.threads[run.SlackThreadTS][run.ClaimScope] = run.ID
-		}
-	}
-
-	// Hydrate history from DB
-	history, err := db.History(historySize)
-	if err != nil {
-		return nil, err
-	}
-	m.history = history
-
-	slog.Info("state hydrated from db", "active", len(active), "history", len(history))
-	return m, nil
+	_ = historySize
+	return &Manager{
+		db:      db,
+		threads: make(map[string]map[string]string),
+	}, nil
 }
 
 // DB returns the underlying database, or nil if in-memory only.
@@ -136,24 +83,6 @@ func (m *Manager) Claim(threadTS string) bool {
 	return m.ClaimScoped(threadTS, "")
 }
 
-// Track registers a new run.
-func (m *Manager) Track(run *Run) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.runs[run.ID] = run
-	if run.SlackThreadTS != "" {
-		if m.threads[run.SlackThreadTS] == nil {
-			m.threads[run.SlackThreadTS] = make(map[string]string)
-		}
-		m.threads[run.SlackThreadTS][run.ClaimScope] = run.ID
-	}
-	if m.db != nil {
-		if err := m.db.SaveRun(run); err != nil {
-			slog.Error("failed to persist run", "id", run.ID, "error", err)
-		}
-	}
-}
-
 // UnclaimScoped removes a thread+scope claim without registering a run (for error cleanup).
 // Only removes placeholder entries (empty runID). Cleans outer map if inner becomes empty.
 func (m *Manager) UnclaimScoped(threadTS, scope string) {
@@ -178,80 +107,4 @@ func (m *Manager) UnclaimScoped(threadTS, scope string) {
 // Unclaim removes a thread claim without registering a run (for error cleanup).
 func (m *Manager) Unclaim(threadTS string) {
 	m.UnclaimScoped(threadTS, "")
-}
-
-// Update updates the status of an existing run.
-func (m *Manager) Update(runID, status string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if run, ok := m.runs[runID]; ok {
-		run.Status = status
-		if m.db != nil {
-			if err := m.db.UpdateStatus(runID, status); err != nil {
-				slog.Error("failed to persist status update", "id", runID, "error", err)
-			}
-		}
-	}
-}
-
-// Complete marks a run as done and moves it to history.
-func (m *Manager) Complete(runID string, result *RunResult) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	run, ok := m.runs[runID]
-	if !ok {
-		return
-	}
-	if result.Success {
-		run.Status = "done"
-	} else {
-		run.Status = "failed"
-	}
-	run.Result = result
-	delete(m.runs, runID)
-	if run.SlackThreadTS != "" {
-		if inner, exists := m.threads[run.SlackThreadTS]; exists {
-			delete(inner, run.ClaimScope)
-			if len(inner) == 0 {
-				delete(m.threads, run.SlackThreadTS)
-			}
-		}
-	}
-	m.history = append(m.history, run)
-	cap := m.historySize
-	if cap <= 0 {
-		cap = 50
-	}
-	if len(m.history) > cap {
-		m.history = m.history[len(m.history)-cap:]
-	}
-	if m.db != nil {
-		if err := m.db.CompleteRun(runID, result); err != nil {
-			slog.Error("failed to persist run completion", "id", runID, "error", err)
-		}
-	}
-}
-
-// Active returns all currently running investigations.
-func (m *Manager) Active() []*Run {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	runs := make([]*Run, 0, len(m.runs))
-	for _, r := range m.runs {
-		cp := *r
-		runs = append(runs, &cp)
-	}
-	return runs
-}
-
-// History returns completed runs.
-func (m *Manager) History() []*Run {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]*Run, len(m.history))
-	for i, r := range m.history {
-		cp := *r
-		out[i] = &cp
-	}
-	return out
 }
