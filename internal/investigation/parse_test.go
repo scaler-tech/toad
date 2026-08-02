@@ -149,6 +149,83 @@ func TestParseFindings_EmbeddedAfterProse(t *testing.T) {
 	}
 }
 
+// TestParseFindings_Strategy3BackscanOnly constructs input that only parses
+// via ParseFindings' third strategy (backscan from the last `"feasible"`
+// occurrence): prose appears both before and after the real JSON object, and
+// an earlier decoy `{` (with no matching closing brace of its own) sits in
+// the leading prose.
+//
+//   - Strategy 1 fails because the literal substring `{"feasible"` never
+//     appears — the real JSON is pretty-printed with a newline/indentation
+//     between its opening brace and the "feasible" key.
+//   - Strategy 2 fails because it takes the FIRST `{` in the text (the
+//     decoy) and brace-matches from there: since the decoy never closes,
+//     depth only returns to 1 (not 0) at the real JSON's own closing brace,
+//     so findMatchingBrace never finds a match and strategy 2 gives up.
+//   - Strategy 3 succeeds because it starts its backscan from the LAST
+//     `"feasible"` occurrence and finds the real JSON's own opening brace —
+//     the nearest `{` behind it — independent of the earlier decoy.
+func TestParseFindings_Strategy3BackscanOnly(t *testing.T) {
+	input := `Investigated the pipeline. Configuration snapshot looked odd: { "note": true
+Actually, here's the real verdict after some digging.
+{
+  "feasible": true,
+  "title": "Nil pointer in refund handler",
+  "problem": "internal/billing/refund.go panics on empty batch",
+  "root_cause": "missing len check before indexing batch[0]",
+  "evidence": [],
+  "scope": ["Add empty-batch guard"],
+  "non_goals": [],
+  "acceptance_criteria": ["Handler returns early on empty batch"],
+  "confidence": 0.87,
+  "repo": "billing-service",
+  "sentry_issue_ids": ["BILL-77"],
+  "issue_id": "",
+  "reasoning": "Traced the panic to internal/billing/refund.go missing a length check."
+}
+Let me know if you'd like the fix applied.`
+
+	// Sanity-check the premises this test depends on, so a future edit to
+	// ParseFindings' strategy order (or to this fixture) fails loudly here
+	// instead of silently exercising a different strategy than intended.
+	if strings.Contains(input, `{"feasible"`) {
+		t.Fatal("test fixture invalid: literal `{\"feasible\"` present, would satisfy strategy 1")
+	}
+	if strings.Contains(input, "```") {
+		t.Fatal("test fixture invalid: contains a code fence, changes strategy 2's behavior")
+	}
+
+	f, err := ParseFindings(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !f.Feasible {
+		t.Error("expected Feasible=true")
+	}
+	if f.Title != "Nil pointer in refund handler" {
+		t.Errorf("unexpected Title: %q", f.Title)
+	}
+	if f.Confidence != 0.87 {
+		t.Errorf("expected Confidence=0.87, got %v", f.Confidence)
+	}
+	if f.Repo != "billing-service" {
+		t.Errorf("unexpected Repo: %q", f.Repo)
+	}
+	if len(f.SentryIssueIDs) != 1 || f.SentryIssueIDs[0] != "BILL-77" {
+		t.Errorf("unexpected SentryIssueIDs: %v", f.SentryIssueIDs)
+	}
+	found := false
+	for _, p := range f.FilesFound {
+		if p == "internal/billing/refund.go" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected FilesFound to contain internal/billing/refund.go, got %v", f.FilesFound)
+	}
+}
+
 func TestParseFindings_MalformedInput(t *testing.T) {
 	input := "The agent crashed before producing a verdict. No JSON here at all."
 

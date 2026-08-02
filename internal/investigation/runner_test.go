@@ -2,6 +2,7 @@ package investigation
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -233,5 +234,27 @@ func TestRun_ParseFailureWrapsError(t *testing.T) {
 	_, err := r.Run(context.Background(), Request{Text: "investigate", Repo: testRepo()})
 	if err == nil {
 		t.Fatal("expected error when agent result has no parseable findings")
+	}
+}
+
+// TestRun_AgentFailureWrapsError covers the other Run error path: the agent
+// provider itself failing (process error, CLI failure, etc.), as opposed to
+// TestRun_ParseFailureWrapsError's successful-but-unparseable result. The
+// underlying error must be preserved (via %w) and identifiable via
+// errors.Is/errors.Unwrap, not just swallowed into an opaque message.
+func TestRun_AgentFailureWrapsError(t *testing.T) {
+	underlying := errors.New("claude cli exited 1")
+	mock := &agent.MockProvider{RunErr: underlying}
+	r := NewRunner(mock, "claude-x", "", nil, nil, nil)
+
+	_, err := r.Run(context.Background(), Request{Text: "investigate", Repo: testRepo()})
+	if err == nil {
+		t.Fatal("expected error when the agent provider itself fails")
+	}
+	if !errors.Is(err, underlying) {
+		t.Errorf("expected wrapped error to unwrap to the underlying agent error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "investigation agent run failed") {
+		t.Errorf("expected error message to describe the failure point, got %q", err.Error())
 	}
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -158,6 +159,63 @@ func TestPollOnce_CtxCancellationStopsLoop(t *testing.T) {
 
 	if len(fake.calls) != 1 {
 		t.Fatalf("expected loop to stop after cancellation (1 call), got %d calls: %v", len(fake.calls), fake.calls)
+	}
+}
+
+// TestPollOnce_ContinuesPastPerEntryError confirms a single entry's
+// GetIssueStatus error doesn't abort the whole poll pass: pollOnce logs the
+// per-entry failure at debug and continues (no retry storm, no early
+// return), so entries seeded after the failing one still get checked and
+// their status persisted, while the failing entry's own status is left
+// untouched.
+func TestPollOnce_ContinuesPastPerEntryError(t *testing.T) {
+	db := newTestDB(t)
+	seedTicket(t, db, "thread:C4:1", "TOAD-30", "Todo", time.Time{})
+	seedTicket(t, db, "thread:C4:2", "TOAD-31", "Todo", time.Time{})
+	seedTicket(t, db, "thread:C4:3", "TOAD-32", "Todo", time.Time{})
+
+	fake := &outcomeTrackerFake{
+		statuses: map[string]issuetracker.IssueStatus{
+			"TOAD-31": {State: "Done"},
+			"TOAD-32": {State: "In Progress"},
+		},
+		errs: map[string]error{
+			"TOAD-30": errors.New("linear api unavailable"),
+		},
+	}
+
+	pollOnce(context.Background(), db, fake, time.Hour)
+
+	if len(fake.calls) != 3 {
+		t.Fatalf("expected all 3 entries to be attempted despite the first erroring, got %d calls: %v", len(fake.calls), fake.calls)
+	}
+
+	// The entry whose lookup errored must keep its prior status untouched —
+	// no partial/zero-value write from the failed call.
+	failed, err := db.GetTicketIndex("thread:C4:1")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if failed.LastStatus != "Todo" {
+		t.Errorf("expected the errored entry's status to remain unchanged, got %q", failed.LastStatus)
+	}
+
+	// Entries after the failing one must still have been processed and
+	// persisted — the error on TOAD-30 didn't abort the rest of the pass.
+	second, err := db.GetTicketIndex("thread:C4:2")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if second.LastStatus != "Done" {
+		t.Errorf("expected entry after the errored one to still be processed, got LastStatus=%q", second.LastStatus)
+	}
+
+	third, err := db.GetTicketIndex("thread:C4:3")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if third.LastStatus != "In Progress" {
+		t.Errorf("expected the third entry to also be processed, got LastStatus=%q", third.LastStatus)
 	}
 }
 

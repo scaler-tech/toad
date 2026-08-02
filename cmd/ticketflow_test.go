@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,14 @@ type ticketflowTrackerFake struct {
 	createCalls  []issuetracker.CreateIssueOpts
 	commentCalls int
 	nextID       string
+	// createErr, when set, is returned by CreateIssue instead of a ref —
+	// exercises the FileOrUpdate create-failure path surfacing through
+	// runTriggeredInvestigation as outcomeFilingFailed.
+	createErr error
+	// postErr, when set, is returned by PostComment instead of nil —
+	// exercises preInvestigationTicketCheck's re-observation comment failing
+	// without crashing the flow (it's logged and swallowed).
+	postErr error
 }
 
 // ShouldCreateIssues overrides the embedded NoopTracker's false — every test
@@ -35,6 +44,9 @@ type ticketflowTrackerFake struct {
 func (f *ticketflowTrackerFake) ShouldCreateIssues() bool { return true }
 
 func (f *ticketflowTrackerFake) CreateIssue(_ context.Context, opts issuetracker.CreateIssueOpts) (*issuetracker.IssueRef, error) {
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	f.createCalls = append(f.createCalls, opts)
 	id := f.nextID
 	if id == "" {
@@ -45,6 +57,9 @@ func (f *ticketflowTrackerFake) CreateIssue(_ context.Context, opts issuetracker
 
 func (f *ticketflowTrackerFake) PostComment(context.Context, *issuetracker.IssueRef, string) error {
 	f.commentCalls++
+	if f.postErr != nil {
+		return f.postErr
+	}
 	return nil
 }
 
@@ -100,6 +115,32 @@ func autoFileCfg() config.TicketConfig {
 	return config.TicketConfig{AutoFile: true, AutoFileConfidence: 0.85}
 }
 
+// TestComposeFiledReply_AlreadyExistedUsesLinkedWording exercises
+// composeFiledReply directly (no investigation/state/tracker scaffolding
+// needed): when FileResult.AlreadyExisted is true, the reply must say
+// "Already tracked as", not "Filed" — wording it as a fresh filing would be
+// misleading for a re-observation of a ticket that already tracked this
+// exact problem (see the function's doc comment).
+func TestComposeFiledReply_AlreadyExistedUsesLinkedWording(t *testing.T) {
+	findings := investigation.Findings{Title: "Refund export double-counts partial refunds", Reasoning: "root cause confirmed"}
+	fileResult := &ticket.FileResult{
+		Ref:            &issuetracker.IssueRef{Provider: "linear", ID: "TOAD-EXISTING", URL: "https://linear.app/toad/issue/TOAD-EXISTING", Title: "Refund export double-counts partial refunds"},
+		AlreadyExisted: true,
+	}
+
+	got := composeFiledReply(findings, fileResult)
+
+	if !strings.Contains(got, "Already tracked as") {
+		t.Errorf("expected reply to use the linked-existing wording, got %q", got)
+	}
+	if strings.Contains(got, "Filed ") {
+		t.Errorf("expected reply NOT to say 'Filed' for an already-existing ticket, got %q", got)
+	}
+	if !strings.Contains(got, "https://linear.app/toad/issue/TOAD-EXISTING") {
+		t.Errorf("expected reply to contain the existing ticket URL, got %q", got)
+	}
+}
+
 // (a) sentry-corroborated (allowlisted-bot-sourced), high-confidence finding
 // -> auto-file, ticket_index row created, and the composed Slack reply text
 // contains the ticket URL. Fix 2 (security): corroboration requires the
@@ -139,6 +180,9 @@ func TestRunTriggeredInvestigation_AutoFilesHighConfidenceSentryFinding(t *testi
 	}
 	if entry.IssueID != "TOAD-1" {
 		t.Errorf("expected ticket_index.issue_id = TOAD-1, got %q", entry.IssueID)
+	}
+	if entry.Source != string(ticket.SourceAuto) {
+		t.Errorf("expected ticket_index.source = %q for the triggered auto-file path, got %q", ticket.SourceAuto, entry.Source)
 	}
 
 	// Claim must be released on the filed-and-replied path.
@@ -227,6 +271,129 @@ func TestRunTriggeredInvestigation_DuplicateSentryKeySkipsInvestigation(t *testi
 
 	if !stateManager.Claim(msg.ThreadTS()) {
 		t.Error("expected claim to be released after an idempotent-hit outcome")
+	}
+}
+
+// An investigation agent failure (agent.MockProvider.RunErr, surfaced by
+// investigation.Runner.Run as a wrapped error — see
+// TestRun_AgentFailureWrapsError in internal/investigation) must make
+// runTriggeredInvestigation fall through to the ribbit path rather than
+// erroring out or crashing: no ticket filed, no reply composed here (the
+// caller's ribbit path takes over), and the thread claim still released.
+func TestRunTriggeredInvestigation_FallsThroughToRibbitOnInvestigationError(t *testing.T) {
+	db := newTestDB(t)
+	stateManager := newTestStateManager(t, db)
+	tracker := &ticketflowTrackerFake{}
+	mockProvider := &agent.MockProvider{RunErr: errors.New("claude cli exited 1")}
+	investRunner := investigation.NewRunner(mockProvider, "sonnet", "", nil, nil, nil)
+	ticketEngine := ticket.New(tracker, db, autoFileCfg(), nil)
+	investigateSem := make(chan struct{}, 2)
+	resolver := newTestResolver(t)
+
+	msg := &islack.IncomingMessage{Channel: "C13", Timestamp: "1300.1", Text: "something broke"}
+	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "something broke", Actionable: true}
+
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Fatal("expected claim to succeed on a fresh thread")
+	}
+
+	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, false /* sentryCorroborated */)
+
+	if outcome.Kind != outcomeFallThrough {
+		t.Fatalf("expected outcomeFallThrough on an investigation agent error, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
+	}
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected no CreateIssue call when the investigation itself errored, got %d", len(tracker.createCalls))
+	}
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Error("expected claim to be released after a fall-through outcome")
+	}
+}
+
+// (d) FileOrUpdate's CreateIssue failure must surface as outcomeFilingFailed
+// with a user-facing ":x: ... couldn't file" reply that carries both the
+// underlying error and the investigation's own reasoning — not a crash and
+// not a silently-dropped report.
+func TestRunTriggeredInvestigation_CreateIssueErrorSurfacesAsFilingFailed(t *testing.T) {
+	_, stateManager, tracker, _, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+	resolver := newTestResolver(t)
+	tracker.createErr = errors.New("linear api unavailable")
+
+	msg := &islack.IncomingMessage{Channel: "C11", Timestamp: "1100.1", SentryRefs: []string{"BILLING-42"}, Text: "users report double refunds", IsBot: true, BotID: "B_SENTRY"}
+	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "double refunds", Actionable: true}
+
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Fatal("expected claim to succeed on a fresh thread")
+	}
+
+	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
+
+	if outcome.Kind != outcomeFilingFailed {
+		t.Fatalf("expected outcomeFilingFailed, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
+	}
+	if !strings.Contains(outcome.ReplyText, ":x:") || !strings.Contains(outcome.ReplyText, "couldn't file a ticket") {
+		t.Errorf("expected a user-facing filing-failure reply, got %q", outcome.ReplyText)
+	}
+	if !strings.Contains(outcome.ReplyText, "linear api unavailable") {
+		t.Errorf("expected the reply to surface the underlying error, got %q", outcome.ReplyText)
+	}
+	if !strings.Contains(outcome.ReplyText, "Found the root cause via Sentry stack trace.") {
+		t.Errorf("expected the reply to still carry the investigation's reasoning, got %q", outcome.ReplyText)
+	}
+	if outcome.Findings == nil {
+		t.Error("expected Findings to be populated on a filing-failed outcome")
+	}
+
+	// Claim must still be released even though filing failed.
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Error("expected claim to be released after a filing-failed outcome")
+	}
+}
+
+// (e) A PostComment failure during the idempotency pre-check's re-observation
+// comment must not crash or otherwise derail the flow — preInvestigationTicketCheck
+// only logs it and still returns the existing entry, so the caller must still
+// report an idempotent hit linking the existing ticket.
+func TestRunTriggeredInvestigation_ReObservationPostCommentErrorDoesNotCrashFlow(t *testing.T) {
+	db, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+	resolver := newTestResolver(t)
+	tracker.postErr = errors.New("linear comment api unavailable")
+
+	if err := db.UpsertTicketIndex(&state.TicketIndexEntry{
+		ExternalKey: "sentry:BILLING-42",
+		IssueID:     "TOAD-EXISTING",
+		IssueURL:    "https://linear.app/toad/issue/TOAD-EXISTING",
+		Source:      "auto",
+		CreatedAt:   time.Now(),
+		LastSeenAt:  time.Now(),
+	}); err != nil {
+		t.Fatalf("seeding ticket index: %v", err)
+	}
+
+	msg := &islack.IncomingMessage{Channel: "C12", Timestamp: "1200.1", SentryRefs: []string{"BILLING-42"}, Text: "same issue again", IsBot: true, BotID: "B_SENTRY"}
+	result := &triage.Result{Category: "bug", Confidence: 0.9, Summary: "same issue again", Actionable: true}
+
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Fatal("expected claim to succeed on a fresh thread")
+	}
+
+	outcome := runTriggeredInvestigation(context.Background(), msg, result, "eng-alerts", msg.ThreadTS(),
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
+
+	if outcome.Kind != outcomeIdempotentHit {
+		t.Fatalf("expected outcomeIdempotentHit despite the PostComment error, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
+	}
+	if !strings.Contains(outcome.ReplyText, "TOAD-EXISTING") {
+		t.Errorf("expected reply to still link the existing ticket, got %q", outcome.ReplyText)
+	}
+	if len(mockProvider.RunCalls) != 0 {
+		t.Errorf("expected no investigation agent Run call on an idempotency hit, got %d", len(mockProvider.RunCalls))
+	}
+
+	if !stateManager.Claim(msg.ThreadTS()) {
+		t.Error("expected claim to be released even though the re-observation comment failed")
 	}
 }
 
@@ -343,6 +510,17 @@ func TestRunTicketRequest_FilesDirectlyForPreviouslyProposedFinding(t *testing.T
 	if len(mockProvider.RunCalls) != 0 {
 		t.Errorf("expected no investigation agent Run call when reusing a saved finding, got %d", len(mockProvider.RunCalls))
 	}
+
+	entry, err := db.GetTicketIndex("thread:" + msg.Channel + ":" + msg.ThreadTS())
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected a ticket_index row for the filed ticket")
+	}
+	if entry.Source != string(ticket.SourceCTA) {
+		t.Errorf("expected ticket_index.source = %q for the CTA path, got %q", ticket.SourceCTA, entry.Source)
+	}
 }
 
 // (b) An escalation (or CTA) request on a thread that's already claimed
@@ -371,6 +549,51 @@ func TestRunTicketRequest_ConflictWhenThreadAlreadyClaimed(t *testing.T) {
 	}
 	if len(tracker.createCalls) != 0 {
 		t.Errorf("expected no CreateIssue call on a claim conflict, got %d", len(tracker.createCalls))
+	}
+}
+
+// (f) The success path for allowlisted-bot intake: an actionable bug,
+// triaged above the confidence floor, with a bot-corroborated Sentry
+// reference, must run the investigate-and-file flow end to end — a single
+// investigation agent Run call, an auto-filed ticket, and a sentry-keyed
+// ticket_index row (not just a thread-keyed one, since this report IS
+// externally corroborated).
+func TestRunBotIntake_ActionableCorroboratedBugAutoFiles(t *testing.T) {
+	db, stateManager, tracker, mockProvider, investRunner, ticketEngine, investigateSem := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+	resolver := newTestResolver(t)
+
+	triageProvider := &agent.MockProvider{RunResult: &agent.RunResult{
+		Result: `{"actionable":true,"confidence":0.9,"summary":"double refunds","category":"bug","estimated_size":"small"}`,
+	}}
+	triageEngine := triage.New(triageProvider, "haiku", nil)
+
+	msg := &islack.IncomingMessage{Channel: "C14", Timestamp: "1400.1", SentryRefs: []string{"BILLING-42"}, Text: "users report double refunds", IsBot: true, BotID: "B_SENTRY"}
+
+	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts",
+		stateManager, tracker, resolver, investRunner, ticketEngine, investigateSem, true /* sentryCorroborated */)
+
+	if outcome == nil {
+		t.Fatal("expected a non-nil outcome for an actionable, corroborated bug")
+	}
+	if outcome.Kind != outcomeFiled {
+		t.Fatalf("expected outcomeFiled, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
+	}
+	if len(mockProvider.RunCalls) != 1 {
+		t.Errorf("expected exactly 1 investigation agent Run call, got %d", len(mockProvider.RunCalls))
+	}
+	if len(tracker.createCalls) != 1 {
+		t.Fatalf("expected exactly 1 CreateIssue call, got %d", len(tracker.createCalls))
+	}
+
+	entry, err := db.GetTicketIndex("sentry:BILLING-42")
+	if err != nil {
+		t.Fatalf("GetTicketIndex: %v", err)
+	}
+	if entry == nil {
+		t.Fatal("expected a sentry-keyed ticket_index row for a corroborated bot-intake filing, got none")
+	}
+	if entry.Source != string(ticket.SourceAuto) {
+		t.Errorf("expected ticket_index.source = %q for bot-intake auto-filing, got %q", ticket.SourceAuto, entry.Source)
 	}
 }
 
@@ -476,6 +699,9 @@ func TestProposeFromDigest_AutoFilesSentryCorroboratedFinding(t *testing.T) {
 	}
 	if entry == nil {
 		t.Fatal("expected a ticket_index row for sentry:BILLING-42, got none")
+	}
+	if entry.Source != string(ticket.SourceDigest) {
+		t.Errorf("expected ticket_index.source = %q for the digest auto-file path, got %q", ticket.SourceDigest, entry.Source)
 	}
 }
 
