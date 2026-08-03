@@ -266,7 +266,11 @@ type AskDeps struct {
 	Resolver RepoResolver
 	Repos    []config.RepoConfig
 	Sessions *SessionStore
-	Sem      chan struct{} // ribbit semaphore
+	// Sem bounds concurrent `ask` calls. It is the MCP tool's OWN semaphore
+	// (root.go's mcpAskSem), separate from the ribbitSem used by Slack-
+	// triggered ribbit replies — a busy MCP client must not be able to
+	// exhaust the same slots Slack Q&A needs (I5).
+	Sem chan struct{}
 }
 
 type askArgs struct {
@@ -300,7 +304,8 @@ func RegisterAskTool(srv *gomcp.Server, deps *AskDeps) {
 
 		slog.Info("MCP ask", "user", tok.SlackUser, "question", args.Question)
 
-		// Acquire ribbit semaphore.
+		// Acquire the ask tool's own semaphore (deps.Sem) — see AskDeps.Sem's
+		// doc comment for why this is no longer the Slack ribbit semaphore.
 		select {
 		case deps.Sem <- struct{}{}:
 			defer func() { <-deps.Sem }()

@@ -194,6 +194,12 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Ribbit pool is generous so Q&A stays responsive even while investigations run.
 	ribbitSem := make(chan struct{}, cfg.Limits.MaxConcurrent*3)
 	investigateSem := make(chan struct{}, cfg.Limits.MaxConcurrent)
+	// mcpAskSem is intentionally its own pool, separate from ribbitSem (I5):
+	// the MCP `ask` tool used to share ribbitSem directly, so a busy MCP
+	// client could exhaust the same slots Slack-triggered ribbit replies
+	// need, starving human Q&A in Slack. No new config key — reuses
+	// cfg.Limits.MaxConcurrent, same as investigateSem.
+	mcpAskSem := make(chan struct{}, cfg.Limits.MaxConcurrent)
 
 	// 7. Initialize Slack client
 	slackClient := islack.NewClient(cfg.Slack)
@@ -266,7 +272,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			Resolver: resolver,
 			Repos:    cfg.Repos.List,
 			Sessions: toadmcp.NewSessionStore(),
-			Sem:      ribbitSem,
+			Sem:      mcpAskSem,
 		})
 	}
 

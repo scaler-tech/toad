@@ -175,15 +175,16 @@ func (t *repoSyncTracker) wrap(sync repoSyncer) repoSyncer {
 
 // concurrencyGauge reports the current occupancy of a counting semaphore —
 // a buffered channel used with the acquire-then-release (send-then-receive)
-// pattern, as ribbitSem/investigateSem are throughout cmd/. slots is the
-// channel's fixed capacity; inFlight is how many slots are currently held.
-// Reading len/cap on a channel concurrently with other goroutines sending to
-// or receiving from it is well-defined and race-free (they're simple field
-// reads on the runtime's channel header), so this needs no extra locking —
-// deliberately simpler than a parallel atomic-counter registry, which would
-// risk drifting from the semaphore's actual occupancy and wouldn't cover the
-// MCP ask tool's use of the same ribbitSem instance (internal/mcp/tools.go)
-// without new cross-package plumbing.
+// pattern, as ribbitSem/investigateSem/mcpAskSem are throughout cmd/. slots
+// is the channel's fixed capacity; inFlight is how many slots are currently
+// held. Reading len/cap on a channel concurrently with other goroutines
+// sending to or receiving from it is well-defined and race-free (they're
+// simple field reads on the runtime's channel header), so this needs no
+// extra locking — deliberately simpler than a parallel atomic-counter
+// registry, which would risk drifting from the semaphore's actual
+// occupancy. Note: the MCP ask tool (internal/mcp/tools.go) has its OWN
+// semaphore (mcpAskSem), not ribbitSem (I5) — a busy MCP client must not be
+// able to starve Slack-triggered ribbit replies of the same slots.
 func concurrencyGauge(sem chan struct{}) (slots, inFlight int) {
 	return cap(sem), len(sem)
 }
