@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
@@ -63,16 +64,49 @@ func handleInteractive(ctx context.Context, c *Client, evt socketmode.Event) {
 
 	go func() {
 		userName := c.ResolveUserName(userID)
-		finalBlocks := TicketedByBlocks(cb.Message.Blocks, userName)
-		if err := respondToInteraction(cb.ResponseURL, cb.Message.Text, finalBlocks); err != nil {
+
+		// Truthful-in-progress flip: name the requester, but don't claim
+		// success yet — the flow hasn't actually started until FetchMessage
+		// below succeeds. The prior code jumped straight to the final
+		// ":ticket: Ticket requested by <user>" wording here, before any
+		// fetch had even been attempted, so a fetch failure below (which
+		// used to just log and return) left the button falsely reporting
+		// success with nothing actually happening (Critical fix).
+		inProgressBlocks := TicketInProgressBlocks(cb.Message.Blocks, userName)
+		if err := respondToInteraction(cb.ResponseURL, cb.Message.Text, inProgressBlocks); err != nil {
 			slog.Warn("failed to update button message", "error", err)
 		}
 
 		msg, err := c.FetchMessage(channel, threadTS)
 		if err != nil {
-			slog.Error("failed to fetch thread message for ticket button", "error", err)
+			slog.Warn("failed to fetch thread message for ticket button, retrying once", "error", err, "channel", channel, "thread", threadTS)
+			time.Sleep(1 * time.Second)
+			msg, err = c.FetchMessage(channel, threadTS)
+		}
+		if err != nil {
+			slog.Error("failed to fetch thread message for ticket button after retry — ticket flow was not started",
+				"error", err, "channel", channel, "thread", threadTS, "user", userID)
+
+			if _, replyErr := c.ReplyInThread(channel, threadTS,
+				":x: couldn't start the ticket flow (Slack fetch failed) — click again to retry"); replyErr != nil {
+				slog.Warn("failed to post ticket-flow-failed reply", "error", replyErr)
+			}
+			// Restore the button to its original clickable state (rather
+			// than leaving the in-progress/final wording stuck on the
+			// message) so the user can simply click again to retry.
+			if respErr := respondToInteraction(cb.ResponseURL, cb.Message.Text, cb.Message.Blocks.BlockSet); respErr != nil {
+				slog.Warn("failed to restore button to retry state", "error", respErr)
+			}
 			return
 		}
+
+		// The fetch succeeded and the flow is about to actually start —
+		// the final wording can now safely stick.
+		finalBlocks := TicketedByBlocks(cb.Message.Blocks, userName)
+		if err := respondToInteraction(cb.ResponseURL, cb.Message.Text, finalBlocks); err != nil {
+			slog.Warn("failed to update button message", "error", err)
+		}
+
 		if !isToadSystemMessage {
 			msg.Text = buttonMessageText
 		}

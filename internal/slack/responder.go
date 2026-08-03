@@ -46,6 +46,28 @@ func TicketedByBlocks(origBlocks slack.Blocks, userName string) []slack.Block {
 	return result
 }
 
+// TicketInProgressBlocks builds Block Kit blocks showing the ticket flow is
+// still in progress for a resolved requester — used between resolving the
+// clicking user's name and confirming the fetch/dispatch that actually
+// starts the flow has succeeded. Distinct from TicketedByBlocks' final
+// ":ticket: Ticket requested by <user>" wording, which implies the flow has
+// already started; this is truthful-in-progress instead (Critical fix: the
+// prior code flipped straight to the final wording before FetchMessage had
+// even run, so a fetch failure left the button falsely claiming success).
+func TicketInProgressBlocks(origBlocks slack.Blocks, userName string) []slack.Block {
+	var result []slack.Block
+	for _, b := range origBlocks.BlockSet {
+		// Keep all blocks except the action block (the button)
+		if _, isAction := b.(*slack.ActionBlock); !isAction {
+			result = append(result, b)
+		}
+	}
+	result = append(result, slack.NewContextBlock("toad_ticket_status",
+		slack.NewTextBlockObject(slack.MarkdownType, ":hourglass: Ticket requested by "+userName+" — investigating…", false, false),
+	))
+	return result
+}
+
 // ReplyInThreadWithBlocks posts a Block Kit message as a thread reply and tracks it.
 func (c *Client) ReplyInThreadWithBlocks(channel, threadTS, fallbackText string, blocks []slack.Block) (string, error) {
 	if c.pathScrubber != nil {
