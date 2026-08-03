@@ -55,8 +55,21 @@ func (e *Engine) buildChunks(msgs []Message) []chunk {
 		byChannel[key] = append(byChannel[key], msg)
 	}
 
+	// rawByChannel retains the pre-dedup originals per channel, one entry per
+	// message (no "(xN duplicates)" text collapsing) — used only so a failed
+	// chunk's requeueOrDropFailedChunk call can put the ORIGINAL messages back
+	// in the buffer, not the dedup-annotated copies. Requeuing the annotated
+	// copies would defeat a later dedup pass: the annotated text ("foo (x3
+	// duplicates)") would no longer match a fresh, un-annotated "foo" that
+	// arrives before the next flush, so they'd stop collapsing together.
+	rawByChannel := make(map[string][]Message, len(byChannel))
+
 	// Dedup within each channel and log significant reductions
 	for ch, chMsgs := range byChannel {
+		raw := make([]Message, len(chMsgs))
+		copy(raw, chMsgs)
+		rawByChannel[ch] = raw
+
 		deduped := dedupChannel(chMsgs)
 		if len(chMsgs) != len(deduped) {
 			slog.Info("digest dedup", "channel", ch,
@@ -73,7 +86,7 @@ func (e *Engine) buildChunks(msgs []Message) []chunk {
 		chMsgs := byChannel[ch]
 		if len(chMsgs) >= maxSize {
 			label := fmt.Sprintf("#%s (%d msgs)", ch, len(chMsgs))
-			chunks = append(chunks, chunk{messages: chMsgs, label: label})
+			chunks = append(chunks, chunk{messages: chMsgs, raw: rawByChannel[ch], label: label})
 		} else {
 			smallChannels = append(smallChannels, ch)
 		}
@@ -81,6 +94,7 @@ func (e *Engine) buildChunks(msgs []Message) []chunk {
 
 	// Coalesce small channels into mixed chunks up to maxSize
 	var current []Message
+	var currentRaw []Message
 	var currentChannels int
 	for _, ch := range smallChannels {
 		chMsgs := byChannel[ch]
@@ -89,11 +103,13 @@ func (e *Engine) buildChunks(msgs []Message) []chunk {
 			if currentChannels == 1 {
 				label = fmt.Sprintf("#%s (%d msgs)", current[0].ChannelName, len(current))
 			}
-			chunks = append(chunks, chunk{messages: current, label: label})
+			chunks = append(chunks, chunk{messages: current, raw: currentRaw, label: label})
 			current = nil
+			currentRaw = nil
 			currentChannels = 0
 		}
 		current = append(current, chMsgs...)
+		currentRaw = append(currentRaw, rawByChannel[ch]...)
 		currentChannels++
 	}
 	if len(current) > 0 {
@@ -101,7 +117,7 @@ func (e *Engine) buildChunks(msgs []Message) []chunk {
 		if currentChannels == 1 {
 			label = fmt.Sprintf("#%s (%d msgs)", current[0].ChannelName, len(current))
 		}
-		chunks = append(chunks, chunk{messages: current, label: label})
+		chunks = append(chunks, chunk{messages: current, raw: currentRaw, label: label})
 	}
 
 	return chunks

@@ -27,6 +27,15 @@ type Message struct {
 	ThreadTS    string
 	Timestamp   string
 	BotID       string
+
+	// attempts counts how many times this message has been through a chunk
+	// analysis call that ultimately errored (as opposed to succeeding with
+	// zero opportunities). Unexported/digest-package-internal: it only
+	// matters to flush's own requeue bookkeeping (see
+	// requeueOrDropFailedChunk) and is never meant to be constructed or read
+	// by other packages, so it's left out of every existing digest.Message{}
+	// struct literal across the codebase without needing changes there.
+	attempts int
 }
 
 // Opportunity is a potential one-shot fix identified by the digest analysis.
@@ -99,7 +108,14 @@ type GetPermalinkFunc func(channel, timestamp string) (string, error)
 // chunk is a group of messages to analyze in a single agent call.
 type chunk struct {
 	messages []Message
-	label    string // for logging, e.g. "#errors (42 msgs)" or "mixed (12 msgs, 4 channels)"
+	// raw holds the same messages pre-dedup (one entry per original message,
+	// no "(xN duplicates)" text collapsing) — used only by
+	// requeueOrDropFailedChunk when this chunk's analysis call fails, so the
+	// ORIGINAL messages go back in the buffer rather than the dedup-annotated
+	// copies (which would defeat a later dedup pass — see buildChunks'
+	// rawByChannel doc comment).
+	raw   []Message
+	label string // for logging, e.g. "#errors (42 msgs)" or "mixed (12 msgs, 4 channels)"
 }
 
 // DigestStats holds observable digest engine metrics.
@@ -448,7 +464,18 @@ func (e *Engine) flush(ctx context.Context) {
 		return
 	}
 
-	e.totalProcessed.Add(int64(len(msgs)))
+	// Only count genuinely-new messages toward totalProcessed — a message
+	// with attempts > 0 was already counted on the flush where it was first
+	// drained from the buffer, before requeueOrDropFailedChunk put it back
+	// for this retry. Without this guard, a requeued message would be
+	// double-counted in this metric on every retry attempt.
+	newCount := 0
+	for _, m := range msgs {
+		if m.attempts == 0 {
+			newCount++
+		}
+	}
+	e.totalProcessed.Add(int64(newCount))
 
 	chunks := e.buildChunks(msgs)
 	gatedTickets := map[string]bool{} // tracks tickets already gated/commented on in this flush
@@ -468,7 +495,16 @@ func (e *Engine) flush(ctx context.Context) {
 			// Proportionally longer: 2x messages = 2x timeout
 			chunkTimeout = baseTimeout * time.Duration(len(ch.messages)) / time.Duration(maxSize)
 		}
-		opportunities, _ := e.analyzeWithRetry(ctx, ch, chunkTimeout)
+		opportunities, err := e.analyzeWithRetry(ctx, ch, chunkTimeout)
+		if err != nil {
+			// Critical fix (C4): analyzeWithRetry's error used to be
+			// discarded entirely (`opportunities, _ := ...`), silently
+			// dropping every message in this chunk with no re-attempt and no
+			// visibility. Re-queue the chunk's messages (bounded) instead —
+			// see requeueOrDropFailedChunk's doc comment.
+			e.requeueOrDropFailedChunk(ch, err)
+			continue
+		}
 
 		if len(opportunities) == 0 {
 			continue
@@ -477,6 +513,53 @@ func (e *Engine) flush(ctx context.Context) {
 		if !e.processOpportunities(ctx, ch.messages, opportunities, gatedTickets) {
 			return // spawn limit reached
 		}
+	}
+}
+
+// maxChunkRequeueAttempts bounds how many times a chunk that failed analysis
+// (a genuine agent/parse error — analyzeWithRetry itself already retries
+// once internally on a timeout — as opposed to a clean "no opportunities"
+// result) is re-queued into the buffer for a later flush to retry. Prevents
+// a persistently-broken chunk (e.g. content that reliably breaks the model
+// call) from being requeued forever.
+const maxChunkRequeueAttempts = 3
+
+// requeueOrDropFailedChunk is flush's failure path for a chunk whose
+// analyzeWithRetry call itself errored. It requeues ch.raw (the pre-dedup
+// originals), NOT ch.messages (the dedup-annotated copies used for analysis)
+// — see buildChunks' rawByChannel doc comment for why requeuing the
+// annotated copies would defeat a later dedup pass. Each message's attempts
+// counter is incremented; messages still under maxChunkRequeueAttempts are
+// re-appended to e.buffer (under the same mutex Collect uses) so the next
+// flush retries them alongside whatever's newly arrived. flush itself only
+// counts a message toward e.totalProcessed when its attempts field is still
+// zero, so a requeued message isn't double-counted in that metric across
+// retries. Messages that have exhausted their attempts are dropped and
+// logged at Error with a count; a genuine requeue is logged at Warn.
+// Success (a chunk that analyzes cleanly, even to zero opportunities) is
+// entirely unaffected — this is only reached on a genuine analysis error.
+func (e *Engine) requeueOrDropFailedChunk(ch chunk, err error) {
+	toRequeue := make([]Message, 0, len(ch.raw))
+	dropped := 0
+	for _, m := range ch.raw {
+		m.attempts++
+		if m.attempts >= maxChunkRequeueAttempts {
+			dropped++
+			continue
+		}
+		toRequeue = append(toRequeue, m)
+	}
+
+	if dropped > 0 {
+		slog.Error("digest chunk analysis failed repeatedly, dropping messages that exhausted retries",
+			"label", ch.label, "error", err, "dropped", dropped, "max_attempts", maxChunkRequeueAttempts)
+	}
+	if len(toRequeue) > 0 {
+		slog.Warn("digest chunk analysis failed, requeuing messages for the next flush",
+			"label", ch.label, "error", err, "requeued", len(toRequeue))
+		e.mu.Lock()
+		e.buffer = append(e.buffer, toRequeue...)
+		e.mu.Unlock()
 	}
 }
 
