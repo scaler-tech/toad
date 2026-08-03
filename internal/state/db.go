@@ -639,21 +639,38 @@ func (d *DB) StaleInvestigations() ([]*DigestOpportunity, error) {
 	return opps, nil
 }
 
+// InvestigationErrorPrefix is the exact prefix internal/digest's
+// processOpportunities writes into DigestOpportunity.Reasoning when the
+// investigation call itself errored out (a transient failure), as opposed
+// to a genuine "not feasible" verdict. HasRecentOpportunity excludes rows
+// carrying this prefix from dedup matching below, so a merely-transient
+// investigation failure can't suppress a genuinely recurring alert for up
+// to an hour. Exported (rather than digest-package-local) and shared by
+// both call sites so they can't drift apart.
+const InvestigationErrorPrefix = "investigation error: "
+
 // HasRecentOpportunity checks if a similar opportunity was already processed
 // within the given duration. Uses keyword overlap to catch semantically
 // equivalent issues that Haiku summarized with slightly different wording.
 // Falls back to exact summary match when keywords are unavailable.
+//
+// Rows dismissed only because investigation itself errored (Reasoning
+// starting with InvestigationErrorPrefix) are excluded from both matching
+// paths below — see that const's doc comment.
 func (d *DB) HasRecentOpportunity(summary string, keywords string, within time.Duration) (bool, error) {
 	cutoff := time.Now().Add(-within)
+	errPrefixLike := InvestigationErrorPrefix + "%"
 
 	ctx, cancel := dbCtx()
 	defer cancel()
 
-	// Fast path: exact summary match
+	// Fast path: exact summary match. SQL-side exclusion of
+	// investigation-error rows — cheap since it's just another WHERE clause
+	// on the existing COUNT query.
 	var count int
 	err := d.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM digest_opportunities WHERE summary = ? AND created_at > ?",
-		summary, cutoff,
+		"SELECT COUNT(*) FROM digest_opportunities WHERE summary = ? AND created_at > ? AND reasoning NOT LIKE ?",
+		summary, cutoff, errPrefixLike,
 	).Scan(&count)
 	if err != nil {
 		return false, err
@@ -668,7 +685,7 @@ func (d *DB) HasRecentOpportunity(summary string, keywords string, within time.D
 	}
 
 	rows, err := d.db.QueryContext(ctx,
-		"SELECT keywords FROM digest_opportunities WHERE created_at > ? AND keywords != ''",
+		"SELECT keywords, reasoning FROM digest_opportunities WHERE created_at > ? AND keywords != ''",
 		cutoff,
 	)
 	if err != nil {
@@ -678,8 +695,16 @@ func (d *DB) HasRecentOpportunity(summary string, keywords string, within time.D
 
 	newKW := normalizeKeywords(keywords)
 	for rows.Next() {
-		var existingKW string
-		if err := rows.Scan(&existingKW); err != nil {
+		var existingKW, reasoning string
+		if err := rows.Scan(&existingKW, &reasoning); err != nil {
+			continue
+		}
+		// Go-side exclusion here (rather than pushing into the SQL WHERE
+		// clause) since we're already iterating rows for keyword-overlap
+		// matching — this lets us log the exclusion without an extra query.
+		if strings.HasPrefix(reasoning, InvestigationErrorPrefix) {
+			slog.Info("digest dedup: excluding investigation-error row from keyword match",
+				"summary", summary)
 			continue
 		}
 		if keywordOverlap(newKW, normalizeKeywords(existingKW)) >= 0.5 {

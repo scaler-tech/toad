@@ -540,6 +540,127 @@ func TestDB_HasRecentOpportunity_KeywordOverlap(t *testing.T) {
 	}
 }
 
+// TestDB_HasRecentOpportunity_InvestigationErrorNotSuppressed is the I3 fix:
+// an opportunity dismissed only because the investigation call itself
+// errored (Reasoning prefixed with InvestigationErrorPrefix) must NOT
+// suppress a similar new opportunity within the dedup window — a
+// transient investigation failure shouldn't silence a genuinely recurring
+// alert for up to an hour. Covers both the exact-summary fast path and the
+// keyword-overlap fuzzy path.
+func TestDB_HasRecentOpportunity_InvestigationErrorNotSuppressed(t *testing.T) {
+	t.Run("exact summary match", func(t *testing.T) {
+		db := openTestDB(t)
+
+		opp := &DigestOpportunity{
+			Summary:   "fix the bug",
+			Category:  "bug",
+			Channel:   "C123",
+			Reasoning: InvestigationErrorPrefix + "context deadline exceeded",
+			Dismissed: true,
+			CreatedAt: time.Now(),
+		}
+		if err := db.SaveDigestOpportunity(opp); err != nil {
+			t.Fatal(err)
+		}
+
+		has, err := db.HasRecentOpportunity("fix the bug", "", 1*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if has {
+			t.Error("expected investigation-error row to NOT suppress an exact-summary match")
+		}
+	})
+
+	t.Run("keyword overlap match", func(t *testing.T) {
+		db := openTestDB(t)
+
+		opp := &DigestOpportunity{
+			Summary:   "Red dot indicator misaligned with actual alert severity in meter details",
+			Category:  "bug",
+			Keywords:  "meter,alert,red dot,indicator,severity,misalignment",
+			Channel:   "C123",
+			Reasoning: InvestigationErrorPrefix + "connection refused",
+			Dismissed: true,
+			CreatedAt: time.Now(),
+		}
+		if err := db.SaveDigestOpportunity(opp); err != nil {
+			t.Fatal(err)
+		}
+
+		has, err := db.HasRecentOpportunity(
+			"Red dot indicator misaligned with actual alert severity in meter alert view",
+			"meter alert,red dot indicator,misaligned,alert severity",
+			1*time.Hour,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if has {
+			t.Error("expected investigation-error row to NOT suppress a keyword-overlap match")
+		}
+	})
+}
+
+// TestDB_HasRecentOpportunity_GenuinelyDismissedStillSuppresses guards
+// against over-correcting I3: a genuinely infeasible opportunity (dismissed
+// with ordinary reasoning, not the investigation-error prefix) must still
+// suppress a similar new opportunity within the window, exactly as before.
+func TestDB_HasRecentOpportunity_GenuinelyDismissedStillSuppresses(t *testing.T) {
+	t.Run("exact summary match", func(t *testing.T) {
+		db := openTestDB(t)
+
+		opp := &DigestOpportunity{
+			Summary:   "fix the bug",
+			Category:  "bug",
+			Channel:   "C123",
+			Reasoning: "not feasible: this is already handled by existing validation",
+			Dismissed: true,
+			CreatedAt: time.Now(),
+		}
+		if err := db.SaveDigestOpportunity(opp); err != nil {
+			t.Fatal(err)
+		}
+
+		has, err := db.HasRecentOpportunity("fix the bug", "", 1*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !has {
+			t.Error("expected a genuinely dismissed row to still suppress an exact-summary match")
+		}
+	})
+
+	t.Run("keyword overlap match", func(t *testing.T) {
+		db := openTestDB(t)
+
+		opp := &DigestOpportunity{
+			Summary:   "Red dot indicator misaligned with actual alert severity in meter details",
+			Category:  "bug",
+			Keywords:  "meter,alert,red dot,indicator,severity,misalignment",
+			Channel:   "C123",
+			Reasoning: "not feasible: working as intended",
+			Dismissed: true,
+			CreatedAt: time.Now(),
+		}
+		if err := db.SaveDigestOpportunity(opp); err != nil {
+			t.Fatal(err)
+		}
+
+		has, err := db.HasRecentOpportunity(
+			"Red dot indicator misaligned with actual alert severity in meter alert view",
+			"meter alert,red dot indicator,misaligned,alert severity",
+			1*time.Hour,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !has {
+			t.Error("expected a genuinely dismissed row to still suppress a keyword-overlap match")
+		}
+	})
+}
+
 func TestKeywordOverlap(t *testing.T) {
 	tests := []struct {
 		name   string
