@@ -40,6 +40,15 @@ type envelopeResultError struct {
 
 func (e *envelopeResultError) Error() string { return e.msg }
 
+// ErrSeatThrottledNoFallback is wrapped into the returned error (errors.Is-
+// able) when the Claude CLI reports a subscription-seat throttle and no
+// fallback API key is configured or available (agent.fallback_api_key_env
+// unset, or set to an env var that itself isn't populated) — a specific,
+// actionable failure mode distinct from a generic CLI error. Logged at
+// Error once per occurrence (see Run below); FailureTrackingProvider's
+// Snapshot().LastErr carries this text through to the dashboard (C5).
+var ErrSeatThrottledNoFallback = errors.New("claude seat throttled and no fallback API key configured (set agent.fallback_api_key_env)")
+
 // ClaudeProvider implements Provider using the Claude Code CLI.
 type ClaudeProvider struct {
 	// FallbackAPIKeyEnv, if set, names an environment variable holding an
@@ -83,11 +92,13 @@ func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, err
 		return nil, err
 	}
 	if c.FallbackAPIKeyEnv == "" {
-		return nil, err
+		slog.Error("claude seat throttled and no fallback API key configured (set agent.fallback_api_key_env)")
+		return nil, fmt.Errorf("%w: %s", ErrSeatThrottledNoFallback, err)
 	}
 	apiKey := os.Getenv(c.FallbackAPIKeyEnv)
 	if apiKey == "" {
-		return nil, err
+		slog.Error("claude seat throttled and no fallback API key configured (set agent.fallback_api_key_env)", "env", c.FallbackAPIKeyEnv)
+		return nil, fmt.Errorf("%w: %s", ErrSeatThrottledNoFallback, err)
 	}
 
 	slog.Warn("claude seat throttled, retrying via API key", "env", c.FallbackAPIKeyEnv)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -91,4 +92,81 @@ func (p *ReadDenyingProvider) Run(ctx context.Context, opts RunOpts) (*RunResult
 		opts.DeniedReadPaths = merged
 	}
 	return p.Provider.Run(ctx, opts)
+}
+
+// maxTrackedErrLen bounds how much of a failing Run call's error text
+// FailureTrackingProvider retains — enough to be useful on the dashboard
+// without risking an enormous stderr dump bloating daemon_stats.
+const maxTrackedErrLen = 200
+
+// FailureSnapshot is a point-in-time read of a FailureTrackingProvider's
+// tracked state — see FailureTrackingProvider's doc comment.
+type FailureSnapshot struct {
+	// Consecutive is the number of Run calls that have failed in a row,
+	// since the last success (or since the provider was created, if there
+	// hasn't been one yet). Reset to 0 on every successful Run.
+	Consecutive int64
+	// LastSuccessAt is the time of the most recent successful Run call, or
+	// the zero Time if there hasn't been one yet.
+	LastSuccessAt time.Time
+	// LastErr is the most recent failing Run call's error text (truncated to
+	// maxTrackedErrLen), or "" if there hasn't been a failure yet.
+	LastErr string
+}
+
+// FailureTrackingProvider wraps a Provider and tracks consecutive Run
+// failures/successes (same decorator pattern as ReadDenyingProvider above).
+// It exists so a sustained streak of failing Claude CLI calls — an expired
+// auth token, a broken CLI install, a seat throttled with no fallback
+// configured (see ErrSeatThrottledNoFallback), etc. — is visible on the
+// dashboard rather than living only in scattered per-call log lines that
+// nobody's watching in real time.
+//
+// Intended to be wired ONCE around the base Provider in cmd/root.go, before
+// ReadDenyingProvider/triage/digest/ribbit each get their own reference —
+// see root.go's wiring comment — so every call path (triage, ribbit,
+// investigations, digest) feeds the same counters.
+type FailureTrackingProvider struct {
+	Provider
+
+	mu            sync.Mutex
+	consecutive   int64
+	lastSuccessAt time.Time
+	lastErr       string
+}
+
+// Run delegates to the wrapped Provider and updates the tracked
+// success/failure state before returning. A nil error resets the
+// consecutive-failure counter and records the success time; a non-nil error
+// increments the counter and records the (truncated) error text. The
+// underlying result/error are returned unchanged either way — this is
+// observation only, never altering behavior.
+func (p *FailureTrackingProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, error) {
+	result, err := p.Provider.Run(ctx, opts)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err == nil {
+		p.consecutive = 0
+		p.lastSuccessAt = time.Now()
+		return result, nil
+	}
+	p.consecutive++
+	msg := err.Error()
+	if len(msg) > maxTrackedErrLen {
+		msg = msg[:maxTrackedErrLen]
+	}
+	p.lastErr = msg
+	return result, err
+}
+
+// Snapshot returns a point-in-time read of the tracked failure state.
+func (p *FailureTrackingProvider) Snapshot() FailureSnapshot {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return FailureSnapshot{
+		Consecutive:   p.consecutive,
+		LastSuccessAt: p.lastSuccessAt,
+		LastErr:       p.lastErr,
+	}
 }

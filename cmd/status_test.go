@@ -317,6 +317,84 @@ func TestApiDataHandler_PopulatesConcurrencyGaugesAndSyncStatus(t *testing.T) {
 	}
 }
 
+// TestApiDataHandler_PopulatesClaudeFailureStats is C5's stats round-trip:
+// state.DaemonStats' Claude* fields (written by root.go's stats ticker from
+// agent.FailureTrackingProvider.Snapshot()) must survive the
+// WriteDaemonStats -> ReadDaemonStats -> apiDataHandler round trip into the
+// JSON payload the dashboard reads, including the Unix-seconds conversion
+// for ClaudeLastSuccessAt (0 when never successful).
+func TestApiDataHandler_PopulatesClaudeFailureStats(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	lastSuccess := now.Add(-10 * time.Minute)
+	if err := db.WriteDaemonStats(&state.DaemonStats{
+		Heartbeat:                 now,
+		StartedAt:                 now,
+		PID:                       1234,
+		ClaudeConsecutiveFailures: 7,
+		ClaudeLastSuccessAt:       lastSuccess,
+		ClaudeLastError:           "claude timed out after 4m0s",
+	}); err != nil {
+		t.Fatalf("WriteDaemonStats: %v", err)
+	}
+
+	handler := apiDataHandler(db, &config.Config{})
+	req := httptest.NewRequest("GET", "/api/data", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status code: got %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp apiResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v, body=%s", err, rec.Body.String())
+	}
+
+	if resp.Daemon.ClaudeConsecutiveFailures != 7 {
+		t.Errorf("claude_consecutive_failures = %d, want 7", resp.Daemon.ClaudeConsecutiveFailures)
+	}
+	if resp.Daemon.ClaudeLastError != "claude timed out after 4m0s" {
+		t.Errorf("claude_last_error = %q", resp.Daemon.ClaudeLastError)
+	}
+	if resp.Daemon.ClaudeLastSuccessAt != lastSuccess.Unix() {
+		t.Errorf("claude_last_success_at = %d, want %d", resp.Daemon.ClaudeLastSuccessAt, lastSuccess.Unix())
+	}
+}
+
+// TestApiDataHandler_ZeroClaudeFailuresOmitsSuccessTimestamp guards the
+// never-yet-successful case: a zero-value ClaudeLastSuccessAt must not be
+// converted into a bogus 1970 Unix timestamp.
+func TestApiDataHandler_ZeroClaudeFailuresOmitsSuccessTimestamp(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	if err := db.WriteDaemonStats(&state.DaemonStats{
+		Heartbeat: now,
+		StartedAt: now,
+		PID:       1234,
+	}); err != nil {
+		t.Fatalf("WriteDaemonStats: %v", err)
+	}
+
+	handler := apiDataHandler(db, &config.Config{})
+	req := httptest.NewRequest("GET", "/api/data", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	var resp apiResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v, body=%s", err, rec.Body.String())
+	}
+
+	if resp.Daemon.ClaudeConsecutiveFailures != 0 {
+		t.Errorf("expected claude_consecutive_failures=0, got %d", resp.Daemon.ClaudeConsecutiveFailures)
+	}
+	if resp.Daemon.ClaudeLastSuccessAt != 0 {
+		t.Errorf("expected claude_last_success_at=0 (never successful), got %d", resp.Daemon.ClaudeLastSuccessAt)
+	}
+}
+
 // TestApiDataHandler_NoSyncFailuresMeansNoWarning verifies a healthy
 // (all-successful, or never-attempted) RepoSync map produces no
 // sync_warning — the alert must not fire on data that isn't actually a

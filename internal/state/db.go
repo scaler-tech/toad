@@ -812,6 +812,17 @@ type DaemonStats struct {
 	RibbitSlots         int `json:"ribbit_slots,omitempty"`
 	RibbitInFlight      int `json:"ribbit_in_flight,omitempty"`
 
+	// ClaudeConsecutiveFailures/ClaudeLastSuccessAt/ClaudeLastError mirror
+	// agent.FailureTrackingProvider's Snapshot() (populated every 10s by
+	// root.go's stats ticker, from the single FailureTrackingProvider wired
+	// around the base agent.Provider — see root.go's wiring comment) — a
+	// sustained streak of failing Claude CLI calls is otherwise only visible
+	// in scattered log lines. Backs the dashboard's attention-strip alert
+	// when ClaudeConsecutiveFailures >= 5 (C5).
+	ClaudeConsecutiveFailures int64     `json:"claude_consecutive_failures,omitempty"`
+	ClaudeLastSuccessAt       time.Time `json:"claude_last_success_at,omitempty"`
+	ClaudeLastError           string    `json:"claude_last_error,omitempty"`
+
 	// RepoSync holds the last known sync outcome per configured repo name,
 	// backing the dashboard's per-repo sync freshness display and its
 	// sync-warning attention-strip alert. Updated by every repo sync attempt

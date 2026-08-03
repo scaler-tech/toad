@@ -128,6 +128,17 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	if err := agentProvider.Check(); err != nil {
 		return err
 	}
+
+	// Wire FailureTrackingProvider ONCE, around the base provider, before
+	// any other decorator/consumer gets a reference — readOnlyProvider
+	// (below) wraps this same value, and triageEngine/digest's AgentProvider
+	// are constructed from it further down, so every call path (triage,
+	// ribbit, investigations, digest) feeds the same tracked counters. See
+	// C5: failureTracker.Snapshot() is read by the stats-writer goroutine
+	// below to populate DaemonStats.Claude* for the dashboard.
+	failureTracker := &agent.FailureTrackingProvider{Provider: agentProvider}
+	agentProvider = failureTracker
+
 	vcsResolver, err := buildVCSResolver(cfg)
 	if err != nil {
 		return fmt.Errorf("vcs config: %w", err)
@@ -532,6 +543,10 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			}
 			ds.InvestigateSlots, ds.InvestigateInFlight = concurrencyGauge(investigateSem)
 			ds.RibbitSlots, ds.RibbitInFlight = concurrencyGauge(ribbitSem)
+			failureSnap := failureTracker.Snapshot()
+			ds.ClaudeConsecutiveFailures = failureSnap.Consecutive
+			ds.ClaudeLastSuccessAt = failureSnap.LastSuccessAt
+			ds.ClaudeLastError = failureSnap.LastErr
 			if digestEngine != nil {
 				dstats := digestEngine.Stats()
 				ds.DigestBuffer = dstats.BufferSize

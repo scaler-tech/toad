@@ -487,6 +487,11 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 			daemon.RibbitInFlight = daemonStats.RibbitInFlight
 			daemon.SyncWarning = syncWarningFor(daemonStats.RepoSync)
 			daemon.BotIntakeDropped = daemonStats.BotIntakeDropped
+			daemon.ClaudeConsecutiveFailures = daemonStats.ClaudeConsecutiveFailures
+			if !daemonStats.ClaudeLastSuccessAt.IsZero() {
+				daemon.ClaudeLastSuccessAt = daemonStats.ClaudeLastSuccessAt.Unix()
+			}
+			daemon.ClaudeLastError = daemonStats.ClaudeLastError
 		}
 		if info := checkVersion(); info != nil && info.Available {
 			daemon.UpdateAvailable = true

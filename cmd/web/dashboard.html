@@ -917,6 +917,15 @@
         <button class="dismiss" data-d="sync" aria-label="dismiss">✕</button>
       </div>`;
     }
+    if ((dm.claude_consecutive_failures||0) >= 5 && !dismissedAlerts.has("claude")) {
+      const since = dm.claude_last_success_at ? `since ${relTimeAgo(dm.claude_last_success_at, now)}` : "since daemon start";
+      const lastErr = dm.claude_last_error ? esc(dm.claude_last_error) : "unknown error";
+      html += `<div class="alert" data-a="claude">
+        <b>Claude calls failing</b> (${num(dm.claude_consecutive_failures)} in a row ${esc(since)}) — <span class="mono">${lastErr}</span>
+        <span class="spacer"></span>
+        <button class="dismiss" data-d="claude" aria-label="dismiss">✕</button>
+      </div>`;
+    }
     if (dm.update_available && !dismissedAlerts.has("upd")) {
       // d.auto_update may be absent (e.g. offline payload with no daemon
       // state yet) — treat anything but a literal true as off, same as the

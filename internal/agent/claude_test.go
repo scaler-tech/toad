@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -494,6 +495,51 @@ func TestRun_ThrottleFallbackEnvUnset_ReturnsOriginalError(t *testing.T) {
 	if len(*calls) != 1 {
 		t.Fatalf("expected exactly 1 execution (no fallback without env value), got %d", len(*calls))
 	}
+}
+
+// TestRun_ThrottleNoFallback_ErrorIsSentinelWrapped is the Important fix
+// (I4): when a seat-throttle pattern matches and no fallback API key is
+// configured/available, the returned error must be errors.Is-able against
+// ErrSeatThrottledNoFallback — a distinguishable, dashboard-surfaceable
+// condition, not just a generic error string. Exercises both the
+// no-env-configured and env-configured-but-unset variants.
+func TestRun_ThrottleNoFallback_ErrorIsSentinelWrapped(t *testing.T) {
+	t.Run("no env configured", func(t *testing.T) {
+		_, fake := newFakeExecCommand(t, []fakeScript{
+			{stderr: "Claude AI usage limit reached, retry later", exitCode: 1},
+		})
+		origExecCommand := execCommand
+		execCommand = fake
+		defer func() { execCommand = origExecCommand }()
+
+		p := &ClaudeProvider{}
+		_, err := p.Run(context.Background(), RunOpts{Prompt: "do work"})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(err, ErrSeatThrottledNoFallback) {
+			t.Errorf("expected errors.Is(err, ErrSeatThrottledNoFallback) to be true, got: %v", err)
+		}
+	})
+
+	t.Run("env configured but unset", func(t *testing.T) {
+		_, fake := newFakeExecCommand(t, []fakeScript{
+			{stderr: "rate limit exceeded, try again shortly", exitCode: 1},
+		})
+		origExecCommand := execCommand
+		execCommand = fake
+		defer func() { execCommand = origExecCommand }()
+
+		os.Unsetenv("FAKE_ANTHROPIC_KEY_UNSET_2")
+		p := &ClaudeProvider{FallbackAPIKeyEnv: "FAKE_ANTHROPIC_KEY_UNSET_2"}
+		_, err := p.Run(context.Background(), RunOpts{Prompt: "do work"})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !errors.Is(err, ErrSeatThrottledNoFallback) {
+			t.Errorf("expected errors.Is(err, ErrSeatThrottledNoFallback) to be true, got: %v", err)
+		}
+	})
 }
 
 // TestRun_EnvelopeErrorRateLimit_NoThrottleRetry is the regression for the
