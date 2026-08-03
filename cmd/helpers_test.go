@@ -306,3 +306,45 @@ func TestSyncRepos_ExitsOnCtxDone(t *testing.T) {
 		t.Error("expected at least the immediate startup sync to have run")
 	}
 }
+
+// --- waitForBackgroundWork (I6) ---
+
+// TestWaitForBackgroundWork_ReturnsPromptlyWhenWgFinishes verifies the
+// common case: wg.Wait() completes well before the timeout, so
+// waitForBackgroundWork must return promptly rather than always blocking
+// for the full timeout duration.
+func TestWaitForBackgroundWork_ReturnsPromptlyWhenWgFinishes(t *testing.T) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		wg.Done()
+	}()
+
+	start := time.Now()
+	waitForBackgroundWork(&wg, 5*time.Second)
+	elapsed := time.Since(start)
+
+	if elapsed >= 1*time.Second {
+		t.Errorf("expected waitForBackgroundWork to return promptly once the WaitGroup finished, took %v", elapsed)
+	}
+}
+
+// TestWaitForBackgroundWork_TimesOutOnStuckGoroutine verifies the bound:
+// a WaitGroup that never finishes must not hang shutdown forever —
+// waitForBackgroundWork must return once its timeout elapses.
+func TestWaitForBackgroundWork_TimesOutOnStuckGoroutine(t *testing.T) {
+	var wg sync.WaitGroup
+	wg.Add(1) // deliberately never Done() — simulates a stuck goroutine
+
+	start := time.Now()
+	waitForBackgroundWork(&wg, 50*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("expected waitForBackgroundWork to wait at least the timeout, took %v", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("expected waitForBackgroundWork to return promptly after its timeout, took %v", elapsed)
+	}
+}

@@ -189,6 +189,24 @@ func concurrencyGauge(sem chan struct{}) (slots, inFlight int) {
 	return cap(sem), len(sem)
 }
 
+// waitForBackgroundWork waits for wg with a bounded timeout, so a stuck
+// background goroutine (digest engine, MCP server, outcome poller, repo
+// sync — see root.go's bgWg) can't hang shutdown forever. Logs a Warn if the
+// timeout is hit rather than the wait completing normally; either way the
+// caller proceeds with shutdown once this returns (I6).
+func waitForBackgroundWork(wg *sync.WaitGroup, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		slog.Warn("timed out waiting for background goroutines to finish, proceeding with shutdown anyway", "timeout", timeout)
+	}
+}
+
 // incrementMetric bumps a dashboard trend-series counter (see
 // state.DB.IncrementMetric), tolerating a nil db (in-memory
 // state.NewManager(), used by tests/CLI one-shots with no persistent DB) and

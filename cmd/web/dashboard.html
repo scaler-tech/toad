@@ -346,7 +346,7 @@
       <div class="btnrow">
         <button class="btn primary" id="btn-restart">Restart daemon</button>
         <button class="btn" id="btn-chkupd">Check for updates</button>
-        <span class="subnote" style="align-self:center">restart drains in-flight work first · auto-update is controlled from the update banner</span>
+        <span class="subnote" style="align-self:center">restart drains Slack-triggered work first, then gives digest/MCP/outcome-poller/repo-sync up to ~35s more to finish · auto-update is controlled from the update banner</span>
       </div>
       <details class="danger-zone" style="margin-top:16px" id="devdetails">
         <summary class="subnote" style="cursor:pointer">Developer tools</summary>
@@ -1009,7 +1009,12 @@
   let restartModalOpen=false, restartStartedAt=0, restartOrigPID=0, restartOrigStartedAt=0, restartPhase="";
   const RESTART_STEPS=[
     {id:"signal",label:"Sending restart signal"},
-    {id:"drain",label:"Draining in-flight work"},
+    // "in-flight" here is Slack-triggered work only (ribbit/investigate
+    // gauges, tracked live) — digest/MCP/outcome-poller/repo-sync background
+    // jobs drain separately afterward, bounded to ~35s, with no live gauge
+    // of their own, so this step's detail line can go quiet before the
+    // process has actually fully drained.
+    {id:"drain",label:"Draining Slack-triggered work (background jobs get ~35s more)"},
     {id:"restart",label:"Restarting daemon"},
     {id:"online",label:"Daemon back online"},
     {id:"dash",label:"Reloading dashboard"},

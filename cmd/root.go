@@ -449,10 +449,27 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		"triggers", fmt.Sprintf("emoji=%s keywords=%v", cfg.Slack.Triggers.Emoji, cfg.Slack.Triggers.Keywords),
 	)
 
+	// bgWg tracks the five background goroutines below (MCP server, repo
+	// sync, digest engine's Run + ResumeInvestigations, outcome poller) —
+	// Important fix (I6): these were all bare goroutines with nothing
+	// waiting on them before shutdown closed stateDB, so any of them still
+	// mid-write when the DB closed could error or lose work. Waited on
+	// (bounded, ~35s) right before stateDB.Close() on both the normal-exit
+	// and restart/exec paths — see the wait call near the bottom of this
+	// function.
+	var bgWg sync.WaitGroup
+
 	// Start MCP server if enabled
 	if mcpSrv != nil {
 		mcpSrv.Health().Version = Version
+		bgWg.Add(1)
 		go func() {
+			defer bgWg.Done()
+			// mcpSrv.Start blocks until ctx is canceled AND its own internal
+			// graceful-shutdown goroutine finishes calling http.Server.Shutdown
+			// (bounded to its own 30s internal timeout) — so this goroutine
+			// genuinely doesn't finish until the MCP server has drained,
+			// making bgWg.Wait() below meaningful for it.
 			if err := mcpSrv.Start(ctx); err != nil {
 				slog.Error("MCP server error", "error", err)
 			}
@@ -462,16 +479,28 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Start periodic repo sync if enabled
 	if cfg.Repos.SyncMinutes > 0 {
 		interval := time.Duration(cfg.Repos.SyncMinutes) * time.Minute
-		go syncRepos(ctx, cfg.Repos.List, interval, trackedSyncRepoNow)
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			syncRepos(ctx, cfg.Repos.List, interval, trackedSyncRepoNow)
+		}()
 	}
 
 	// Start digest engine (Toad King) if enabled
 	if digestEngine != nil {
-		go digestEngine.Run(ctx)
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			digestEngine.Run(ctx)
+		}()
 		// Resume any investigations that were interrupted by a previous crash.
 		if recovery != nil && len(recovery.StaleOpportunities) > 0 {
 			staleOpps := recovery.StaleOpportunities
-			go digestEngine.ResumeInvestigations(ctx, staleOpps)
+			bgWg.Add(1)
+			go func() {
+				defer bgWg.Done()
+				digestEngine.ResumeInvestigations(ctx, staleOpps)
+			}()
 		}
 	}
 
@@ -483,7 +512,11 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// Visibility only — no behavior adaptation. Skipped entirely when no
 	// tracker is configured.
 	if _, isNoop := tracker.(issuetracker.NoopTracker); !isNoop {
-		go runOutcomePoller(ctx, stateDB, tracker, time.Hour)
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			runOutcomePoller(ctx, stateDB, tracker, time.Hour)
+		}()
 	}
 
 	// Prune expired thread memories every hour
@@ -594,6 +627,14 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	slackErr := slackClient.Run(ctx)
 	<-poolDone
 	<-statsDone // wait for stats writer to finish before closing DB
+
+	// I6: wait (bounded ~35s) for the background goroutines tracked by bgWg
+	// (digest engine, MCP server, outcome poller, repo sync) to finish
+	// before stateDB is closed — on BOTH exit paths below: the normal
+	// return (whose deferred stateDB.Close() at the top of this function
+	// fires right after) and the restart/exec path's explicit Close() call.
+	// Bounded so a stuck goroutine can't hang shutdown forever.
+	waitForBackgroundWork(&bgWg, 35*time.Second)
 
 	if restartRequested.Load() {
 		// Under a process supervisor, return cleanly and let the supervisor
