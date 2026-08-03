@@ -484,6 +484,66 @@ func TestPassesGuardrails_ExactConfidenceThreshold(t *testing.T) {
 	}
 }
 
+// TestProcessOpportunities_InvestigationErrorReasoningUsesSharedPrefix is
+// the I3 fix's write-side guarantee: when e.investigate returns an error,
+// the persisted opportunity's Reasoning must be prefixed with the exact
+// shared state.InvestigationErrorPrefix constant — not a hand-rolled
+// literal — since state.HasRecentOpportunity's dedup exclusion matches
+// against that same constant. If the two ever drift apart, transient
+// investigation failures would silently start suppressing genuinely
+// recurring alerts again.
+func TestProcessOpportunities_InvestigationErrorReasoningUsesSharedPrefix(t *testing.T) {
+	db, err := state.OpenDBAt(":memory:")
+	if err != nil {
+		t.Fatalf("opening test db: %v", err)
+	}
+	defer db.Close()
+
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.5,
+		AllowedCategories: []string{"bug"},
+		MaxEstSize:        "small",
+		MaxAutoSpawnHour:  5,
+		DryRun:            true,
+	}
+	e := &Engine{
+		cfg: cfg,
+		db:  db,
+		investigate: func(ctx context.Context, opp Opportunity, msg Message, tickets []TicketContext) (*investigation.Findings, error) {
+			return nil, errors.New("boom: transient tool failure")
+		},
+	}
+
+	msgs := []Message{{Text: "bug report", Channel: "C1", ChannelName: "errors", Timestamp: "1"}}
+	opps := []Opportunity{{Summary: "investigation-error-prefix-test", Category: "bug", Confidence: 0.99, EstSize: "small", MessageIdx: 0}}
+
+	e.processOpportunities(context.Background(), msgs, opps, map[string]bool{})
+
+	recent, err := db.RecentDigestOpportunities(10)
+	if err != nil {
+		t.Fatalf("RecentDigestOpportunities: %v", err)
+	}
+	var found *state.DigestOpportunity
+	for _, o := range recent {
+		if o.Summary == "investigation-error-prefix-test" {
+			found = o
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expected the opportunity to have been persisted")
+	}
+	if !found.Dismissed {
+		t.Error("expected the opportunity to be dismissed after investigation error")
+	}
+	if !strings.HasPrefix(found.Reasoning, state.InvestigationErrorPrefix) {
+		t.Errorf("expected reasoning to start with %q, got %q", state.InvestigationErrorPrefix, found.Reasoning)
+	}
+	if !strings.Contains(found.Reasoning, "boom: transient tool failure") {
+		t.Errorf("expected reasoning to preserve the original error text, got %q", found.Reasoning)
+	}
+}
+
 func TestProcessOpportunities_SpawnLimitReturnsFalse(t *testing.T) {
 	cfg := &config.DigestConfig{
 		MinConfidence:     0.5,

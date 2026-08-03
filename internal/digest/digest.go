@@ -695,7 +695,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			if err != nil {
 				slog.Warn("digest investigation failed", "error", err, "summary", opp.Summary)
 				dismissed = true
-				reasoning = fmt.Sprintf("investigation error: %v", err)
+				reasoning = fmt.Sprintf("%s%v", state.InvestigationErrorPrefix, err)
 			} else if !result.Feasible {
 				slog.Info("digest investigation dismissed opportunity",
 					"summary", opp.Summary, "reasoning", result.Reasoning)
