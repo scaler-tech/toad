@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -42,6 +43,40 @@ const (
 	categoryBug     = "bug"
 	categoryFeature = "feature"
 )
+
+// ticketRequestRe matches the explicit "make/create/add/file/open a
+// ticket/issue" phrasings that the triage prompt defines for its escalate
+// flag. It exists so an explicit ticket request never depends on the triage
+// model call succeeding: a timed-out triage falls back to escalate=false
+// and would otherwise silently answer with Q&A instead of filing.
+var ticketRequestRe = regexp.MustCompile(`(?i)\b(?:make|create|add|file|open)\b[^.!?\n]{0,40}\b(?:ticket|issue)s?\b`)
+
+// isExplicitTicketRequest reports whether the message text explicitly asks
+// for a ticket/issue to be created.
+func isExplicitTicketRequest(text string) bool {
+	return ticketRequestRe.MatchString(text)
+}
+
+// shouldForceEscalateForTicketRequest reports whether handleTriggered's
+// deterministic ticket-request backstop should override triage's Escalate
+// flag for msg (see isExplicitTicketRequest's doc comment above for why the
+// backstop exists at all).
+//
+// !msg.IsBot is the Critical fix here: without it, a :frog: reaction on a
+// bot's own message (which routes through this same triggered path) or bot
+// boilerplate that happens to contain a ticket-request phrase (e.g.
+// "...create an issue to track...") combined with a triage timeout would
+// force an unreviewed SourceEscalation filing with no human ever having
+// asked for a ticket. SourceEscalation's entire justification is that an
+// explicit HUMAN request already IS the filing sign-off (see
+// runTicketRequest's doc comment) — that does not hold for bot-authored
+// text, so the backstop must never fire on it. FetchMessage
+// (internal/slack/client.go) sets IsBot correctly (BotID != "") even though
+// it leaves BotID itself unset on that path, so this check is reliable
+// regardless of which entry path produced msg.
+func shouldForceEscalateForTicketRequest(msg *islack.IncomingMessage, escalate bool) bool {
+	return !msg.IsBot && !escalate && isExplicitTicketRequest(msg.Text)
+}
 
 // flowDeps bundles the six dependencies shared by every investigate-and-file
 // entry point in this package: handleMessage, handleTriggered,

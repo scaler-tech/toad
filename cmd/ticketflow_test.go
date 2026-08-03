@@ -1260,3 +1260,71 @@ func TestRunTicketRequest_ReuseIntersectsAgainstCurrentRequestTrustedRefs(t *tes
 		t.Fatal("expected a ticket_index row keyed by BILLING-42 (the current request's trusted ref), got none")
 	}
 }
+
+func TestIsExplicitTicketRequest(t *testing.T) {
+	yes := []string{
+		"<@U0AGUL34M17> add a ticket to biome project, the usage card is broken",
+		"create a linear issue in the Biome project for this",
+		"please make a ticket for the export bug",
+		"can you file an issue under the ANA team",
+		"open a ticket about the flaky login",
+		"Add tickets for both of these",
+	}
+	no := []string{
+		"what version are you",
+		"I added a ticket yesterday for this",
+		"he created a fix and shipped it",
+		"the issue is that the cache is stale",
+		"this ticket is already in progress",
+		"the file an engineer touched last is gone",
+	}
+	for _, s := range yes {
+		if !isExplicitTicketRequest(s) {
+			t.Errorf("isExplicitTicketRequest(%q) = false, want true", s)
+		}
+	}
+	for _, s := range no {
+		if isExplicitTicketRequest(s) {
+			t.Errorf("isExplicitTicketRequest(%q) = true, want false", s)
+		}
+	}
+}
+
+// Critical fix (C2): a :frog: reaction or @toad mention on a BOT message
+// whose text happens to match the explicit ticket-request phrasing (e.g.
+// bot boilerplate like "...create an issue to track...") must never force
+// SourceEscalation — only an explicit HUMAN request is the filing sign-off
+// the backstop assumes. Human-authored text with the same phrasing must
+// still force escalate when triage's own flag missed it (e.g. a timeout).
+func TestShouldForceEscalateForTicketRequest(t *testing.T) {
+	humanMsg := &islack.IncomingMessage{Text: "please open a ticket for this bug", IsBot: false}
+	if !shouldForceEscalateForTicketRequest(humanMsg, false) {
+		t.Error("expected a human explicit ticket request with escalate=false to force escalate")
+	}
+
+	botMsg := &islack.IncomingMessage{Text: "please open a ticket for this bug", IsBot: true, BotID: "B_SOME_BOT"}
+	if shouldForceEscalateForTicketRequest(botMsg, false) {
+		t.Error("expected a bot-authored message to NEVER force escalate via the phrase backstop, even with matching phrasing")
+	}
+
+	// Bot messages whose BotID isn't set (e.g. some construction paths) but
+	// IsBot is true must still be excluded — the guard is on IsBot, not BotID.
+	botMsgNoID := &islack.IncomingMessage{Text: "create an issue to track this", IsBot: true}
+	if shouldForceEscalateForTicketRequest(botMsgNoID, false) {
+		t.Error("expected IsBot alone (regardless of BotID) to suppress the backstop")
+	}
+
+	// Already-true escalate must not matter either way — the function is only
+	// meaningful when escalate is currently false, but a bot message should
+	// still report false regardless of the escalate argument's value, since
+	// the caller only calls this when !result.Escalate anyway; this just
+	// confirms the bot guard is unconditional.
+	if shouldForceEscalateForTicketRequest(botMsg, true) {
+		t.Error("expected bot-authored messages to never force escalate regardless of the escalate argument")
+	}
+
+	humanNoMatch := &islack.IncomingMessage{Text: "just chatting about tickets in general", IsBot: false}
+	if shouldForceEscalateForTicketRequest(humanNoMatch, false) {
+		t.Error("expected non-matching human text not to force escalate")
+	}
+}

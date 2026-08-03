@@ -258,6 +258,18 @@ func handleTriggered(
 	// @mention toad directly (handleAppMention sets IsBot from the event).
 	sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
 
+	// An explicit ticket request must never depend on the triage model call:
+	// when triage times out (or misses the phrasing), escalate defaults to
+	// false and the request would silently get a Q&A answer instead of a
+	// ticket. The deterministic phrase check backstops exactly the explicit
+	// phrasings the triage prompt defines for the escalate flag — see
+	// shouldForceEscalateForTicketRequest's doc comment for why this must
+	// never fire on bot-authored text.
+	if shouldForceEscalateForTicketRequest(msg, result.Escalate) {
+		slog.Info("explicit ticket-request phrasing detected, forcing escalate", "summary", result.Summary)
+		result.Escalate = true
+	}
+
 	// ESCALATE: triage flagged this as needing a ticket regardless of
 	// category/confidence — route to the same investigate-and-file flow the
 	// CTA button uses, just with a different Source for the ticket index.
