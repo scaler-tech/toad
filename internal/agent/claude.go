@@ -93,12 +93,12 @@ func (c *ClaudeProvider) Run(ctx context.Context, opts RunOpts) (*RunResult, err
 	}
 	if c.FallbackAPIKeyEnv == "" {
 		slog.Error("claude seat throttled and no fallback API key configured (set agent.fallback_api_key_env)")
-		return nil, fmt.Errorf("%w: %s", ErrSeatThrottledNoFallback, err)
+		return nil, fmt.Errorf("%w: %w", ErrSeatThrottledNoFallback, err)
 	}
 	apiKey := os.Getenv(c.FallbackAPIKeyEnv)
 	if apiKey == "" {
 		slog.Error("claude seat throttled and no fallback API key configured (set agent.fallback_api_key_env)", "env", c.FallbackAPIKeyEnv)
-		return nil, fmt.Errorf("%w: %s", ErrSeatThrottledNoFallback, err)
+		return nil, fmt.Errorf("%w: %w", ErrSeatThrottledNoFallback, err)
 	}
 
 	slog.Warn("claude seat throttled, retrying via API key", "env", c.FallbackAPIKeyEnv)
