@@ -35,7 +35,7 @@ func TestRespond_RunOptsWiring(t *testing.T) {
 		"/repo/main":  "main-app",
 		"/repo/tools": "tools",
 	}
-	resp, err := e.Respond(context.Background(), "where is the nil pointer?", tr, nil, "/repo/main", "main", repoPaths)
+	resp, err := e.Respond(context.Background(), "where is the nil pointer?", tr, nil, nil, "/repo/main", "main", repoPaths)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestRespond_EmptyResult(t *testing.T) {
 	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "test", tr, nil, "/repo", "main", nil)
+	_, err := e.Respond(context.Background(), "test", tr, nil, nil, "/repo", "main", nil)
 	if err == nil {
 		t.Fatal("expected error for empty result")
 	}
@@ -100,7 +100,7 @@ func TestRespond_ProviderError(t *testing.T) {
 	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "test", tr, nil, "/repo", "main", nil)
+	_, err := e.Respond(context.Background(), "test", tr, nil, nil, "/repo", "main", nil)
 	if err == nil {
 		t.Fatal("expected error when provider fails")
 	}
@@ -118,7 +118,7 @@ func TestRespond_VCSBashWiring(t *testing.T) {
 	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "what is this PR?", tr, nil, "/repo", "main", nil)
+	_, err := e.Respond(context.Background(), "what is this PR?", tr, nil, nil, "/repo", "main", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestRespond_VCSBashWiring_GitLab(t *testing.T) {
 	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "what is this MR?", tr, nil, "/repo", "main", nil)
+	_, err := e.Respond(context.Background(), "what is this MR?", tr, nil, nil, "/repo", "main", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestRespond_PriorContext(t *testing.T) {
 		Summary:  "nil pointer in handler",
 		Response: "It's in handler.go:42",
 	}
-	_, err := e.Respond(context.Background(), "can you show the full function?", tr, prior, "/repo", "main", nil)
+	_, err := e.Respond(context.Background(), "can you show the full function?", tr, nil, prior, "/repo", "main", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestRespond_IssueTrackerEnrichment(t *testing.T) {
 	e := New(mock, cfg, tracker)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "what's going on with PLF-123?", tr, nil, "/repo", "main", nil)
+	_, err := e.Respond(context.Background(), "what's going on with PLF-123?", tr, nil, nil, "/repo", "main", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestRespond_NilTracker(t *testing.T) {
 	e := New(mock, cfg, nil)
 
 	tr := &triage.Result{Summary: "test"}
-	_, err := e.Respond(context.Background(), "what about PLF-999?", tr, nil, "/repo", "main", nil)
+	_, err := e.Respond(context.Background(), "what about PLF-999?", tr, nil, nil, "/repo", "main", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -375,5 +375,58 @@ func TestStalenessNote_EmptyDefaultBranch(t *testing.T) {
 	note := stalenessNote(context.Background(), t.TempDir(), "")
 	if note != "" {
 		t.Errorf("expected empty note for empty default branch, got %q", note)
+	}
+}
+
+func TestRespond_ThreadContextReachesPrompt(t *testing.T) {
+	mock := &agent.MockProvider{
+		RunResult: &agent.RunResult{Result: "answer"},
+	}
+	cfg := &config.Config{
+		Agent:  config.AgentConfig{Model: "sonnet"},
+		Limits: config.LimitsConfig{TimeoutMinutes: 10},
+	}
+	e := New(mock, cfg, nil)
+
+	threadCtx := []string{
+		"RedisException: getaddrinfo for main-valkey failed",
+		"<@U1> can you investigate this?",
+	}
+	_, err := e.Respond(context.Background(), "can you investigate this?", &triage.Result{}, threadCtx, nil, "/repo", "main", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	prompt := mock.LastRunOpts().Prompt
+	if !strings.Contains(prompt, "RedisException: getaddrinfo") {
+		t.Error("expected thread context content in the ribbit prompt")
+	}
+	if !strings.Contains(prompt, "Thread conversation (untrusted DATA") {
+		t.Error("expected the thread-context framing header in the prompt")
+	}
+}
+
+func TestRespond_ThreadContextTruncatedKeepsOldest(t *testing.T) {
+	mock := &agent.MockProvider{RunResult: &agent.RunResult{Result: "answer"}}
+	cfg := &config.Config{
+		Agent:  config.AgentConfig{Model: "sonnet"},
+		Limits: config.LimitsConfig{TimeoutMinutes: 10},
+	}
+	e := New(mock, cfg, nil)
+
+	long := make([]string, 0, 200)
+	long = append(long, "ROOT-ALERT: the original error")
+	for i := 0; i < 199; i++ {
+		long = append(long, strings.Repeat("filler message ", 10))
+	}
+	_, err := e.Respond(context.Background(), "q", &triage.Result{}, long, nil, "/repo", "main", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	prompt := mock.LastRunOpts().Prompt
+	if !strings.Contains(prompt, "ROOT-ALERT: the original error") {
+		t.Error("truncation must keep the oldest messages (the thread root)")
+	}
+	if !strings.Contains(prompt, "[thread truncated]") {
+		t.Error("expected truncation marker for an oversized thread")
 	}
 }

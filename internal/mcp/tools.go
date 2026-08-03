@@ -246,7 +246,7 @@ func parseLogTime(line string) (time.Time, bool) {
 
 // RibbitResponder abstracts the ribbit engine for testability.
 type RibbitResponder interface {
-	Respond(ctx context.Context, messageText string, tr *triage.Result, prior *ribbit.PriorContext, repoPath string, defaultBranch string, repoPaths map[string]string) (*ribbit.Response, error)
+	Respond(ctx context.Context, messageText string, tr *triage.Result, threadContext []string, prior *ribbit.PriorContext, repoPath string, defaultBranch string, repoPaths map[string]string) (*ribbit.Response, error)
 }
 
 // TriageClassifier abstracts the triage engine for testability.
@@ -374,8 +374,9 @@ func RegisterAskTool(srv *gomcp.Server, deps *AskDeps) {
 			}
 		}
 
-		// Run ribbit.
-		resp, err := deps.Ribbit.Respond(ctx, args.Question, tr, prior, repoPath, repo.DefaultBranch, repoPaths)
+		// Run ribbit. MCP asks arrive without a Slack thread, so there is no
+		// thread context to pass.
+		resp, err := deps.Ribbit.Respond(ctx, args.Question, tr, nil, prior, repoPath, repo.DefaultBranch, repoPaths)
 		if err != nil {
 			slog.Error("MCP ribbit failed", "error", err)
 			return &gomcp.CallToolResult{

@@ -138,6 +138,30 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	failureTracker := &agent.FailureTrackingProvider{Provider: agentProvider}
 	agentProvider = failureTracker
 
+	// Warm up the agent CLI in the background: the first call after a daemon
+	// start is consistently the slowest (CLI process cold start, credential
+	// refresh) and has repeatedly blown through the triage timeout in
+	// production — a trivial PermissionNone call here absorbs that cost so
+	// the first real triage runs against a warm CLI. Runs through the
+	// failure tracker deliberately: a failing warm-up IS a genuine early
+	// signal (e.g. expired auth) and should count toward the dashboard alert.
+	go func() {
+		warmCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		start := time.Now()
+		_, warmErr := agentProvider.Run(warmCtx, agent.RunOpts{
+			Prompt:      "Reply with exactly: ok",
+			Model:       cfg.Triage.Model,
+			Timeout:     2 * time.Minute,
+			Permissions: agent.PermissionNone,
+		})
+		if warmErr != nil {
+			slog.Warn("agent CLI warm-up failed", "error", warmErr, "duration", time.Since(start).Round(time.Millisecond))
+			return
+		}
+		slog.Info("agent CLI warmed up", "duration", time.Since(start).Round(time.Millisecond))
+	}()
+
 	if _, err := buildVCSResolver(cfg); err != nil {
 		return fmt.Errorf("vcs config: %w", err)
 	}
