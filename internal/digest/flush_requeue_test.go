@@ -43,7 +43,6 @@ func testDigestConfig() *config.DigestConfig {
 		MaxAutoSpawnHour:  10,
 		MaxChunkSize:      50,
 		ChunkTimeoutSecs:  30,
-		DryRun:            true,
 	}
 }
 

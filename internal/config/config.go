@@ -70,7 +70,6 @@ type ClaudeConfig struct {
 
 type DigestConfig struct {
 	Enabled                bool     `yaml:"enabled"`                  // default: false (opt-in)
-	DryRun                 bool     `yaml:"dry_run"`                  // collect + analyze but skip spawn/notify
 	BatchMinutes           int      `yaml:"batch_minutes"`            // default: 5
 	MinConfidence          float64  `yaml:"min_confidence"`           // default: 0.95
 	MaxAutoSpawnHour       int      `yaml:"max_auto_spawn_hour"`      // default: 3
@@ -79,7 +78,6 @@ type DigestConfig struct {
 	MaxChunkSize           int      `yaml:"max_chunk_size"`           // default: 50
 	ChunkTimeoutSecs       int      `yaml:"chunk_timeout_secs"`       // default: 120
 	InvestigateTimeoutSecs int      `yaml:"investigate_timeout_secs"` // default: 600 (10 min)
-	CommentInvestigation   bool     `yaml:"comment_investigation"`    // dry_run only: post findings as Slack reply
 	BotList                []string `yaml:"bot_list"`                 // only these bot IDs trigger outreach (empty = all bots)
 }
 

@@ -75,20 +75,6 @@ type ProposeFunc func(ctx context.Context, f investigation.Findings, msg Message
 // NotifyFunc sends a Slack message in a thread.
 type NotifyFunc func(channel, threadTS, text string)
 
-// InvestigationNotice holds all data needed for outreach after an investigation.
-type InvestigationNotice struct {
-	Channel   string
-	ThreadTS  string
-	Text      string // formatted findings
-	BotID     string // original message's bot ID (empty for human)
-	IssueRefs []*issuetracker.IssueRef
-	FilesHint []string
-	Repo      string
-}
-
-// NotifyInvestigationFunc handles posting investigation findings with outreach.
-type NotifyInvestigationFunc func(notice InvestigationNotice)
-
 // ReactFunc adds an emoji reaction to a message.
 type ReactFunc func(channel, timestamp, emoji string)
 
@@ -129,24 +115,23 @@ type DigestStats struct {
 
 // Engine collects messages and periodically analyzes them for one-shot opportunities.
 type Engine struct {
-	cfg                 *config.DigestConfig
-	agent               agent.Provider
-	model               string
-	propose             ProposeFunc
-	notify              NotifyFunc
-	notifyInvestigation NotifyInvestigationFunc
-	investigate         InvestigateFunc
-	react               ReactFunc
-	claim               ClaimFunc
-	unclaim             UnclaimFunc
-	resolveRepo         ResolveRepoFunc
-	repoPaths           map[string]string // path → name, for cross-repo prompts and path scrubbing
-	repoProfiles        string            // formatted repo profiles for multi-repo prompt, empty for single-repo
-	db                  *state.DB
-	tracker             issuetracker.Tracker
-	getPermalink        GetPermalinkFunc
-	respectAssignees    bool
-	staleDays           int
+	cfg              *config.DigestConfig
+	agent            agent.Provider
+	model            string
+	propose          ProposeFunc
+	notify           NotifyFunc
+	investigate      InvestigateFunc
+	react            ReactFunc
+	claim            ClaimFunc
+	unclaim          UnclaimFunc
+	resolveRepo      ResolveRepoFunc
+	repoPaths        map[string]string // path → name, for cross-repo prompts and path scrubbing
+	repoProfiles     string            // formatted repo profiles for multi-repo prompt, empty for single-repo
+	db               *state.DB
+	tracker          issuetracker.Tracker
+	getPermalink     GetPermalinkFunc
+	respectAssignees bool
+	staleDays        int
 
 	mu     sync.Mutex
 	buffer []Message
@@ -170,47 +155,45 @@ type Engine struct {
 
 // EngineOpts holds all dependencies and configuration for creating a digest Engine.
 type EngineOpts struct {
-	AgentProvider       agent.Provider
-	TriageModel         string
-	Propose             ProposeFunc
-	Notify              NotifyFunc
-	NotifyInvestigation NotifyInvestigationFunc
-	Investigate         InvestigateFunc
-	React               ReactFunc
-	Claim               ClaimFunc
-	Unclaim             UnclaimFunc
-	ResolveRepo         ResolveRepoFunc
-	RepoPaths           map[string]string
-	Profiles            []config.RepoProfile
-	DB                  *state.DB
-	Tracker             issuetracker.Tracker
-	GetPermalink        GetPermalinkFunc
-	RespectAssignees    bool
-	StaleDays           int
+	AgentProvider    agent.Provider
+	TriageModel      string
+	Propose          ProposeFunc
+	Notify           NotifyFunc
+	Investigate      InvestigateFunc
+	React            ReactFunc
+	Claim            ClaimFunc
+	Unclaim          UnclaimFunc
+	ResolveRepo      ResolveRepoFunc
+	RepoPaths        map[string]string
+	Profiles         []config.RepoProfile
+	DB               *state.DB
+	Tracker          issuetracker.Tracker
+	GetPermalink     GetPermalinkFunc
+	RespectAssignees bool
+	StaleDays        int
 }
 
 // New creates a digest engine.
 func New(cfg *config.DigestConfig, opts EngineOpts) *Engine {
 	e := &Engine{
-		cfg:                 cfg,
-		agent:               opts.AgentProvider,
-		model:               opts.TriageModel,
-		propose:             opts.Propose,
-		notify:              opts.Notify,
-		notifyInvestigation: opts.NotifyInvestigation,
-		investigate:         opts.Investigate,
-		claim:               opts.Claim,
-		unclaim:             opts.Unclaim,
-		react:               opts.React,
-		resolveRepo:         opts.ResolveRepo,
-		repoPaths:           opts.RepoPaths,
-		db:                  opts.DB,
-		tracker:             opts.Tracker,
-		getPermalink:        opts.GetPermalink,
-		respectAssignees:    opts.RespectAssignees,
-		staleDays:           opts.StaleDays,
-		spawnHour:           time.Now().Hour(),
-		actedIssues:         make(map[string]time.Time),
+		cfg:              cfg,
+		agent:            opts.AgentProvider,
+		model:            opts.TriageModel,
+		propose:          opts.Propose,
+		notify:           opts.Notify,
+		investigate:      opts.Investigate,
+		claim:            opts.Claim,
+		unclaim:          opts.Unclaim,
+		react:            opts.React,
+		resolveRepo:      opts.ResolveRepo,
+		repoPaths:        opts.RepoPaths,
+		db:               opts.DB,
+		tracker:          opts.Tracker,
+		getPermalink:     opts.GetPermalink,
+		respectAssignees: opts.RespectAssignees,
+		staleDays:        opts.StaleDays,
+		spawnHour:        time.Now().Hour(),
+		actedIssues:      make(map[string]time.Time),
 	}
 	if len(opts.Profiles) > 1 {
 		e.repoProfiles = config.FormatForPrompt(opts.Profiles)
@@ -348,27 +331,6 @@ func (e *Engine) ResumeInvestigations(ctx context.Context, opps []*state.DigestO
 		}
 
 		if dismissed {
-			continue
-		}
-
-		// Dry-run: post findings with CTA button
-		if e.cfg.DryRun {
-			slog.Info("[dry-run] resumed investigation would propose fix", "summary", opp.Summary)
-			if e.cfg.CommentInvestigation && e.notifyInvestigation != nil && reasoning != "" {
-				filesHint := investigatedFiles
-				if len(filesHint) == 0 {
-					filesHint = opp.FilesHint
-				}
-				e.notifyInvestigation(InvestigationNotice{
-					Channel:   msg.Channel,
-					ThreadTS:  msg.ThreadTS,
-					Text:      fmt.Sprintf(":mag: *Investigation findings:*\n\n%s", reasoning),
-					BotID:     "", // not available in resume path
-					FilesHint: filesHint,
-					Repo:      opp.Repo,
-				})
-			}
-			e.totalSpawns.Add(1)
 			continue
 		}
 
@@ -636,16 +598,20 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 		var dbOpp *state.DigestOpportunity
 		if e.db != nil {
 			dbOpp = &state.DigestOpportunity{
-				Summary:       opp.Summary,
-				Category:      opp.Category,
-				Confidence:    opp.Confidence,
-				EstSize:       opp.EstSize,
-				Channel:       msg.ChannelName,
-				ChannelID:     msg.Channel,
-				ThreadTS:      threadTS,
-				Message:       msg.Text,
-				Keywords:      strings.Join(opp.Keywords, ","),
-				DryRun:        e.cfg.DryRun,
+				Summary:    opp.Summary,
+				Category:   opp.Category,
+				Confidence: opp.Confidence,
+				EstSize:    opp.EstSize,
+				Channel:    msg.ChannelName,
+				ChannelID:  msg.Channel,
+				ThreadTS:   threadTS,
+				Message:    msg.Text,
+				Keywords:   strings.Join(opp.Keywords, ","),
+				// DryRun is intentionally left at its zero value (false): v2's
+				// digest has a single mode (enabled/disabled) — the column
+				// stays in the schema for historical rows (see
+				// state.DigestCounts.DryRun), but no new row is ever written
+				// as dry-run again.
 				Investigating: true,
 				CreatedAt:     time.Now(),
 			}
@@ -743,35 +709,6 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 				e.unclaim(threadTS, scope)
 			}
 			return false
-		}
-
-		// In dry-run mode: log and skip propose/notify
-		if e.cfg.DryRun {
-			slog.Info("[dry-run] would propose fix",
-				"summary", opp.Summary,
-				"confidence", opp.Confidence,
-				"channel", msg.ChannelName,
-			)
-			if e.cfg.CommentInvestigation && e.notifyInvestigation != nil && reasoning != "" {
-				filesHint := investigatedFiles
-				if len(filesHint) == 0 {
-					filesHint = opp.FilesHint
-				}
-				e.notifyInvestigation(InvestigationNotice{
-					Channel:   msg.Channel,
-					ThreadTS:  threadTS,
-					Text:      fmt.Sprintf(":mag: *Investigation findings:*\n\n%s", reasoning),
-					BotID:     msg.BotID,
-					IssueRefs: allRefs,
-					FilesHint: filesHint,
-					Repo:      opp.Repo,
-				})
-			}
-			e.totalSpawns.Add(1)
-			if e.unclaim != nil {
-				e.unclaim(threadTS, scope)
-			}
-			continue
 		}
 
 		slog.Info("Toad King proposing fix",

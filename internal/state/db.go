@@ -814,20 +814,18 @@ type DaemonStats struct {
 	// refs to fail toward, non-actionable, a claim conflict, or an
 	// infeasible/errored investigation. Every drop is also logged at Warn;
 	// this is the cumulative counter surfaced on the dashboard.
-	BotIntakeDropped  int64     `json:"bot_intake_dropped,omitempty"`
-	DigestEnabled     bool      `json:"digest_enabled"`
-	DigestDryRun      bool      `json:"digest_dry_run"`
-	DigestCommentMode bool      `json:"digest_comment_mode,omitempty"`
-	DigestBuffer      int       `json:"digest_buffer"`
-	DigestNextFlush   time.Time `json:"digest_next_flush"`
-	DigestProcessed   int64     `json:"digest_processed"`
-	DigestOpps        int64     `json:"digest_opportunities"`
-	DigestSpawns      int64     `json:"digest_spawns"`
-	IssueTracker      bool      `json:"issue_tracker,omitempty"`
-	IssueProvider     string    `json:"issue_provider,omitempty"`
-	MCPEnabled        bool      `json:"mcp_enabled,omitempty"`
-	MCPHost           string    `json:"mcp_host,omitempty"`
-	MCPPort           int       `json:"mcp_port,omitempty"`
+	BotIntakeDropped int64     `json:"bot_intake_dropped,omitempty"`
+	DigestEnabled    bool      `json:"digest_enabled"`
+	DigestBuffer     int       `json:"digest_buffer"`
+	DigestNextFlush  time.Time `json:"digest_next_flush"`
+	DigestProcessed  int64     `json:"digest_processed"`
+	DigestOpps       int64     `json:"digest_opportunities"`
+	DigestSpawns     int64     `json:"digest_spawns"`
+	IssueTracker     bool      `json:"issue_tracker,omitempty"`
+	IssueProvider    string    `json:"issue_provider,omitempty"`
+	MCPEnabled       bool      `json:"mcp_enabled,omitempty"`
+	MCPHost          string    `json:"mcp_host,omitempty"`
+	MCPPort          int       `json:"mcp_port,omitempty"`
 
 	// Concurrency gauges for the dashboard's "Live now" card. Populated every
 	// 10s (root.go's stats ticker) from the live occupancy/capacity of the

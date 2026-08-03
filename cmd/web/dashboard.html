@@ -624,8 +624,7 @@
     const dm=d.daemon||{};
     const dc=d.digest_counts||{};
     if (dm.running && dm.digest_enabled) {
-      const mode = dm.digest_dry_run ? (dm.digest_comment_mode ? "comment mode" : "dry-run") : "live";
-      $("#dg-status").textContent = `Enabled (${mode})`;
+      $("#dg-status").textContent = "Enabled";
       $("#dg-buffer").textContent = num(dm.digest_buffer||0);
       $("#dg-next").textContent = dm.digest_next_flush ? relTimeAgo(dm.digest_next_flush, d.now).replace("ago","from now") : "-";
     } else {
@@ -838,8 +837,7 @@
       confHTML += `<details class="conf-group"><summary>Digest</summary>
         <div class="kv"><span>enabled</span><b>${cfg.digest_enabled?"yes":"no"}</b></div>
         ${cfg.digest_enabled?`<div class="kv"><span>batch interval</span><b>${num(cfg.digest_interval_min)}m</b></div>
-        <div class="kv"><span>max auto-spawn/hr</span><b>${num(cfg.digest_max_spawn_hour)}</b></div>
-        <div class="kv"><span>mode</span><b>${cfg.digest_dry_run?(cfg.digest_comment_mode?"comment":"dry-run"):"live"}</b></div>`:""}
+        <div class="kv"><span>max auto-spawn/hr</span><b>${num(cfg.digest_max_spawn_hour)}</b></div>`:""}
       </details>`;
       confHTML += `<details class="conf-group"><summary>MCP</summary>
         <div class="kv"><span>enabled</span><b>${cfg.mcp_enabled?"yes":"no"}</b></div>
@@ -878,7 +876,7 @@
     const dm=d.daemon||{};
     const integ=d.integrations||[];
     $("#integ-chip").innerHTML = integ.map(ig=>{
-      const on = ig.status==="enabled" || ig.status==="dry-run" || ig.status==="comment";
+      const on = ig.status==="enabled";
       return `<span class="idot" style="background:${on?"var(--ok)":"var(--muted)"}" title="${esc(ig.name)}: ${esc(ig.detail||ig.status)}"></span>`;
     }).join(" ") + ` ${integ.map(ig=>esc(ig.name.toLowerCase())).join(" · ")}`;
     const verChip=$("#ver-chip");

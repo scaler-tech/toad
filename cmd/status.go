@@ -137,7 +137,7 @@ const (
 
 type apiIntegration struct {
 	Name   string `json:"name"`
-	Status string `json:"status"` // "enabled", "disabled", "dry-run", "active", "inactive"
+	Status string `json:"status"` // "enabled", "disabled", "active", "inactive"
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -153,8 +153,6 @@ type apiDaemon struct {
 	Triages          int64            `json:"triages"`
 	TriageByCategory map[string]int64 `json:"triage_by_category,omitempty"`
 	DigestEnabled    bool             `json:"digest_enabled"`
-	DigestDryRun     bool             `json:"digest_dry_run"`
-	DigestComment    bool             `json:"digest_comment_mode,omitempty"`
 	DigestBuffer     int              `json:"digest_buffer"`
 	DigestNextFlush  int64            `json:"digest_next_flush,omitempty"`
 	DigestProcessed  int64            `json:"digest_processed"`
@@ -218,8 +216,6 @@ type apiConfig struct {
 	MaxConcurrent  int             `json:"max_concurrent"`
 	TimeoutMinutes int             `json:"timeout_minutes"`
 	DigestEnabled  bool            `json:"digest_enabled"`
-	DigestDryRun   bool            `json:"digest_dry_run"`
-	DigestComment  bool            `json:"digest_comment_mode,omitempty"`
 	DigestInterval int             `json:"digest_interval_min,omitempty"`
 	DigestMaxSpawn int             `json:"digest_max_spawn_hour,omitempty"`
 	MCPEnabled     bool            `json:"mcp_enabled"`
@@ -472,8 +468,6 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 			daemon.Triages = daemonStats.Triages
 			daemon.TriageByCategory = daemonStats.TriageByCategory
 			daemon.DigestEnabled = daemonStats.DigestEnabled
-			daemon.DigestDryRun = daemonStats.DigestDryRun
-			daemon.DigestComment = daemonStats.DigestCommentMode
 			daemon.DigestBuffer = daemonStats.DigestBuffer
 			if !daemonStats.DigestNextFlush.IsZero() {
 				daemon.DigestNextFlush = daemonStats.DigestNextFlush.Unix()
@@ -506,16 +500,8 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 		digestInt := apiIntegration{Name: "Digest"}
 		if daemon.Running {
 			if daemon.DigestEnabled {
-				if daemon.DigestDryRun && daemon.DigestComment {
-					digestInt.Status = "comment"
-					digestInt.Detail = "Comment mode"
-				} else if daemon.DigestDryRun {
-					digestInt.Status = "dry-run"
-					digestInt.Detail = "Dry-run"
-				} else {
-					digestInt.Status = pillEnabled
-					digestInt.Detail = "Enabled"
-				}
+				digestInt.Status = pillEnabled
+				digestInt.Detail = "Enabled"
 			} else {
 				digestInt.Status = pillDisabled
 				digestInt.Detail = "Disabled"
@@ -586,8 +572,6 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 				MaxConcurrent:  cfg.Limits.MaxConcurrent,
 				TimeoutMinutes: cfg.Limits.TimeoutMinutes,
 				DigestEnabled:  cfg.Digest.Enabled,
-				DigestDryRun:   cfg.Digest.DryRun,
-				DigestComment:  cfg.Digest.CommentInvestigation,
 			}
 			for _, rp := range cfg.Repos.List {
 				repo := apiConfigRepo{Name: rp.Name, Path: rp.Path}

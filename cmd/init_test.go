@@ -33,7 +33,7 @@ func TestRenderConfig(t *testing.T) {
 		},
 		Triage: triageTemplateData{Model: "haiku"},
 		Agent:  agentTemplateData{Model: "sonnet"},
-		Digest: digestTemplateData{Enabled: true, DryRun: true},
+		Digest: digestTemplateData{Enabled: true},
 		IssueTracker: issueTrackerTemplateData{
 			Enabled:      true,
 			Provider:     "linear",
@@ -72,7 +72,6 @@ func TestRenderConfig(t *testing.T) {
 		`model: "haiku"`,
 		`model: "sonnet"`,
 		`enabled: true`,
-		`dry_run: true`,
 		`provider: "linear"`,
 		`api_token: "lin_api_test"`,
 		`team_id: "TEAM-123"`,
@@ -169,7 +168,7 @@ func TestRenderConfig_CommentsPresent(t *testing.T) {
 		Limits: limitsTemplateData{MaxConcurrent: 2, TimeoutMinutes: 10},
 		Triage: triageTemplateData{Model: "haiku"},
 		Agent:  agentTemplateData{Model: "sonnet"},
-		Digest: digestTemplateData{Enabled: true, DryRun: true},
+		Digest: digestTemplateData{Enabled: true},
 		Log:    logTemplateData{Level: "info"},
 	}
 

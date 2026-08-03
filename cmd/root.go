@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -139,8 +138,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	failureTracker := &agent.FailureTrackingProvider{Provider: agentProvider}
 	agentProvider = failureTracker
 
-	vcsResolver, err := buildVCSResolver(cfg)
-	if err != nil {
+	if _, err := buildVCSResolver(cfg); err != nil {
 		return fmt.Errorf("vcs config: %w", err)
 	}
 
@@ -295,101 +293,6 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			},
 			Notify: func(channel, threadTS, text string) {
 				slackClient.ReplyInThread(channel, threadTS, text)
-			},
-			NotifyInvestigation: func(notice digest.InvestigationNotice) {
-				text := notice.Text
-
-				// Determine if this is a bot message needing active outreach
-				isBot := notice.BotID != ""
-				if isBot && len(cfg.Digest.BotList) > 0 {
-					isBot = false
-					for _, b := range cfg.Digest.BotList {
-						if b == notice.BotID {
-							isBot = true
-							break
-						}
-					}
-				}
-
-				if isBot {
-					// Resolve file contributors to Slack mentions
-					if len(notice.FilesHint) == 0 {
-						slog.Debug("digest dev tag skipped: no files_hint from investigation")
-					} else {
-						repo := resolver.Resolve(notice.Repo, notice.FilesHint)
-						if repo == nil {
-							slog.Debug("digest dev tag skipped: could not resolve repo",
-								"repo_hint", notice.Repo, "files_hint", notice.FilesHint)
-						} else {
-							botSet := make(map[string]bool)
-							for _, u := range cfg.VCS.BotUsernames {
-								botSet[strings.ToLower(u)] = true
-							}
-							logins := vcsResolver(repo.Path).GetSuggestedReviewers(
-								context.Background(), repo.Path, notice.FilesHint, botSet, 2,
-							)
-							if len(logins) == 0 {
-								slog.Debug("digest dev tag skipped: no git contributors found",
-									"files_hint", notice.FilesHint, "repo", repo.Name)
-							} else {
-								resolved := islack.ResolveGitHubToSlack(stateDB, slackClient.API(), logins)
-								var mentions []string
-								var unresolved []string
-								for _, login := range logins {
-									if slackID, ok := resolved[login]; ok {
-										mentions = append(mentions, fmt.Sprintf("<@%s>", slackID))
-									} else {
-										unresolved = append(unresolved, login)
-									}
-								}
-								if len(unresolved) > 0 {
-									slog.Debug("digest dev tag: some GitHub users not mapped to Slack",
-										"unresolved", unresolved)
-								}
-								if len(mentions) > 0 {
-									text += "\n\ncc " + strings.Join(mentions, " ")
-								} else {
-									slog.Debug("digest dev tag skipped: GitHub logins found but none mapped to Slack",
-										"logins", logins)
-								}
-							}
-						}
-					}
-				} else {
-					text += "\n\n_Tag a relevant dev if you'd like someone to take a look._"
-				}
-
-				// See ReplyWithOptionalCTA's doc comment: the button is
-				// suppressed when the tracker can't actually create issues.
-				replyTS := ""
-				if ts, err := slackClient.ReplyWithOptionalCTA(
-					notice.Channel, notice.ThreadTS, text, ticketEngine.ShouldCreateIssues(),
-				); err != nil {
-					slog.Warn("digest investigation reply failed", "error", err)
-				} else {
-					replyTS = ts
-				}
-
-				// Crosspost to Linear if bot message with issue refs
-				if isBot && tracker != nil && len(notice.IssueRefs) > 0 && replyTS != "" {
-					permalink, _ := slackClient.GetPermalink(notice.Channel, replyTS)
-					for _, ref := range notice.IssueRefs {
-						// Strip Slack mrkdwn header for Markdown-native tracker
-						reasoning := strings.TrimPrefix(notice.Text, ":mag: *Investigation findings:*\n\n")
-						body := "**Toad investigation findings**\n\n" + reasoning + "\n\n"
-						if permalink != "" {
-							body += fmt.Sprintf("Toad can file a ticket for this — [go to the Slack thread](%s) and click the button to create it.", permalink)
-						} else {
-							body += "Toad can file a ticket for this — go to the Slack thread and click the button to create it."
-						}
-						if err := tracker.PostComment(context.Background(), ref, body); err != nil {
-							slog.Warn("failed to crosspost investigation to issue tracker",
-								"ref", ref.ID, "error", err)
-						} else {
-							slog.Info("crossposted investigation to issue tracker", "ref", ref.ID)
-						}
-					}
-				}
 			},
 			Investigate: func(ctx context.Context, opp digest.Opportunity, msg digest.Message, tickets []digest.TicketContext) (*investigation.Findings, error) {
 				return investigateFromDigest(ctx, resolver, investRunner, investigateSem, stateDB, cfg.Digest.InvestigateTimeoutSecs, opp, msg, tickets, cfg.Intake.BotAllowlist)
@@ -569,16 +472,14 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 					"question":      daemonCounters.triageQuestion.Load(),
 					"other":         daemonCounters.triageOther.Load(),
 				},
-				BotIntakeDropped:  daemonCounters.botIntakeDropped.Load(),
-				DigestEnabled:     cfg.Digest.Enabled,
-				DigestDryRun:      cfg.Digest.DryRun,
-				DigestCommentMode: cfg.Digest.CommentInvestigation,
-				IssueTracker:      cfg.IssueTracker.Enabled,
-				IssueProvider:     cfg.IssueTracker.Provider,
-				MCPEnabled:        cfg.MCP.Enabled,
-				MCPHost:           cfg.MCP.Host,
-				MCPPort:           cfg.MCP.Port,
-				RepoSync:          repoSync.snapshot(),
+				BotIntakeDropped: daemonCounters.botIntakeDropped.Load(),
+				DigestEnabled:    cfg.Digest.Enabled,
+				IssueTracker:     cfg.IssueTracker.Enabled,
+				IssueProvider:    cfg.IssueTracker.Provider,
+				MCPEnabled:       cfg.MCP.Enabled,
+				MCPHost:          cfg.MCP.Host,
+				MCPPort:          cfg.MCP.Port,
+				RepoSync:         repoSync.snapshot(),
 			}
 			ds.InvestigateSlots, ds.InvestigateInFlight = concurrencyGauge(investigateSem)
 			ds.RibbitSlots, ds.RibbitInFlight = concurrencyGauge(ribbitSem)

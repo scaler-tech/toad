@@ -50,7 +50,6 @@ type agentTemplateData struct {
 
 type digestTemplateData struct {
 	Enabled bool
-	DryRun  bool
 }
 
 type issueTrackerTemplateData struct {
@@ -133,15 +132,12 @@ triage:
 # ──────────────────────────────────────────────
 digest:
   enabled: {{ .Digest.Enabled }}
-{{ if .Digest.Enabled }}  dry_run: {{ .Digest.DryRun }}
-{{ else }}  # dry_run: true
-{{ end }}  # batch_minutes: 5           # How often to analyze batched messages
+  # batch_minutes: 5           # How often to analyze batched messages
   # min_confidence: 0.95        # Minimum confidence to auto-spawn
   # max_auto_spawn_hour: 3      # Max auto-spawns per hour
   # allowed_categories: ["bug"] # Categories eligible for auto-spawn
   # max_est_size: "medium"      # Maximum estimated fix size
   # investigate_timeout_secs: 600 # Investigation time limit (default: 10 min)
-  # comment_investigation: false  # Post investigation findings as Slack reply (dry_run only)
 
 # ──────────────────────────────────────────────
 # Issue Tracker

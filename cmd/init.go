@@ -89,7 +89,7 @@ type wizardModel struct {
 	branchCursor  int
 
 	// Toad King
-	toadKingCursor int // 0=dry-run, 1=live, 2=off
+	toadKingCursor int // 0=on, 1=off
 
 	// Advanced ask
 	advancedCursor int // 0=no, 1=yes
@@ -386,7 +386,7 @@ func (m wizardModel) updateToadKing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.toadKingCursor--
 		}
 	case keyDown, "j":
-		if m.toadKingCursor < 2 {
+		if m.toadKingCursor < 1 {
 			m.toadKingCursor++
 		}
 	case keyEnter:
@@ -563,15 +563,14 @@ func (m wizardModel) updateSummary(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // ── Config writing ───────────────────────────────────
 
 func (m *wizardModel) writeConfig() error {
-	toadKingModes := []string{"dry-run", "live", "off"}
+	toadKingModes := []string{"on", "off"}
 	toadKingMode := toadKingModes[m.toadKingCursor]
 
 	agentModels := []string{"sonnet", "opus", "haiku"}
 	triageModels := []string{"haiku", "sonnet"}
 	logLevels := []string{"debug", "info", "warn", "error"}
 
-	digestEnabled := toadKingMode != "off"
-	digestDryRun := toadKingMode != "live"
+	digestEnabled := toadKingMode == "on"
 
 	absPath, _ := filepath.Abs(m.repoPathInput.Value())
 
@@ -600,7 +599,6 @@ func (m *wizardModel) writeConfig() error {
 		},
 		Digest: digestTemplateData{
 			Enabled: digestEnabled,
-			DryRun:  digestDryRun,
 		},
 		IssueTracker: issueTrackerTemplateData{},
 		Log: logTemplateData{
@@ -818,8 +816,7 @@ func (m wizardModel) viewToadKing() string {
 		label string
 		desc  string
 	}{
-		{"Dry-run", "investigate and report opportunities (recommended)"},
-		{"Live", "auto-file Linear tickets for high-confidence bugs"},
+		{"On", "investigate and propose/file high-confidence bugs (recommended)"},
 		{"Off", "disable passive monitoring"},
 	}
 
@@ -968,7 +965,7 @@ func (m wizardModel) viewAdvLog() string {
 func (m wizardModel) viewSummary() string {
 	var b strings.Builder
 
-	toadKingModes := []string{"dry-run", "live", "off"}
+	toadKingModes := []string{"on", "off"}
 	agentModels := []string{"sonnet", "opus", "haiku"}
 
 	b.WriteString(tui.TitleStyle.Render("Review & Save"))

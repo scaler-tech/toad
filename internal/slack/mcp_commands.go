@@ -142,11 +142,7 @@ func (h *SlashCommandHandler) handleStatus(cmd slack.SlashCommand) {
 	)
 
 	if stats.DigestEnabled {
-		mode := ""
-		if stats.DigestDryRun {
-			mode = " (dry run)"
-		}
-		text += fmt.Sprintf("\n• Digest: enabled%s — %d processed, %d opportunities", mode, stats.DigestProcessed, stats.DigestOpps)
+		text += fmt.Sprintf("\n• Digest: enabled — %d processed, %d opportunities", stats.DigestProcessed, stats.DigestOpps)
 	}
 
 	h.ephemeral(cmd, text)

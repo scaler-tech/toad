@@ -504,7 +504,6 @@ func TestProcessOpportunities_InvestigationErrorReasoningUsesSharedPrefix(t *tes
 		AllowedCategories: []string{"bug"},
 		MaxEstSize:        "small",
 		MaxAutoSpawnHour:  5,
-		DryRun:            true,
 	}
 	e := &Engine{
 		cfg: cfg,
@@ -550,7 +549,6 @@ func TestProcessOpportunities_SpawnLimitReturnsFalse(t *testing.T) {
 		AllowedCategories: []string{"bug"},
 		MaxEstSize:        "small",
 		MaxAutoSpawnHour:  1,
-		DryRun:            true,
 	}
 	e := &Engine{
 		cfg:     cfg,
@@ -574,6 +572,44 @@ func TestProcessOpportunities_SpawnLimitReturnsFalse(t *testing.T) {
 	}
 	if e.totalSpawns.Load() != 1 {
 		t.Errorf("expected 1 spawn, got %d", e.totalSpawns.Load())
+	}
+}
+
+// TestProcessOpportunities_AlwaysReachesProposePath is a regression test for
+// the v1->v2 digest simplification: v1 had dry_run/comment_investigation
+// mode branches that could short-circuit before propose() ever ran (see the
+// now-deleted "[dry-run] would propose fix" log-and-skip path). v2's digest
+// has a single mode — enabled or disabled — so once an opportunity clears
+// guardrails, dedup, investigation, and the hourly spawn limit, it must
+// always reach propose(). No config flag should ever be able to reintroduce
+// a log-and-skip branch here.
+func TestProcessOpportunities_AlwaysReachesProposePath(t *testing.T) {
+	cfg := &config.DigestConfig{
+		MinConfidence:     0.5,
+		AllowedCategories: []string{"bug"},
+		MaxEstSize:        "small",
+		MaxAutoSpawnHour:  5,
+	}
+
+	proposeCalled := false
+	e := &Engine{
+		cfg: cfg,
+		propose: func(ctx context.Context, f investigation.Findings, msg Message) error {
+			proposeCalled = true
+			return nil
+		},
+	}
+
+	msgs := []Message{{Text: "actionable bug", Channel: "C1", ChannelName: "errors", Timestamp: "1"}}
+	opps := []Opportunity{{Summary: "fix it", Category: "bug", Confidence: 0.99, EstSize: "small", MessageIdx: 0}}
+
+	e.processOpportunities(context.Background(), msgs, opps, map[string]bool{})
+
+	if !proposeCalled {
+		t.Fatal("expected propose to be called for an actionable opportunity — no mode branch should skip it")
+	}
+	if e.totalSpawns.Load() != 1 {
+		t.Errorf("expected totalSpawns=1, got %d", e.totalSpawns.Load())
 	}
 }
 
@@ -623,7 +659,6 @@ func TestProcessOpportunities_TrackerExtractsRef(t *testing.T) {
 		AllowedCategories: []string{"bug"},
 		MaxEstSize:        "small",
 		MaxAutoSpawnHour:  5,
-		DryRun:            true,
 	}
 
 	ref := &issuetracker.IssueRef{Provider: "linear", ID: "PLF-42", URL: "https://linear.app/t/issue/PLF-42"}
@@ -644,14 +679,14 @@ func TestProcessOpportunities_TrackerExtractsRef(t *testing.T) {
 
 	e.processOpportunities(context.Background(), msgs, opps, map[string]bool{})
 
-	// In dry-run mode the fix isn't actually proposed via propose(), but the
-	// issue ref should have been extracted. Verify via totalSpawns counter.
+	// v2 has a single mode: an actionable opportunity always reaches
+	// propose(), carrying the tracker-extracted issue ref along with it.
 	if e.totalSpawns.Load() != 1 {
-		t.Errorf("expected 1 propose (dry-run), got %d", e.totalSpawns.Load())
+		t.Errorf("expected 1 propose, got %d", e.totalSpawns.Load())
 	}
-	// proposedFindings won't be set in dry-run mode — that's fine, we just verify
-	// the tracker was queried (extractRef returned non-nil).
-	_ = proposedFindings
+	if proposedFindings.IssueID != "PLF-42" {
+		t.Errorf("expected proposed findings to carry the extracted issue ref, got %q", proposedFindings.IssueID)
+	}
 }
 
 func TestProcessOpportunities_TrackerCreatesIssue(t *testing.T) {

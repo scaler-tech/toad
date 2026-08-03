@@ -5,19 +5,14 @@ import (
 )
 
 // minConfidence returns the active confidence floor: 0.95 by default,
-// overridden by cfg.MinConfidence when set, and lowered to 0.85 in comment
-// mode (dry-run + comment investigation) — posting investigation findings
-// has no downside there so the engine can afford to be more inclusive. A
-// nil cfg just falls back to the 0.95 default (each caller's own nil-cfg
-// handling for anything beyond confidence — e.g. passesGuardrails' fail-closed
-// category/size checks — is unaffected).
+// overridden by cfg.MinConfidence when set. A nil cfg just falls back to the
+// 0.95 default (each caller's own nil-cfg handling for anything beyond
+// confidence — e.g. passesGuardrails' fail-closed category/size checks — is
+// unaffected).
 func (e *Engine) minConfidence() float64 {
 	minConf := 0.95
 	if e.cfg != nil && e.cfg.MinConfidence > 0 {
 		minConf = e.cfg.MinConfidence
-	}
-	if e.cfg != nil && e.cfg.DryRun && e.cfg.CommentInvestigation && minConf > 0.85 {
-		minConf = 0.85
 	}
 	return minConf
 }
