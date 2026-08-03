@@ -586,7 +586,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 		// otherwise a hash of the opportunity summary.
 		scope := scopeKey(opp, e.tracker, msg.Text)
 
-		// Claim thread+scope early — before investigation — so a :frog: reaction spawn
+		// Claim thread+scope early — before investigation — so a concurrent CTA spawn
 		// doesn't race with us during the (slow) Sonnet investigation call.
 		if e.claim != nil && !e.claim(threadTS, scope) {
 			slog.Info("digest skipping: thread+scope already claimed", "summary", opp.Summary, "thread", threadTS, "scope", scope)
@@ -829,7 +829,7 @@ func syntheticFindings(taskDescription string, opp Opportunity, files []string) 
 
 // unclaimAfterPropose releases the scoped thread+scope claim after a
 // successful propose call. Propose succeeding has already served the
-// purpose the scoped claim existed to protect (no concurrent :frog:/CTA
+// purpose the scoped claim existed to protect (no concurrent CTA
 // spawn racing the investigation) — HasRecentOpportunity, actedIssues, and
 // the ticket_index carry dedup forward from this point on, so holding the
 // claim forever (the prior behavior) would only block a legitimate

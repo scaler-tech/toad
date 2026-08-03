@@ -24,7 +24,6 @@ type slackTemplateData struct {
 	AppToken string
 	BotToken string
 	Channels []string
-	Emoji    string
 	Keywords []string
 }
 
@@ -86,7 +85,6 @@ slack:
 {{ end }}
   # What triggers Toad
   triggers:
-    emoji: "{{ .Slack.Emoji }}"
     keywords:
 {{ range .Slack.Keywords }}      - "{{ . }}"
 {{ end }}

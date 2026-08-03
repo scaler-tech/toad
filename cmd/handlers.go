@@ -36,30 +36,29 @@ func handleMessage(
 	// Resolve channel name for context
 	channelName := slackClient.ResolveChannelName(msg.Channel)
 
-	// TICKET REQUEST: :frog: reaction on a toad reply
-	// Must be checked BEFORE the bot filter — ticket requests are reactions on
-	// toad's own (bot) messages, so the fetched message will have IsBot=true.
+	// TICKET REQUEST: "Create Linear ticket" CTA button click on a toad reply
+	// Must be checked BEFORE the bot filter — the button's underlying message
+	// is usually toad's own (bot) reply, so the fetched message will often
+	// have IsBot=true.
 	if msg.IsTicketRequest {
 		slog.Info("handler: ticket requested", "channel", channelName, "thread", msg.ThreadTS())
 		// sentryCorroborated uses the single corroboration mechanism (see
 		// isSentryCorroborated's doc comment in ticketflow.go). This is NOT
-		// always false in practice: a :frog:-reaction ticket request fires on
-		// toad's OWN reply (msg.BotID is toad's bot ID, never allowlisted),
-		// but the button path (internal/slack/interactive.go's
-		// handleInteractive) fetches the original thread anchor at threadTS
-		// via FetchMessage — which can legitimately be an allowlisted
-		// monitoring bot's message, not toad's own. Computed rather than
-		// hardcoded so the rule stays in one place regardless of which entry
-		// path produced msg.
+		// always false in practice: the button path
+		// (internal/slack/interactive.go's handleInteractive) fetches the
+		// original thread anchor at threadTS via FetchMessage — which can
+		// legitimately be an allowlisted monitoring bot's message, not
+		// toad's own. Computed rather than hardcoded so the rule stays in
+		// one place regardless of which entry path produced msg.
 		sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
-		// nil issueDetails: a bare CTA/reaction click has no thread context
+		// nil issueDetails: a bare CTA click has no thread context
 		// fetched yet — handleTicketRequest's own guard enriches it from
 		// scratch when ThreadContext is empty.
 		handleTicketRequest(ctx, msg, slackClient, nil, deps, nil, channelName, ticket.SourceCTA, sentryCorroborated)
 		return
 	}
 
-	// EXPLICIT TRIGGER: @toad mention or reaction/keyword trigger
+	// EXPLICIT TRIGGER: @toad mention or keyword trigger
 	if msg.IsMention || msg.IsTriggered {
 		slog.Debug("handler: triggered path", "mention", msg.IsMention, "triggered", msg.IsTriggered, "channel", channelName)
 

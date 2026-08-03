@@ -36,7 +36,6 @@ type SlackConfig struct {
 }
 
 type Triggers struct {
-	Emoji    string   `yaml:"emoji"`
 	Keywords []string `yaml:"keywords"`
 }
 
@@ -149,7 +148,6 @@ func defaults() *Config {
 		},
 		Slack: SlackConfig{
 			Triggers: Triggers{
-				Emoji:    "frog",
 				Keywords: []string{"toad fix", "toad help"},
 			},
 		},
@@ -241,7 +239,7 @@ func Load() (*Config, error) {
 	// ticket.auto_file defaults to true, but issuetracker.NewTracker returns
 	// a NoopTracker (which can never create issues) whenever the tracker
 	// isn't enabled/configured to create issues — also the default. Left
-	// alone, the first CTA click / :frog: react / escalation on a stock
+	// alone, the first CTA click / escalation on a stock
 	// install would reach ticket.Engine.file() with a tracker that can't file
 	// anything (mitigated there too, but that's belt-and-suspenders — this is
 	// the config-level fix). We can't tell an explicit `auto_file: true` from

@@ -17,7 +17,6 @@ func TestRenderConfig(t *testing.T) {
 			AppToken: "xapp-1-test",
 			BotToken: "xoxb-test",
 			Channels: []string{"C123", "C456"},
-			Emoji:    "frog",
 			Keywords: []string{"toad fix", "toad help"},
 		},
 		Repos: []repoTemplateData{
@@ -62,7 +61,6 @@ func TestRenderConfig(t *testing.T) {
 		`app_token: "xapp-1-test"`,
 		`bot_token: "xoxb-test"`,
 		`- "C123"`,
-		`emoji: "frog"`,
 		`- "toad fix"`,
 		`name: "my-app"`,
 		`path: "/home/dev/my-app"`,
@@ -90,7 +88,6 @@ func TestRenderConfig_NoChannels(t *testing.T) {
 		Slack: slackTemplateData{
 			AppToken: "xapp-1-test",
 			BotToken: "xoxb-test",
-			Emoji:    "frog",
 			Keywords: []string{"toad fix"},
 		},
 		Repos: []repoTemplateData{
@@ -124,7 +121,6 @@ func TestRenderConfig_IssueTrackerDisabled(t *testing.T) {
 		Slack: slackTemplateData{
 			AppToken: "xapp-1-test",
 			BotToken: "xoxb-test",
-			Emoji:    "frog",
 			Keywords: []string{"toad fix"},
 		},
 		Repos: []repoTemplateData{
@@ -159,7 +155,6 @@ func TestRenderConfig_CommentsPresent(t *testing.T) {
 		Slack: slackTemplateData{
 			AppToken: "xapp-1-test",
 			BotToken: "xoxb-test",
-			Emoji:    "frog",
 			Keywords: []string{"toad fix"},
 		},
 		Repos: []repoTemplateData{

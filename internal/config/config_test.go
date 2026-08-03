@@ -17,9 +17,6 @@ func validTestCfg() *Config {
 func TestDefaults(t *testing.T) {
 	cfg := defaults()
 
-	if cfg.Slack.Triggers.Emoji != "frog" {
-		t.Errorf("default emoji should be 'frog', got %q", cfg.Slack.Triggers.Emoji)
-	}
 	if cfg.Limits.MaxConcurrent != 2 {
 		t.Errorf("default max_concurrent should be 2, got %d", cfg.Limits.MaxConcurrent)
 	}

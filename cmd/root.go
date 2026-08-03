@@ -373,7 +373,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	slog.Info("toad is listening",
 		"channels", cfg.Slack.Channels,
 		"repos", repoNames,
-		"triggers", fmt.Sprintf("emoji=%s keywords=%v", cfg.Slack.Triggers.Emoji, cfg.Slack.Triggers.Keywords),
+		"triggers", fmt.Sprintf("keywords=%v", cfg.Slack.Triggers.Keywords),
 	)
 
 	// bgWg tracks the five background goroutines below (MCP server, repo

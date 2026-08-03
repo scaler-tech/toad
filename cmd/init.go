@@ -99,7 +99,6 @@ type wizardModel struct {
 	advSection    int
 	advCursor     int
 	channelsInput textinput.Model
-	emojiInput    textinput.Model
 	keywordsInput textinput.Model
 	agentModel    int // 0=sonnet, 1=opus, 2=haiku
 	triageModel   int // 0=haiku, 1=sonnet
@@ -133,9 +132,6 @@ func newWizardModel() wizardModel {
 
 	channels := newTextInput("C0123456789, C9876543210 (leave empty for all)", 60)
 
-	emoji := newTextInput("frog", 30)
-	emoji.SetValue("frog")
-
 	keywords := newTextInput("toad fix, toad help", 60)
 	keywords.SetValue("toad fix, toad help")
 
@@ -148,7 +144,6 @@ func newWizardModel() wizardModel {
 		repoPathInput: repoPath,
 		repoNameInput: repoName,
 		channelsInput: channels,
-		emojiInput:    emoji,
 		keywordsInput: keywords,
 		logLevel:      1, // info
 	}
@@ -227,8 +222,6 @@ func (m wizardModel) forwardToActiveInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case 0:
 				m.channelsInput, cmd = m.channelsInput.Update(msg)
 			case 1:
-				m.emojiInput, cmd = m.emojiInput.Update(msg)
-			case 2:
 				m.keywordsInput, cmd = m.keywordsInput.Update(msg)
 			}
 		}
@@ -447,12 +440,12 @@ func (m wizardModel) updateAdvTriggers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case keyTab, keyDown:
 		m.blurAllAdvanced()
-		m.advCursor = (m.advCursor + 1) % 3
+		m.advCursor = (m.advCursor + 1) % 2
 		m.focusAdvancedField()
 		return m, nil
 	case keyShiftTab, "up":
 		m.blurAllAdvanced()
-		m.advCursor = (m.advCursor + 2) % 3
+		m.advCursor = (m.advCursor + 1) % 2
 		m.focusAdvancedField()
 		return m, nil
 	case keyEnter:
@@ -466,8 +459,6 @@ func (m wizardModel) updateAdvTriggers(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case 0:
 			m.channelsInput, cmd = m.channelsInput.Update(msg)
 		case 1:
-			m.emojiInput, cmd = m.emojiInput.Update(msg)
-		case 2:
 			m.keywordsInput, cmd = m.keywordsInput.Update(msg)
 		}
 		return m, cmd
@@ -527,7 +518,6 @@ func (m wizardModel) updateAdvLog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *wizardModel) blurAllAdvanced() {
 	m.channelsInput.Blur()
-	m.emojiInput.Blur()
 	m.keywordsInput.Blur()
 }
 
@@ -537,8 +527,6 @@ func (m *wizardModel) focusAdvancedField() {
 		case 0:
 			m.channelsInput.Focus()
 		case 1:
-			m.emojiInput.Focus()
-		case 2:
 			m.keywordsInput.Focus()
 		}
 	}
@@ -579,7 +567,6 @@ func (m *wizardModel) writeConfig() error {
 			AppToken: m.appTokenInput.Value(),
 			BotToken: m.botTokenInput.Value(),
 			Channels: parseCSV(m.channelsInput.Value()),
-			Emoji:    m.emojiInput.Value(),
 			Keywords: parseCSV(m.keywordsInput.Value()),
 		},
 		Repos: []repoTemplateData{{
@@ -744,11 +731,11 @@ func (m wizardModel) viewSlackGuide() string {
 			"     " + tui.AccentStyle.Render("app_mentions:read") + "    " + tui.AccentStyle.Render("channels:history") + "\n" +
 			"     " + tui.AccentStyle.Render("channels:join") + "        " + tui.AccentStyle.Render("channels:read") + "\n" +
 			"     " + tui.AccentStyle.Render("chat:write") + "           " + tui.AccentStyle.Render("groups:history") + "\n" +
-			"     " + tui.AccentStyle.Render("groups:read") + "          " + tui.AccentStyle.Render("reactions:read") + "\n" +
-			"     " + tui.AccentStyle.Render("reactions:write") + "      " + tui.AccentStyle.Render("users:read")},
+			"     " + tui.AccentStyle.Render("groups:read") + "          " + tui.AccentStyle.Render("reactions:write") + "\n" +
+			"     " + tui.AccentStyle.Render("users:read")},
 		{"5", "Subscribe to events", "Event Subscriptions → toggle on → Subscribe to bot events:\n" +
 			"     " + tui.AccentStyle.Render("app_mention") + "          " + tui.AccentStyle.Render("message.channels") + "\n" +
-			"     " + tui.AccentStyle.Render("message.groups") + "       " + tui.AccentStyle.Render("reaction_added")},
+			"     " + tui.AccentStyle.Render("message.groups")},
 		{"6", "Install to your workspace", "Copy the Bot User OAuth Token (starts with xoxb-)"},
 	}
 
@@ -885,7 +872,6 @@ func (m wizardModel) viewAdvTriggers() string {
 		view  string
 	}{
 		{"Channel IDs", m.channelsInput.View()},
-		{"Trigger emoji", m.emojiInput.View()},
 		{"Trigger keywords", m.keywordsInput.View()},
 	}
 

@@ -1,5 +1,5 @@
 // ticketflow.go implements the v2 investigate-and-file flow: the bug/feature
-// branch of handleTriggered, the :ticket:/:frog: CTA handler, and the shared
+// branch of handleTriggered, the :ticket: CTA handler, and the shared
 // helpers both (and the escalation branch) build on.
 //
 // Design note: the decision logic in this file (idempotency pre-check,
@@ -62,10 +62,9 @@ func isExplicitTicketRequest(text string) bool {
 // flag for msg (see isExplicitTicketRequest's doc comment above for why the
 // backstop exists at all).
 //
-// !msg.IsBot is the Critical fix here: without it, a :frog: reaction on a
-// bot's own message (which routes through this same triggered path) or bot
-// boilerplate that happens to contain a ticket-request phrase (e.g.
-// "...create an issue to track...") combined with a triage timeout would
+// !msg.IsBot is the Critical fix here: without it, bot boilerplate that
+// happens to contain a ticket-request phrase (e.g. "...create an issue to
+// track...") combined with a triage timeout would
 // force an unreviewed SourceEscalation filing with no human ever having
 // asked for a ticket. SourceEscalation's entire justification is that an
 // explicit HUMAN request already IS the filing sign-off (see
@@ -632,8 +631,8 @@ type ticketRequestOutcome struct {
 	Err       error
 }
 
-// runTicketRequest is the shared core of the CTA (:frog: reaction / ticket
-// button) and triage-escalation entry points: claim the thread, reuse a
+// runTicketRequest is the shared core of the CTA (ticket button) and
+// triage-escalation entry points: claim the thread, reuse a
 // recent investigation for it if one exists, otherwise run a fresh one, and
 // file it directly.
 //
@@ -655,7 +654,7 @@ type ticketRequestOutcome struct {
 //
 // sentryCorroborated follows the same rule as runTriggeredInvestigation's
 // (see its doc comment): true only when this request arrived from an
-// allowlisted monitoring bot, never from a human click/reaction or
+// allowlisted monitoring bot, never from a human click or
 // human-pasted text. It gates both a FRESH investigation's
 // Findings.SentryIssueIDs and a REUSED saved finding's the same way — this
 // path bypasses Decide entirely (an explicit human request already IS the
@@ -792,7 +791,7 @@ func reuseRecentInvestigation(db *state.DB, threadTS string) (*investigation.Fin
 	return &f, rec.ID
 }
 
-// handleTicketRequest is the :ticket:/:frog: CTA entry point, and — via the
+// handleTicketRequest is the :ticket: CTA entry point, and — via the
 // escalation branch in handleTriggered — the triage Escalate==true entry
 // point too. Both funnel into runTicketRequest, distinguished only by src.
 func handleTicketRequest(
@@ -808,7 +807,7 @@ func handleTicketRequest(
 ) {
 	threadTS := msg.ThreadTS()
 
-	// The CTA/reaction path already set a ":ticket: Creating ticket..."
+	// The CTA path already set a ":ticket: Creating ticket..."
 	// thread status before dispatching here (internal/slack/interactive.go).
 	// ReplyInThread does not clear it, so it must be cleared before we're
 	// done, regardless of which branch below is taken.

@@ -31,8 +31,6 @@ func handleEventsAPI(ctx context.Context, c *Client, evt socketmode.Event) {
 		handleAppMention(ctx, c, ev)
 	case *slackevents.MessageEvent:
 		handleMessage(ctx, c, ev)
-	case *slackevents.ReactionAddedEvent:
-		handleReaction(ctx, c, ev)
 	default:
 		slog.Debug("unhandled event type", "type", eventType)
 	}
@@ -44,8 +42,6 @@ func extractUserID(ev interface{}) string {
 	case *slackevents.AppMentionEvent:
 		return e.User
 	case *slackevents.MessageEvent:
-		return e.User
-	case *slackevents.ReactionAddedEvent:
 		return e.User
 	}
 	return ""
@@ -141,43 +137,6 @@ func handleMessage(ctx context.Context, c *Client, ev *slackevents.MessageEvent)
 	}
 
 	slog.Debug("dispatching message", "channel", ev.Channel, "triggered", triggered, "bot", isBot)
-	if c.handler != nil {
-		c.handler(ctx, msg)
-	}
-}
-
-func handleReaction(ctx context.Context, c *Client, ev *slackevents.ReactionAddedEvent) {
-	slog.Debug("reaction event", "emoji", ev.Reaction, "user", ev.User, "channel", ev.Item.Channel)
-
-	if ev.Reaction != c.triggers.Emoji {
-		slog.Debug("skipping: non-trigger emoji", "emoji", ev.Reaction, "trigger", c.triggers.Emoji)
-		return
-	}
-	if !c.inChannel(ev.Item.Channel) {
-		slog.Debug("skipping: unmonitored channel", "channel", ev.Item.Channel)
-		return
-	}
-	if c.markSeen(ev.Item.Channel, "react:"+ev.Item.Timestamp) {
-		slog.Debug("skipping: duplicate reaction", "ts", ev.Item.Timestamp)
-		return
-	}
-
-	// Check if reaction is on a toad reply (ticket request) or on a user message (triage trigger)
-	isTicketRequest := c.IsToadReply(ev.Item.Channel, ev.Item.Timestamp)
-
-	slog.Info("trigger reaction received",
-		"emoji", ev.Reaction, "channel", ev.Item.Channel, "ticket_request", isTicketRequest)
-
-	// Fetch the message that was reacted to
-	msg, err := c.FetchMessage(ev.Item.Channel, ev.Item.Timestamp)
-	if err != nil {
-		slog.Error("failed to fetch reacted message", "error", err)
-		return
-	}
-	msg.IsTriggered = true
-	msg.IsTicketRequest = isTicketRequest
-
-	slog.Debug("dispatching message", "triggered", true, "ticket_request", isTicketRequest, "bot", msg.IsBot)
 	if c.handler != nil {
 		c.handler(ctx, msg)
 	}

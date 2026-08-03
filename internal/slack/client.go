@@ -30,7 +30,7 @@ type IncomingMessage struct {
 	IsTriggered     bool
 	IsBot           bool
 	BotID           string
-	IsTicketRequest bool // :frog: reaction on a toad reply — means "file a ticket"
+	IsTicketRequest bool // "Create Linear ticket" CTA button click on a toad reply — means "file a ticket"
 	// SentryRefs holds Sentry issue identifiers found by ExtractSentryRefs over
 	// the message's full text (including Block Kit/attachment content); it
 	// feeds downstream investigation corroboration (e.g. ticket-linking) that

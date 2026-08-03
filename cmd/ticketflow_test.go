@@ -1334,7 +1334,7 @@ func TestIsExplicitTicketRequest(t *testing.T) {
 	}
 }
 
-// Critical fix (C2): a :frog: reaction or @toad mention on a BOT message
+// Critical fix (C2): an @toad mention or keyword trigger on a BOT message
 // whose text happens to match the explicit ticket-request phrasing (e.g.
 // bot boilerplate like "...create an issue to track...") must never force
 // SourceEscalation — only an explicit HUMAN request is the filing sign-off
