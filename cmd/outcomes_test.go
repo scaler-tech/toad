@@ -1,8 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -217,6 +220,71 @@ func TestPollOnce_ContinuesPastPerEntryError(t *testing.T) {
 	}
 	if third.LastStatus != "In Progress" {
 		t.Errorf("expected the third entry to also be processed, got LastStatus=%q", third.LastStatus)
+	}
+}
+
+// captureSlog swaps in a buffer-backed default slog.Logger for the duration
+// of fn, returning everything logged. Mirrors internal/state/db_test.go's
+// migrate-warning capture pattern.
+func captureSlog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
+}
+
+// TestPollOnce_LogsWarnSummaryOnFailures is I7: a poll cycle with one or
+// more per-entry failures must log a single summary Warn ("N/M status
+// checks failed") in addition to the existing per-entry Debug logs — a
+// poller that's silently failing for every ticket was previously invisible
+// unless someone went looking at Debug-level logs.
+func TestPollOnce_LogsWarnSummaryOnFailures(t *testing.T) {
+	db := newTestDB(t)
+	seedTicket(t, db, "thread:C5:1", "TOAD-40", "Todo", time.Time{})
+	seedTicket(t, db, "thread:C5:2", "TOAD-41", "Todo", time.Time{})
+
+	fake := &outcomeTrackerFake{
+		statuses: map[string]issuetracker.IssueStatus{
+			"TOAD-41": {State: "Done"},
+		},
+		errs: map[string]error{
+			"TOAD-40": errors.New("linear api unavailable"),
+		},
+	}
+
+	logs := captureSlog(t, func() {
+		pollOnce(context.Background(), db, fake, time.Hour)
+	})
+
+	if !strings.Contains(logs, "ticket outcome poll: 1/2 status checks failed") {
+		t.Errorf("expected a summary Warn log for the failed check, got logs:\n%s", logs)
+	}
+	if !strings.Contains(strings.ToUpper(logs), "WARN") {
+		t.Errorf("expected the summary to be logged at Warn level, got logs:\n%s", logs)
+	}
+}
+
+// TestPollOnce_NoWarnSummaryWhenAllChecksSucceed is the control: a clean
+// poll cycle (no per-entry failures) must not log any summary Warn.
+func TestPollOnce_NoWarnSummaryWhenAllChecksSucceed(t *testing.T) {
+	db := newTestDB(t)
+	seedTicket(t, db, "thread:C6:1", "TOAD-50", "Todo", time.Time{})
+
+	fake := &outcomeTrackerFake{
+		statuses: map[string]issuetracker.IssueStatus{
+			"TOAD-50": {State: "Done"},
+		},
+	}
+
+	logs := captureSlog(t, func() {
+		pollOnce(context.Background(), db, fake, time.Hour)
+	})
+
+	if strings.Contains(logs, "status checks failed") {
+		t.Errorf("expected no failure-summary log on an all-successful poll, got logs:\n%s", logs)
 	}
 }
 

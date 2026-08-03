@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -50,6 +51,12 @@ func runOutcomePoller(ctx context.Context, db *state.DB, tracker issuetracker.Tr
 // into a retry storm. ctx cancellation is checked between entries so a
 // shutdown doesn't wait for the whole batch to finish.
 //
+// I7: per-entry failures (both the status-check call and the persist call)
+// are counted, and if any occurred this cycle, one slog.Warn summarizes
+// "N/M status checks failed" after the loop — a poll cycle that's silently
+// failing for every ticket used to be invisible unless someone went looking
+// at Debug logs.
+//
 // Exported as a standalone function (rather than folded into the ticker
 // loop) so tests can drive a single deterministic pass without waiting on
 // a real ticker.
@@ -61,18 +68,22 @@ func pollOnce(ctx context.Context, db *state.DB, tracker issuetracker.Tracker, i
 	}
 
 	now := time.Now()
+	attempted := 0
+	failed := 0
 	for _, e := range entries {
 		if ctx.Err() != nil {
-			return
+			break
 		}
 
 		if !e.StatusCheckedAt.IsZero() && now.Sub(e.StatusCheckedAt) < interval {
 			continue
 		}
+		attempted++
 
 		status, err := tracker.GetIssueStatus(ctx, &issuetracker.IssueRef{ID: e.IssueID})
 		if err != nil {
 			slog.Debug("outcome poller: status check failed", "issue", e.IssueID, "error", err)
+			failed++
 			continue
 		}
 		if status == nil {
@@ -86,7 +97,12 @@ func pollOnce(ctx context.Context, db *state.DB, tracker issuetracker.Tracker, i
 
 		if err := db.UpdateTicketStatus(e.ExternalKey, status.State, status.StateType); err != nil {
 			slog.Debug("outcome poller: failed to persist ticket status", "issue", e.IssueID, "error", err)
+			failed++
 		}
+	}
+
+	if failed > 0 {
+		slog.Warn(fmt.Sprintf("ticket outcome poll: %d/%d status checks failed", failed, attempted))
 	}
 }
 
