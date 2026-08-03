@@ -7,12 +7,10 @@ import (
 	"slices"
 	"time"
 
-	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/digest"
 	"github.com/scaler-tech/toad/internal/issuetracker"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
-	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/ticket"
 	"github.com/scaler-tech/toad/internal/triage"
 )
@@ -127,14 +125,21 @@ func handleMessage(
 
 	select {
 	case ribbitSem <- struct{}{}:
-		defer func() { <-ribbitSem }()
 	default:
 		slog.Debug("handler: skipping passive triage, at concurrency limit")
 		return
 	}
 
+	// Unlike above, the ribbitSem slot's release is NOT deferred here:
+	// handlePassive can now route into the same slow ticket flow
+	// handleTriggered's escalate branch uses (Important fix I2), which is
+	// bounded by investigateSem instead and can run for minutes — holding
+	// ribbitSem for that whole duration would starve concurrent ribbit Q&A
+	// behind it, the same rationale as handleTriggered's releaseRibbitSem.
+	// handlePassive owns releasing this slot end to end (mirroring
+	// handleTriggered's releaseRibbitSem discipline internally).
 	slog.Debug("handler: passive path", "channel", channelName, "user", msg.User)
-	handlePassive(ctx, msg, triageEngine, ribbitEngine, slackClient, channelName, deps.resolver, repoPaths, deps.ticketEngine, deps.stateManager.DB())
+	handlePassive(ctx, msg, triageEngine, ribbitEngine, slackClient, channelName, deps, repoPaths, ribbitSem, botAllowlist)
 }
 
 func handleTriggered(
@@ -366,6 +371,14 @@ func handleTriggered(
 	slackClient.React(msg.Channel, msg.Timestamp, "speech_balloon")
 }
 
+// handlePassive is the untriggered (no @mention/reaction/keyword trigger)
+// monitoring path — only reached when digest is disabled (see the caller's
+// guard in handleMessage). It now owns releasing the caller's ribbitSem slot
+// itself (the caller no longer defers the release) because the escalate/
+// ticket-request branch below routes into the same slow investigate-and-file
+// flow handleTriggered's escalate branch uses — see releaseRibbitSem's
+// pattern in handleTriggered for the identical rationale (that flow is
+// bounded by investigateSem, not ribbitSem, and can run for minutes).
 func handlePassive(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
@@ -373,14 +386,57 @@ func handlePassive(
 	ribbitEngine *ribbit.Engine,
 	slackClient *islack.Client,
 	channelName string,
-	resolver *config.Resolver,
+	deps flowDeps,
 	repoPaths map[string]string,
-	ticketEngine *ticket.Engine,
-	db *state.DB,
+	ribbitSem chan struct{},
+	botAllowlist []string,
 ) {
+	// Single-release discipline, mirroring handleTriggered's
+	// releaseRibbitSem/released pair exactly: the deferred call covers the
+	// fast, plain-ribbit-answer path below (and the "not actionable"/"triage
+	// failed" early returns); the escalate/ticket-request branch releases
+	// early before handing off to the slow ticket flow.
+	released := false
+	releaseRibbitSem := func() {
+		if !released {
+			released = true
+			<-ribbitSem
+		}
+	}
+	defer releaseRibbitSem()
+
 	result, err := triageEngine.Classify(ctx, msg, channelName)
 	if err != nil {
 		slog.Debug("passive triage failed", "error", err)
+		return
+	}
+
+	// Important fix (I2): handlePassive never read result.Escalate nor
+	// checked the explicit ticket-request phrase backstop, so a passively-
+	// observed message (no @mention/reaction) that explicitly asked for a
+	// ticket — or that triage itself flagged Escalate — fell straight into
+	// the bug/confidence filter below, where it was almost always dropped
+	// as "not a high-confidence bug" instead of ever reaching the ticket
+	// flow.
+	//
+	// !msg.IsBot && (result.Escalate || isExplicitTicketRequest(...)) is the
+	// exact same shape as shouldForceEscalateForTicketRequest's condition
+	// (ticketflow.go, C2's fix) generalized to also cover Escalate==true —
+	// that helper only guards the "escalate is currently false, does the
+	// phrase match" half, since handleTriggered already has a separate `if
+	// result.Escalate` branch of its own it falls into unconditionally.
+	// handlePassive has no such separate branch, so both conditions are
+	// checked together here. !msg.IsBot carries the identical rationale:
+	// bot-authored text must never trigger an unreviewed escalation.
+	if !msg.IsBot && (result.Escalate || isExplicitTicketRequest(msg.Text)) {
+		slog.Info("handler: passive escalate/ticket-request detected, routing to ticket flow", "summary", result.Summary)
+		releaseRibbitSem()
+		sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
+		// nil issueDetails: handleTicketRequest's own guard fetches and
+		// enriches thread context from scratch when it's empty, same as a
+		// bare CTA click — handlePassive never fetched thread context up
+		// front the way handleTriggered does.
+		handleTicketRequest(ctx, msg, slackClient, result, deps, nil, channelName, ticket.SourceEscalation, sentryCorroborated)
 		return
 	}
 
@@ -393,7 +449,7 @@ func handlePassive(
 	daemonCounters.triageBug.Add(1)
 	slog.Info("high-confidence bug detected passively", "summary", result.Summary)
 
-	repo := resolver.Resolve(result.Repo, result.FilesHint)
+	repo := deps.resolver.Resolve(result.Repo, result.FilesHint)
 	repoPath := ""
 	defaultBranch := "main"
 	if repo != nil {
@@ -408,7 +464,7 @@ func handlePassive(
 	}
 
 	daemonCounters.ribbits.Add(1)
-	incrementMetric(db, "qa")
+	incrementMetric(deps.stateManager.DB(), "qa")
 	// NOTE: pre-refactor this branch built its CTA button on msg.ThreadTS()
 	// while posting the reply anchored at msg.Timestamp (the plain-text
 	// branch always used msg.Timestamp too). ReplyWithOptionalCTA uses one
@@ -420,7 +476,7 @@ func handlePassive(
 	// reply's location is unaffected; the only residual difference is which
 	// exact message the ticket button's later FetchMessage(channel,
 	// threadTS) resolves (the specific reply vs. the thread root).
-	if _, err := slackClient.ReplyWithOptionalCTA(msg.Channel, msg.Timestamp, resp.Text, ticketEngine.ShouldCreateIssues()); err != nil {
+	if _, err := slackClient.ReplyWithOptionalCTA(msg.Channel, msg.Timestamp, resp.Text, deps.ticketEngine.ShouldCreateIssues()); err != nil {
 		slog.Warn("passive ribbit reply failed", "error", err)
 	}
 }
