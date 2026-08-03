@@ -28,7 +28,8 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 **Message flow:** Slack event (including allowlisted bots, e.g. Sentry) -> triage (Haiku, ~1s) -> route by category:
 - `question` -> ribbit reply (Claude + read-only tools)
 - `bug`/`feature` -> read-only investigation -> ticket gate: auto-file iff Sentry-corroborated + confident + feasible, else propose via a "Create Linear ticket" CTA button
-- A triage `Escalate` result, or a human clicking the CTA button / reacting with the single configured trigger emoji (default `:frog:`, `triggers.emoji` in config, `internal/slack/events.go`'s `handleReaction`) on a toad message, files a ticket directly — bypassing the auto-file gate, since that's already an explicit sign-off
+- A triage `Escalate` result, or a human clicking the CTA button on a toad message, files a ticket directly — bypassing the auto-file gate, since that's already an explicit sign-off
+- Toad is triggered by an `@mention`, a configured keyword (`triggers.keywords` in config), or the CTA button — there is no reaction-based trigger
 - Passive (Toad King digest): batches untriggered messages, analyzes with Haiku, and applies the same investigate-then-gate flow to auto-file or propose a ticket
 
 **Investigation lifecycle:** thread claim (`state.Manager.Claim`/`ClaimScoped`) -> repo re-sync (best-effort; failure appends a staleness caveat rather than blocking) -> `investigation.Runner.Run` (read-only Claude CLI subprocess, `--add-dir` for every configured repo) -> `ParseFindings` -> `ticket.Engine.Decide` (auto-file vs propose) -> `FileOrUpdate` (idempotent, keyed by Sentry issue or Slack thread) -> claim released. Findings are always persisted to the `investigations` table (even when not fed to the ticket engine) so a later CTA click or MCP `investigations` lookup can reuse them instead of re-investigating.

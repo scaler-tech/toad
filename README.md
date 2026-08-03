@@ -34,7 +34,6 @@ Slack message (incl. allowlisted bots, e.g. Sentry)
 Escalation paths bypass the gate entirely, since a human already signed off:
 - Triage returning `escalate: true` on an urgent message
 - Clicking the "Create Linear ticket" CTA on any toad message
-- Reacting with the trigger emoji (default `:frog:`) on one of toad's own replies
 
 Passive coverage works the same way at batch scale: the digest engine (**Toad King**) collects untriggered channel messages, has Haiku propose opportunities across a batch, and feeds anything that survives its guardrails through the identical investigate-then-gate flow — it never spawns anything, only proposes or files.
 
@@ -54,7 +53,7 @@ See **[SETUP.md](SETUP.md)** for prerequisites, the Slack app scopes toad actual
 - **Q&A (ribbit)** — `@toad` a question and get a codebase-grounded answer using read-only tools (Read, Glob, Grep) plus read-only VCS lookups (`gh`/`glab` issue and PR views). Thread memory keeps follow-ups coherent; ribbit retries once on an empty result.
 - **Investigation** — a read-only Claude run per actionable report, scoped to every configured repo (`--add-dir`), optionally backed by a Sentry MCP server for pulling stack traces and issue context directly into the investigation.
 - **Ticket filing + gate semantics** — `internal/ticket` is the single author of every filed ticket. It decides auto-file vs. propose, composes the ticket body (problem, root-cause hypothesis, evidence, scope, non-goals, acceptance criteria), and de-duplicates by an external key (`sentry:<issue-id>` or `thread:<channel>:<ts>`) so re-observing the same problem posts a comment instead of a duplicate ticket.
-- **Escalation paths** — CTA button, trigger-emoji reaction on a toad reply, or a triage `escalate` verdict — each files immediately, bypassing the auto-file gate since a human (or an urgent-enough signal) already made the call.
+- **Escalation paths** — CTA button, or a triage `escalate` verdict — each files immediately, bypassing the auto-file gate since a human (or an urgent-enough signal) already made the call.
 - **Digest (Toad King)** — passive, opt-in batch analysis of channel traffic with confidence/category/size/hourly-cap guardrails, so proactive ticket proposals stay conservative by default.
 - **MCP server tools** — `ask` (ribbit-backed Q&A), `logs`, `investigations` (Biome's context bridge — look up a prior investigation's findings by thread or ticket), and `query` (read-only SQL against toad's state DB), all behind per-user bearer tokens issued via a Slack slash command.
 - **Outcome tracking** — an hourly poller checks every filed ticket against Linear for status transitions and logs them. Visibility only; it never changes toad's filing behavior.

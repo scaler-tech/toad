@@ -97,13 +97,12 @@ Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** �
 | `chat:write` | Post replies and status updates |
 | `groups:history` | Read messages in private channels toad's been invited to |
 | `groups:read` | List private channels |
-| `reactions:read` | Detect the trigger-emoji reaction |
 | `reactions:write` | Post acknowledgment reactions |
 | `users:read` | Resolve display names |
 
 ### 4. Subscribe to events
 
-**Event Subscriptions** → toggle on → **Subscribe to bot events**: `app_mention`, `message.channels`, `message.groups`, `reaction_added`.
+**Event Subscriptions** → toggle on → **Subscribe to bot events**: `app_mention`, `message.channels`, `message.groups`.
 
 ### 5. Enable Interactivity (for the "Create Linear ticket" button)
 
@@ -157,7 +156,6 @@ slack:
   bot_token: "xoxb-..."
   channels: []          # empty = auto-join and monitor all public channels
   triggers:
-    emoji: "frog"       # react with this on a toad reply to escalate/ticket it
     keywords:
       - "toad fix"
       - "toad help"
@@ -385,7 +383,7 @@ Run through this after any fresh install or config change:
 - [ ] **Bug report + CTA** — `@toad <plausible bug description>` triggers triage → investigation → either an auto-filed ticket link, or a "Create Linear ticket" button on the findings message.
 - [ ] **Duplicate click** — click "Create Linear ticket" twice (or re-trigger the same report) and confirm the second pass posts a re-observation comment on the existing ticket rather than filing a duplicate.
 - [ ] **Bot alert** — post (or simulate) a message from an allowlisted bot ID and confirm it's routed to intake, not dropped or treated as passive chatter.
-- [ ] **Escalate** — react with the trigger emoji (default `:frog:`) on one of toad's own replies and confirm a ticket files immediately, bypassing the gate.
+- [ ] **Escalate** — click the "Create Linear ticket" CTA button on one of toad's replies (or ask explicitly, e.g. "toad, create a ticket for this") and confirm a ticket files immediately, bypassing the gate.
 - [ ] **Restart recovery** — kill `toad` mid-investigation, restart it, and confirm the run is marked failed (not left stuck) and normal processing resumes without manual cleanup.
 
 ---
@@ -397,7 +395,7 @@ Run through this after any fresh install or config change:
 - If `channels` is set, confirm the channel is listed (`channels: []` monitors all public channels).
 - Confirm you're using `@toad` (the bot's actual display name).
 - Check the log for connection errors — bad tokens fail immediately.
-- Confirm the Slack app is subscribed to `app_mention`, `message.channels`, `message.groups`, `reaction_added`.
+- Confirm the Slack app is subscribed to `app_mention`, `message.channels`, `message.groups`.
 
 ### "Cannot connect to Slack"
 

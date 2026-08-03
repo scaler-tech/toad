@@ -16,7 +16,6 @@ slack:
 
   # What triggers toad
   triggers:
-    emoji: "frog"              # react with this on a toad reply to escalate/ticket it
     keywords:
       - "toad fix"
       - "toad help"
