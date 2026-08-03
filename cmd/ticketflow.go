@@ -394,6 +394,45 @@ func composeFiledReply(findings investigation.Findings, fileResult *ticket.FileR
 	return fmt.Sprintf(":ticket: Filed %s — *%s*\n\n%s", url, title, findings.Reasoning)
 }
 
+// maxInfeasibleReasoningLen bounds how much of an infeasible finding's
+// Reasoning gets embedded in composeInfeasibleTicketReply's Slack reply —
+// long enough to be useful context, short enough not to dump a whole
+// multi-paragraph investigation into a one-line "couldn't confirm a fix"
+// message.
+const maxInfeasibleReasoningLen = 300
+
+// trimForReply truncates s to maxLen characters (appending "..." when
+// truncated), trimming surrounding whitespace either way.
+func trimForReply(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLen {
+		return s
+	}
+	return strings.TrimSpace(s[:maxLen]) + "..."
+}
+
+// composeInfeasibleTicketReply renders the Slack reply for an explicit
+// ticket request (CTA click, triage escalate, or the phrase backstop) whose
+// FRESH investigation came back infeasible — Important fix (I1). An
+// explicit request is sign-off to ATTEMPT filing, not sign-off to file a
+// finding the investigation itself said has no concrete fix; siblings
+// (runTriggeredInvestigation's auto-file branch) already fall through
+// instead of filing on !Feasible, and this path must not skip that check
+// just because a human explicitly asked.
+//
+// Deliberately does NOT implement an override phrase (e.g. "file it
+// anyway"): the spec called that support optional, and skipping it here
+// keeps this a small, easily-verified change — so the reply asks the user
+// to add detail and re-request rather than promising an override path that
+// doesn't exist yet.
+func composeInfeasibleTicketReply(findings *investigation.Findings) string {
+	reasoning := trimForReply(findings.Reasoning, maxInfeasibleReasoningLen)
+	return fmt.Sprintf(
+		":warning: I investigated but couldn't confirm a concrete fix: %s\n\nNo ticket filed — reply with more detail and ask again.",
+		reasoning,
+	)
+}
+
 // triggeredOutcomeKind enumerates what the bug/feature investigate-and-file
 // branch of handleTriggered decided to do.
 type triggeredOutcomeKind int
@@ -677,9 +716,22 @@ func runTicketRequest(
 		if err != nil {
 			return ticketRequestOutcome{Err: fmt.Errorf("investigation failed: %w", err)}
 		}
-		findings = f
 		recordID = generateInvestigationID()
-		saveInvestigationRecord(db, recordID, threadTS, msg.Channel, findings)
+		// Save before the Feasible check (mirrors runTriggeredInvestigation)
+		// so an infeasible fresh investigation is still visible in the
+		// audit trail even though it won't be filed below.
+		saveInvestigationRecord(db, recordID, threadTS, msg.Channel, f)
+
+		// Important fix (I1): an explicit ticket request (this whole
+		// function) must not file a FRESH investigation's infeasible
+		// finding just because the request was explicit — see
+		// composeInfeasibleTicketReply's doc comment. A REUSED record never
+		// reaches here infeasible (reuseRecentInvestigation already filters
+		// those out above), so this check only applies to a fresh run.
+		if !f.Feasible {
+			return ticketRequestOutcome{ReplyText: composeInfeasibleTicketReply(f)}
+		}
+		findings = f
 	}
 
 	// Re-apply enforceCorroboration here, unconditionally, on the FINAL

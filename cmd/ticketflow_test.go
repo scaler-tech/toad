@@ -142,6 +142,11 @@ const highConfidenceSentryFindings = `{"feasible":true,"title":"Refund export do
 
 const lowConfidenceSentryFindings = `{"feasible":true,"title":"Maybe a bug","problem":"p","root_cause":"rc","evidence":[],"scope":["s"],"non_goals":[],"acceptance_criteria":["ac"],"confidence":0.5,"repo":"svc","sentry_issue_ids":["BILLING-42"],"issue_id":"","files_found":[],"reasoning":"Not fully confident this is the root cause."}`
 
+// infeasibleFindings is a fresh investigation's finding that found no
+// concrete fix — used by I1's regression test to verify an explicit ticket
+// request (runTicketRequest) does not file a ticket from it.
+const infeasibleFindings = `{"feasible":false,"title":"","problem":"","root_cause":"","evidence":[],"scope":[],"non_goals":[],"acceptance_criteria":[],"confidence":0.2,"repo":"svc","sentry_issue_ids":[],"issue_id":"","files_found":[],"reasoning":"Could not reproduce the reported behavior or find a matching code path."}`
+
 // twoSentryIDsFindings is highConfidenceSentryFindings but with the model
 // emitting TWO sentry_issue_ids instead of one — used by Fix 2's ref-scoping
 // tests, where only one of the two actually appears in the corroborating
@@ -644,6 +649,45 @@ func TestRunTicketRequest_ConflictWhenThreadAlreadyClaimed(t *testing.T) {
 	}
 	if len(tracker.createCalls) != 0 {
 		t.Errorf("expected no CreateIssue call on a claim conflict, got %d", len(tracker.createCalls))
+	}
+}
+
+// Important fix (I1): an explicit ticket request (CTA click, escalation, or
+// the phrase backstop — this all funnels through runTicketRequest) whose
+// FRESH investigation comes back infeasible must NOT file a ticket from it.
+// No CreateIssue call, and the reply must clearly say no ticket was filed
+// rather than silently filing an empty/low-quality ticket just because the
+// request was explicit.
+func TestRunTicketRequest_FreshInfeasibleFindingDoesNotFile(t *testing.T) {
+	_, stateManager, tracker, mockProvider, deps := setupTriggeredTest(t, infeasibleFindings, autoFileCfg())
+
+	msg := &islack.IncomingMessage{Channel: "C21", Timestamp: "2100.1", Text: "please file a ticket for the weird flicker"}
+	threadTS := msg.ThreadTS()
+
+	outcome := runTicketRequest(context.Background(), msg, nil, deps, nil, "eng-alerts", threadTS, ticket.SourceCTA, false /* sentryCorroborated */)
+
+	if outcome.Conflict {
+		t.Fatal("did not expect a claim conflict on a fresh thread")
+	}
+	if outcome.Err != nil {
+		t.Fatalf("expected no error outcome (infeasible is a normal reply, not a failure), got: %v", outcome.Err)
+	}
+	if len(mockProvider.RunCalls) != 1 {
+		t.Errorf("expected exactly 1 investigation agent Run call, got %d", len(mockProvider.RunCalls))
+	}
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected NO CreateIssue call for an infeasible fresh finding, got %d", len(tracker.createCalls))
+	}
+	if !strings.Contains(outcome.ReplyText, "No ticket filed") {
+		t.Errorf("expected the reply to clearly state no ticket was filed, got %q", outcome.ReplyText)
+	}
+	if !strings.Contains(outcome.ReplyText, "Could not reproduce the reported behavior") {
+		t.Errorf("expected the reply to include the investigation's reasoning, got %q", outcome.ReplyText)
+	}
+
+	// Claim must still be released even on this non-filing outcome.
+	if !stateManager.Claim(threadTS) {
+		t.Error("expected claim to be released after an infeasible-finding outcome")
 	}
 }
 
