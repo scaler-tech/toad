@@ -75,7 +75,7 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 - State DB at `~/.toad/state.db`
 - On startup, `RecoverOnStartup` marks runs left in an active state (e.g. `investigating`) by a previous crash as failed, and returns any digest opportunities stuck mid-investigation so the digest engine can resume them
 - Ribbit retries once on empty result
-- Digest confidence floor is 0.85 in comment mode (dry-run + comment investigation); otherwise falls back to `digest.min_confidence` (default 0.95)
+- Digest has a single mode (enabled/disabled); its confidence floor is `digest.min_confidence` (default 0.95)
 - The "Create Linear ticket" CTA button appears on proposed (non-auto-filed) findings — both from a triggered Slack-thread investigation and from a digest proposal
 - An hourly outcome poller (`cmd/outcomes.go`) checks `ticket_index` entries against Linear for status changes and logs transitions — visibility only, it never changes toad's filing behavior
 - Linear ticket comments (up to 20) are fetched alongside issue details for investigation context

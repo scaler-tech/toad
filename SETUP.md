@@ -240,7 +240,6 @@ Auto-filing requires **all** of: `auto_file: true`, at least one corroborating S
 ```yaml
 digest:
   enabled: false                # opt-in
-  dry_run: false                # analyze without filing/proposing
   batch_minutes: 5
   min_confidence: 0.95
   max_auto_spawn_hour: 3
@@ -249,11 +248,10 @@ digest:
   # max_chunk_size: 50
   # chunk_timeout_secs: 120
   # investigate_timeout_secs: 600
-  # comment_investigation: false
   # bot_list: []
 ```
 
-This is Toad King: passive batch analysis of channel traffic that feeds the same investigate-then-gate flow as triggered messages, never spawning anything of its own. Recommended first-time setup: `enabled: true`, `dry_run: true` to observe before it can act on anything, `comment_investigation: true` so it posts findings with a CTA rather than staying silent. In comment mode the confidence floor is automatically lowered to 0.85 (posting a finding has no downside), otherwise it uses `min_confidence` (default 0.95). `bot_list`, if set, restricts which bot IDs the digest will actively engage with — leave empty to consider all.
+This is Toad King: passive batch analysis of channel traffic that feeds the same investigate-then-gate flow as triggered messages, never spawning anything of its own — it proposes via Slack CTA or auto-files only when Sentry-corroborated (see `ticket.auto_file` above). Digest has a single mode: `enabled: true` or `false`. The confidence floor is `min_confidence` (default 0.95). `bot_list`, if set, restricts which bot IDs the digest will actively engage with — leave empty to consider all.
 
 ### `issue_tracker`
 

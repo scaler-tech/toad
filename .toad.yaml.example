@@ -79,16 +79,14 @@ ticket:
 # ──────────────────────────────────────────────
 digest:
   enabled: false                # opt-in batch analysis
-  # dry_run: false               # analyze without filing/proposing
   batch_minutes: 5              # how often to analyze batched messages
-  min_confidence: 0.95          # confidence floor (auto-lowered to 0.85 in comment mode)
+  min_confidence: 0.95          # confidence floor
   max_auto_spawn_hour: 3        # max auto-filed tickets per hour
   allowed_categories: ["bug"]   # categories eligible for auto-file
   max_est_size: "medium"        # max estimated fix size
   # max_chunk_size: 50            # messages per analysis batch
   # chunk_timeout_secs: 120       # batch analysis timeout
   # investigate_timeout_secs: 600 # investigation time limit (default: 10 min)
-  # comment_investigation: false  # post findings as a Slack reply (dry_run only)
   # bot_list: []                  # bot IDs eligible for active outreach (empty = all)
 
 # ──────────────────────────────────────────────
