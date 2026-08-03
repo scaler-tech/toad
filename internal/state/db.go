@@ -776,27 +776,33 @@ func (d *DB) DigestOpportunityCounts() (*DigestCounts, error) {
 
 // DaemonStats holds live daemon metrics written periodically while running.
 type DaemonStats struct {
-	Heartbeat         time.Time        `json:"heartbeat"`
-	StartedAt         time.Time        `json:"started_at"`
-	PID               int              `json:"pid"`
-	Version           string           `json:"version,omitempty"`
-	Draining          bool             `json:"draining,omitempty"`
-	Ribbits           int64            `json:"ribbits"`
-	Triages           int64            `json:"triages"`
-	TriageByCategory  map[string]int64 `json:"triage_by_category"`
-	DigestEnabled     bool             `json:"digest_enabled"`
-	DigestDryRun      bool             `json:"digest_dry_run"`
-	DigestCommentMode bool             `json:"digest_comment_mode,omitempty"`
-	DigestBuffer      int              `json:"digest_buffer"`
-	DigestNextFlush   time.Time        `json:"digest_next_flush"`
-	DigestProcessed   int64            `json:"digest_processed"`
-	DigestOpps        int64            `json:"digest_opportunities"`
-	DigestSpawns      int64            `json:"digest_spawns"`
-	IssueTracker      bool             `json:"issue_tracker,omitempty"`
-	IssueProvider     string           `json:"issue_provider,omitempty"`
-	MCPEnabled        bool             `json:"mcp_enabled,omitempty"`
-	MCPHost           string           `json:"mcp_host,omitempty"`
-	MCPPort           int              `json:"mcp_port,omitempty"`
+	Heartbeat        time.Time        `json:"heartbeat"`
+	StartedAt        time.Time        `json:"started_at"`
+	PID              int              `json:"pid"`
+	Version          string           `json:"version,omitempty"`
+	Draining         bool             `json:"draining,omitempty"`
+	Ribbits          int64            `json:"ribbits"`
+	Triages          int64            `json:"triages"`
+	TriageByCategory map[string]int64 `json:"triage_by_category"`
+	// BotIntakeDropped counts allowlisted-bot intake messages runBotIntake
+	// silently dropped (cmd/ticketflow.go) — triage failure with no Sentry
+	// refs to fail toward, non-actionable, a claim conflict, or an
+	// infeasible/errored investigation. Every drop is also logged at Warn;
+	// this is the cumulative counter surfaced on the dashboard.
+	BotIntakeDropped  int64     `json:"bot_intake_dropped,omitempty"`
+	DigestEnabled     bool      `json:"digest_enabled"`
+	DigestDryRun      bool      `json:"digest_dry_run"`
+	DigestCommentMode bool      `json:"digest_comment_mode,omitempty"`
+	DigestBuffer      int       `json:"digest_buffer"`
+	DigestNextFlush   time.Time `json:"digest_next_flush"`
+	DigestProcessed   int64     `json:"digest_processed"`
+	DigestOpps        int64     `json:"digest_opportunities"`
+	DigestSpawns      int64     `json:"digest_spawns"`
+	IssueTracker      bool      `json:"issue_tracker,omitempty"`
+	IssueProvider     string    `json:"issue_provider,omitempty"`
+	MCPEnabled        bool      `json:"mcp_enabled,omitempty"`
+	MCPHost           string    `json:"mcp_host,omitempty"`
+	MCPPort           int       `json:"mcp_port,omitempty"`
 
 	// Concurrency gauges for the dashboard's "Live now" card. Populated every
 	// 10s (root.go's stats ticker) from the live occupancy/capacity of the

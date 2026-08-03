@@ -43,6 +43,13 @@ var daemonCounters struct {
 	triageFeature  atomic.Int64
 	triageQuestion atomic.Int64
 	triageOther    atomic.Int64
+	// botIntakeDropped counts every silently-dropped allowlisted-bot intake
+	// message (runBotIntake's several drop points — triage failure with no
+	// Sentry refs, non-actionable, claim conflict, or an investigation that
+	// fell through) — see runBotIntake's doc comment (ticketflow.go). Surfaced
+	// on the dashboard so a sustained drop rate is visible rather than only
+	// living in Warn-level logs.
+	botIntakeDropped atomic.Int64
 }
 
 var rootCmd = &cobra.Command{
@@ -512,6 +519,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 					"question":      daemonCounters.triageQuestion.Load(),
 					"other":         daemonCounters.triageOther.Load(),
 				},
+				BotIntakeDropped:  daemonCounters.botIntakeDropped.Load(),
 				DigestEnabled:     cfg.Digest.Enabled,
 				DigestDryRun:      cfg.Digest.DryRun,
 				DigestCommentMode: cfg.Digest.CommentInvestigation,

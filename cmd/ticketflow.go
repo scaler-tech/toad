@@ -798,6 +798,40 @@ func handleTicketRequest(
 	}
 }
 
+// firstLine returns the first non-blank line of text, trimmed, for use as a
+// short synthetic summary — text may be multi-paragraph bot alert content
+// (stack traces, formatted fields), and a full-text summary would be far
+// noisier than the first line (typically the alert title).
+func firstLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if t := strings.TrimSpace(line); t != "" {
+			return t
+		}
+	}
+	return strings.TrimSpace(text)
+}
+
+// syntheticBotIntakeResult builds a fallback triage.Result for an
+// allowlisted-bot message when Classify has failed twice in a row but the
+// message carries Sentry references — i.e. it's already externally
+// corroborated as a real signal, just one triage couldn't classify. Rather
+// than drop a corroborated signal outright, this "fails toward
+// investigation": Actionable=true, Category="bug", a modest 0.55 confidence
+// (above runBotIntake's 0.5 investigate-gate, but low enough that
+// ticket.Engine's Decide gate won't auto-file from this alone without real
+// investigation findings backing it up). The downstream investigation +
+// Decide gate is the real filter here, not this synthetic classification —
+// see runBotIntake's doc comment on this substitution.
+func syntheticBotIntakeResult(msg *islack.IncomingMessage) *triage.Result {
+	return &triage.Result{
+		Actionable: true,
+		Category:   categoryBug,
+		Confidence: 0.55,
+		Summary:    firstLine(msg.Text),
+		Keywords:   msg.SentryRefs,
+	}
+}
+
 // runBotIntake is the pure decision core of the allowlisted-bot intake path
 // (controller ruling from Task 15's review: bot messages feed intake, never
 // conversation). It triages the message directly — no ribbitSem, no
@@ -805,9 +839,24 @@ func handleTicketRequest(
 // same investigate-and-file flow as handleTriggered's bug/feature branch
 // (bounded by investigateSem as always) ONLY for an actionable bug/feature.
 // Everything else (question/other, non-actionable, low confidence, a claim
-// conflict, an infeasible/errored investigation) is silently dropped: this
-// returns nil and the caller posts no reply. Never touches ribbit or
-// *islack.Client, so the "drop a question" behavior is directly testable.
+// conflict, an infeasible/errored investigation) is dropped: this returns nil
+// and the caller posts no reply. Never touches ribbit or *islack.Client, so
+// the "drop a question" behavior is directly testable.
+//
+// Critical fix (C3): every drop point used to log at Debug and return nil,
+// which for an allowlisted monitoring bot (i.e. already-corroborated
+// signals like Sentry alerts) meant real incoming problems could vanish
+// with no operational visibility at all. Every drop now logs at Warn with
+// enough context to investigate after the fact (bot_id, channel, sentry ref
+// count, reason) and increments daemonCounters.botIntakeDropped (surfaced on
+// the dashboard). Additionally, a triage failure specifically is no longer
+// an automatic drop: it retries Classify once, and if that also fails AND
+// the message carries Sentry refs (external corroboration that this is a
+// real signal, not noise), it proceeds with a synthetic triage result
+// instead of dropping — see syntheticBotIntakeResult's doc comment. A
+// triage failure with no Sentry refs still drops (there's no external
+// signal to fail toward investigating on, and this package's investigation
+// path requires *some* triage.Result to build a Request from).
 func runBotIntake(
 	ctx context.Context,
 	msg *islack.IncomingMessage,
@@ -819,8 +868,19 @@ func runBotIntake(
 ) *triggeredOutcome {
 	result, err := triageEngine.Classify(ctx, msg, channelName)
 	if err != nil {
-		slog.Debug("bot intake: triage failed, dropping", "error", err, "bot_id", msg.BotID)
-		return nil
+		slog.Warn("bot intake: triage failed, retrying once", "error", err, "bot_id", msg.BotID, "channel", msg.Channel)
+		result, err = triageEngine.Classify(ctx, msg, channelName)
+	}
+	if err != nil {
+		if len(msg.SentryRefs) == 0 {
+			daemonCounters.botIntakeDropped.Add(1)
+			slog.Warn("bot intake: triage failed twice with no Sentry refs to fail toward, dropping",
+				"error", err, "bot_id", msg.BotID, "channel", msg.Channel, "sentry_refs", 0)
+			return nil
+		}
+		slog.Warn("bot intake: triage failed twice but message has Sentry refs, proceeding with synthetic classification",
+			"error", err, "bot_id", msg.BotID, "channel", msg.Channel, "sentry_refs", len(msg.SentryRefs))
+		result = syntheticBotIntakeResult(msg)
 	}
 
 	daemonCounters.triages.Add(1)
@@ -836,14 +896,18 @@ func runBotIntake(
 	}
 
 	if !result.Actionable || result.Confidence < 0.5 || (result.Category != categoryBug && result.Category != categoryFeature) {
-		slog.Debug("bot intake: not an actionable bug/feature, dropping",
-			"actionable", result.Actionable, "category", result.Category, "confidence", result.Confidence, "bot_id", msg.BotID)
+		daemonCounters.botIntakeDropped.Add(1)
+		slog.Warn("bot intake: not an actionable bug/feature, dropping",
+			"actionable", result.Actionable, "category", result.Category, "confidence", result.Confidence,
+			"bot_id", msg.BotID, "channel", msg.Channel, "sentry_refs", len(msg.SentryRefs))
 		return nil
 	}
 
 	threadTS := msg.ThreadTS()
 	if !deps.stateManager.Claim(threadTS) {
-		slog.Debug("bot intake: thread already claimed, dropping", "thread", threadTS, "bot_id", msg.BotID)
+		daemonCounters.botIntakeDropped.Add(1)
+		slog.Warn("bot intake: thread already claimed, dropping",
+			"thread", threadTS, "bot_id", msg.BotID, "channel", msg.Channel, "sentry_refs", len(msg.SentryRefs))
 		return nil
 	}
 
@@ -851,7 +915,9 @@ func runBotIntake(
 	outcome := runTriggeredInvestigation(ctx, msg, result, channelName, threadTS, deps, issueDetails, sentryCorroborated)
 
 	if outcome.Kind == outcomeFallThrough {
-		slog.Debug("bot intake: investigation fell through (infeasible or errored), dropping", "bot_id", msg.BotID)
+		daemonCounters.botIntakeDropped.Add(1)
+		slog.Warn("bot intake: investigation fell through (infeasible or errored), dropping",
+			"bot_id", msg.BotID, "channel", msg.Channel, "sentry_refs", len(msg.SentryRefs))
 		return nil
 	}
 	return &outcome

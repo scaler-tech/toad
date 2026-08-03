@@ -1328,3 +1328,74 @@ func TestShouldForceEscalateForTicketRequest(t *testing.T) {
 		t.Error("expected non-matching human text not to force escalate")
 	}
 }
+
+// Critical fix (C3): a triage failure for an allowlisted-bot message must
+// not be an automatic silent drop when the message carries Sentry refs —
+// those are external corroboration that this is a real signal. runBotIntake
+// retries Classify once (both calls fail here, via a MockProvider configured
+// with RunErr), then proceeds with a synthetic triage result instead of
+// dropping. The synthetic result's confidence (0.55) clears runBotIntake's
+// own 0.5 gate, so the flow proceeds into the same investigate-and-file path
+// as a normal actionable bug — this test's investigation agent (a separate
+// MockProvider, via setupTriggeredTest) returns a high-confidence finding
+// that auto-files.
+func TestRunBotIntake_TriageFailsTwiceWithSentryRefsProceedsToInvestigation(t *testing.T) {
+	_, _, tracker, mockProvider, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+
+	triageProvider := &agent.MockProvider{RunErr: errors.New("triage model unavailable")}
+	triageEngine := triage.New(triageProvider, "haiku", nil)
+
+	msg := &islack.IncomingMessage{
+		Channel: "C16", Timestamp: "1600.1", Text: "users report double refunds",
+		IsBot: true, BotID: "B_SENTRY", SentryRefs: []string{"BILLING-42"},
+	}
+
+	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts", deps, nil, true /* sentryCorroborated */)
+
+	if len(triageProvider.RunCalls) != 2 {
+		t.Fatalf("expected triage to be retried exactly once (2 total calls), got %d", len(triageProvider.RunCalls))
+	}
+	if outcome == nil {
+		t.Fatal("expected a non-nil outcome — a Sentry-corroborated message must fail toward investigation, not drop")
+	}
+	if outcome.Kind != outcomeFiled {
+		t.Fatalf("expected outcomeFiled from the synthetic-result investigation path, got %v (reply: %q)", outcome.Kind, outcome.ReplyText)
+	}
+	if len(mockProvider.RunCalls) != 1 {
+		t.Errorf("expected exactly 1 investigation agent Run call, got %d", len(mockProvider.RunCalls))
+	}
+	if len(tracker.createCalls) != 1 {
+		t.Errorf("expected exactly 1 CreateIssue call, got %d", len(tracker.createCalls))
+	}
+}
+
+// Critical fix (C3), the other half: a triage failure (twice) for an
+// allowlisted-bot message with NO Sentry refs still drops — there's no
+// external corroboration to fail toward investigating on. This must not
+// crash and must not run the investigation agent.
+func TestRunBotIntake_TriageFailsTwiceNoSentryRefsDrops(t *testing.T) {
+	_, _, tracker, mockProvider, deps := setupTriggeredTest(t, highConfidenceSentryFindings, autoFileCfg())
+
+	triageProvider := &agent.MockProvider{RunErr: errors.New("triage model unavailable")}
+	triageEngine := triage.New(triageProvider, "haiku", nil)
+
+	msg := &islack.IncomingMessage{
+		Channel: "C17", Timestamp: "1700.1", Text: "some bot message with no sentry refs",
+		IsBot: true, BotID: "B_SENTRY",
+	}
+
+	outcome := runBotIntake(context.Background(), msg, triageEngine, "eng-alerts", deps, nil, true /* sentryCorroborated */)
+
+	if len(triageProvider.RunCalls) != 2 {
+		t.Fatalf("expected triage to be retried exactly once (2 total calls), got %d", len(triageProvider.RunCalls))
+	}
+	if outcome != nil {
+		t.Fatalf("expected nil outcome (dropped) when triage fails twice with no Sentry refs, got %+v", outcome)
+	}
+	if len(mockProvider.RunCalls) != 0 {
+		t.Errorf("expected no investigation agent Run call when the message is dropped, got %d", len(mockProvider.RunCalls))
+	}
+	if len(tracker.createCalls) != 0 {
+		t.Errorf("expected no CreateIssue call when the message is dropped, got %d", len(tracker.createCalls))
+	}
+}

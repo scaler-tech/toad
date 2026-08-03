@@ -163,6 +163,19 @@ type apiDaemon struct {
 	UpdateAvailable  bool             `json:"update_available,omitempty"`
 	LatestVersion    string           `json:"latest_version,omitempty"`
 
+	// BotIntakeDropped mirrors state.DaemonStats.BotIntakeDropped — the
+	// cumulative count of silently-dropped allowlisted-bot intake messages,
+	// surfaced as a small System-tab line (see C3/C5's dashboard plumbing).
+	BotIntakeDropped int64 `json:"bot_intake_dropped,omitempty"`
+
+	// ClaudeConsecutiveFailures/ClaudeLastSuccessAt/ClaudeLastError mirror
+	// state.DaemonStats' equivalents — a sustained streak of failing Claude
+	// CLI calls (agent.FailureTrackingProvider) backing the dashboard's
+	// attention-strip alert (see C5).
+	ClaudeConsecutiveFailures int64  `json:"claude_consecutive_failures,omitempty"`
+	ClaudeLastSuccessAt       int64  `json:"claude_last_success_at,omitempty"`
+	ClaudeLastError           string `json:"claude_last_error,omitempty"`
+
 	// Concurrency gauges for the dashboard's "Live now" card, sourced from
 	// DaemonStats.Investigate/RibbitSlots/InFlight (root.go's stats ticker
 	// populates them from the live occupancy/capacity of the semaphore
@@ -473,6 +486,7 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 			daemon.RibbitSlots = daemonStats.RibbitSlots
 			daemon.RibbitInFlight = daemonStats.RibbitInFlight
 			daemon.SyncWarning = syncWarningFor(daemonStats.RepoSync)
+			daemon.BotIntakeDropped = daemonStats.BotIntakeDropped
 		}
 		if info := checkVersion(); info != nil && info.Available {
 			daemon.UpdateAvailable = true
