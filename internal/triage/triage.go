@@ -119,7 +119,7 @@ func (e *Engine) Classify(ctx context.Context, msg *islack.IncomingMessage, chan
 	result, err := e.agent.Run(ctx, agent.RunOpts{
 		Prompt:      prompt,
 		Model:       e.model,
-		Timeout:     30 * time.Second,
+		Timeout:     60 * time.Second,
 		Permissions: agent.PermissionNone,
 	})
 	if err != nil {
