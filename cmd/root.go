@@ -279,7 +279,6 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		ticketEngine:             ticketEngine,
 		investigateSem:           investigateSem,
 		investigateTimeout:       time.Duration(cfg.Limits.TimeoutMinutes) * time.Minute,
-		delegates:                cfg.IssueTracker.Delegates,
 		resolveRequesterIdentity: resolveRequesterIdentity(slackClient),
 	}
 
@@ -316,7 +315,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 				// the full rule — never merely because the digest batched a
 				// message with a Sentry reference in its text.
 				sentryCorroborated := isSentryCorroborated(msg.BotID, cfg.Intake.BotAllowlist)
-				return proposeFromDigest(ctx, ticketEngine, stateDB, slackClient.ReplyWithOptionalCTA, f, msg, sentryCorroborated, cfg.IssueTracker.Delegates)
+				return proposeFromDigest(ctx, ticketEngine, stateDB, slackClient.ReplyWithOptionalCTA, f, msg, sentryCorroborated)
 			},
 			Notify: func(channel, threadTS, text string) {
 				slackClient.ReplyInThread(channel, threadTS, text)

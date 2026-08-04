@@ -72,7 +72,26 @@ func (f *ticketflowTrackerFake) CreateIssue(_ context.Context, opts issuetracker
 	if id == "" {
 		id = "TOAD-1"
 	}
-	return &issuetracker.IssueRef{Provider: "linear", ID: id, URL: "https://linear.app/toad/issue/" + id, Title: opts.Title}, nil
+	ref := &issuetracker.IssueRef{Provider: "linear", ID: id, URL: "https://linear.app/toad/issue/" + id, Title: opts.Title}
+	// Simulate LinearTracker.CreateIssue's human-vs-agent routing (first
+	// resolved human -> assignee, first resolved agent -> delegate) well
+	// enough for tests to assert on the resulting reply text: "biome" is
+	// this fake's one stand-in for an app/agent user, everything else is
+	// treated as human. Real agent detection (the email-suffix/app-field
+	// signals) is exercised directly against LinearTracker in
+	// internal/issuetracker/linear_test.go — this fake doesn't reimplement it.
+	for _, name := range opts.Assignees {
+		if strings.EqualFold(name, "biome") {
+			if ref.DelegatedTo == "" {
+				ref.DelegatedTo = name
+			}
+			continue
+		}
+		if ref.AssignedTo == "" {
+			ref.AssignedTo = name
+		}
+	}
+	return ref, nil
 }
 
 func (f *ticketflowTrackerFake) PostComment(context.Context, *issuetracker.IssueRef, string) error {
@@ -811,7 +830,7 @@ func TestProposeFromDigest_AutoFilesSentryCorroboratedFinding(t *testing.T) {
 		return "999.1", nil
 	}
 
-	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg, true /* sentryCorroborated */, nil); err != nil {
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg, true /* sentryCorroborated */); err != nil {
 		t.Fatalf("proposeFromDigest: %v", err)
 	}
 
@@ -867,7 +886,7 @@ func TestProposeFromDigest_ProposesNonCorroboratedFinding(t *testing.T) {
 		return "999.2", nil
 	}
 
-	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg, false /* sentryCorroborated */, nil); err != nil {
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg, false /* sentryCorroborated */); err != nil {
 		t.Fatalf("proposeFromDigest: %v", err)
 	}
 
@@ -951,7 +970,7 @@ func TestDigestFlow_AutoFiledTicketBacklinksInvestigation(t *testing.T) {
 
 	// sentryCorroborated=true: msg.BotID is the allowlisted monitoring bot
 	// that produced this report (Fix 2).
-	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, *findings, msg, true /* sentryCorroborated */, nil); err != nil {
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, *findings, msg, true /* sentryCorroborated */); err != nil {
 		t.Fatalf("proposeFromDigest: %v", err)
 	}
 	if len(calls) != 1 {
@@ -1445,115 +1464,108 @@ func TestRunBotIntake_TriageFailsTwiceNoSentryRefsDrops(t *testing.T) {
 }
 
 // --- mapLinearAssignees / applyLinearAssigneeMapping (pure mapping helper) ---
+//
+// Both functions do ONLY requester substitution now — deciding whether a
+// resolved name becomes the issue's assignee or its native Linear delegate
+// (human vs. app/agent user, e.g. Biome) is issuetracker.LinearTracker.
+// CreateIssue's job, exercised directly in
+// internal/issuetracker/linear_test.go (TestCreateIssue_HumanAndAgentBothSet
+// etc.) — a Linear concept this package deliberately doesn't reimplement.
 
 func TestMapLinearAssignees_RequesterSubstitution(t *testing.T) {
-	assignee, labels, dropped := mapLinearAssignees([]string{"requester"}, nil, "alice@example.com")
-	if assignee != "alice@example.com" {
-		t.Errorf("assignee = %q, want alice@example.com", assignee)
-	}
-	if len(labels) != 0 || len(dropped) != 0 {
-		t.Errorf("labels = %v, dropped = %v, want both empty", labels, dropped)
+	got := mapLinearAssignees([]string{"requester"}, "alice@example.com")
+	want := []string{"alice@example.com"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 
 func TestMapLinearAssignees_RequesterWithNoIdentityDrops(t *testing.T) {
-	assignee, labels, dropped := mapLinearAssignees([]string{"requester"}, nil, "")
-	if assignee != "" || len(labels) != 0 || len(dropped) != 0 {
-		t.Errorf("got assignee=%q labels=%v dropped=%v, want all empty when requester identity is unavailable", assignee, labels, dropped)
+	got := mapLinearAssignees([]string{"requester"}, "")
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty when requester identity is unavailable", got)
 	}
 }
 
-func TestMapLinearAssignees_DelegateLookupIsCaseInsensitive(t *testing.T) {
-	delegates := map[string]string{"Biome": "biome-ready"}
-	assignee, labels, _ := mapLinearAssignees([]string{"biome"}, delegates, "")
-	if assignee != "" {
-		t.Errorf("assignee = %q, want empty (biome is a delegate, not a user)", assignee)
+// TestMapLinearAssignees_OrderPreservedNonRequesterNamesPassThrough mirrors
+// the live incident this feature exists for: "assign to me and biome" —
+// "requester" substitutes to the reporter's identity, "biome" passes through
+// verbatim (CreateIssue resolves it to Biome's Linear user and routes it to
+// delegateId since it's an app/agent user), and order is preserved so
+// CreateIssue's first-human/first-agent routing sees them in request order.
+func TestMapLinearAssignees_OrderPreservedNonRequesterNamesPassThrough(t *testing.T) {
+	got := mapLinearAssignees([]string{"requester", "biome"}, "alice@example.com")
+	want := []string{"alice@example.com", "biome"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
 	}
-	if len(labels) != 1 || labels[0] != "biome-ready" {
-		t.Errorf("labels = %v, want [biome-ready]", labels)
-	}
-}
-
-func TestMapLinearAssignees_PlainNameBecomesAssignee(t *testing.T) {
-	assignee, labels, _ := mapLinearAssignees([]string{"dejan"}, nil, "")
-	if assignee != "dejan" {
-		t.Errorf("assignee = %q, want dejan", assignee)
-	}
-	if len(labels) != 0 {
-		t.Errorf("labels = %v, want empty", labels)
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], w)
+		}
 	}
 }
 
-// TestMapLinearAssignees_FirstAssigneeWinsExtrasDropped mirrors the live
-// incident this feature exists for: "assign to me and biome" — "biome" is a
-// delegate (label, not competing for the assignee slot) and "requester"
-// resolves to the reporter, so both apply cleanly with nothing dropped. A
-// SECOND user-shaped name is what actually triggers first-wins-and-drop,
-// since Linear has only one assignee slot.
-func TestMapLinearAssignees_FirstAssigneeWinsExtrasDropped(t *testing.T) {
-	delegates := map[string]string{"biome": "biome-ready"}
-	assignee, labels, dropped := mapLinearAssignees(
-		[]string{"requester", "biome", "dejan"}, delegates, "alice@example.com")
-	if assignee != "alice@example.com" {
-		t.Errorf("assignee = %q, want alice@example.com (first candidate wins)", assignee)
-	}
-	if len(labels) != 1 || labels[0] != "biome-ready" {
-		t.Errorf("labels = %v, want [biome-ready]", labels)
-	}
-	if len(dropped) != 1 || dropped[0] != "dejan" {
-		t.Errorf("dropped = %v, want [dejan] (second assignee candidate must be dropped, not silently discarded from visibility)", dropped)
+func TestMapLinearAssignees_BlankAndWhitespaceEntriesDropped(t *testing.T) {
+	got := mapLinearAssignees([]string{"", "  ", "dejan"}, "")
+	want := []string{"dejan"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 
 func TestMapLinearAssignees_EmptyInputIsNoop(t *testing.T) {
-	assignee, labels, dropped := mapLinearAssignees(nil, map[string]string{"biome": "biome-ready"}, "alice@example.com")
-	if assignee != "" || len(labels) != 0 || len(dropped) != 0 {
-		t.Errorf("got assignee=%q labels=%v dropped=%v, want all empty for no requested names", assignee, labels, dropped)
+	got := mapLinearAssignees(nil, "alice@example.com")
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty for no requested names", got)
 	}
 }
 
-func TestApplyLinearAssigneeMapping_SetsResolvedFields(t *testing.T) {
+func TestApplyLinearAssigneeMapping_SetsResolvedField(t *testing.T) {
 	f := &investigation.Findings{LinearAssignees: []string{"requester", "biome"}}
-	applyLinearAssigneeMapping(f, map[string]string{"biome": "biome-ready"}, "U123",
+	applyLinearAssigneeMapping(f, "U123",
 		func(userID string) string {
 			if userID != "U123" {
 				t.Errorf("resolveIdentity called with %q, want U123", userID)
 			}
 			return "alice@example.com"
 		})
-	if f.LinearAssignee != "alice@example.com" {
-		t.Errorf("LinearAssignee = %q, want alice@example.com", f.LinearAssignee)
+	want := []string{"alice@example.com", "biome"}
+	if len(f.LinearResolvedAssignees) != len(want) {
+		t.Fatalf("LinearResolvedAssignees = %v, want %v", f.LinearResolvedAssignees, want)
 	}
-	if len(f.LinearExtraLabels) != 1 || f.LinearExtraLabels[0] != "biome-ready" {
-		t.Errorf("LinearExtraLabels = %v, want [biome-ready]", f.LinearExtraLabels)
+	for i, w := range want {
+		if f.LinearResolvedAssignees[i] != w {
+			t.Errorf("LinearResolvedAssignees[%d] = %q, want %q", i, f.LinearResolvedAssignees[i], w)
+		}
 	}
 }
 
 func TestApplyLinearAssigneeMapping_NoRequestedAssigneesIsNoop(t *testing.T) {
 	f := &investigation.Findings{}
-	applyLinearAssigneeMapping(f, map[string]string{"biome": "biome-ready"}, "U123",
+	applyLinearAssigneeMapping(f, "U123",
 		func(string) string {
 			t.Fatal("resolveIdentity must not be called when LinearAssignees is empty")
 			return ""
 		})
-	if f.LinearAssignee != "" || len(f.LinearExtraLabels) != 0 {
-		t.Errorf("expected no resolved fields set, got Assignee=%q ExtraLabels=%v", f.LinearAssignee, f.LinearExtraLabels)
+	if len(f.LinearResolvedAssignees) != 0 {
+		t.Errorf("expected no resolved field set, got %v", f.LinearResolvedAssignees)
 	}
 }
 
 func TestApplyLinearAssigneeMapping_NilResolverDropsRequester(t *testing.T) {
 	f := &investigation.Findings{LinearAssignees: []string{"requester"}}
-	applyLinearAssigneeMapping(f, nil, "", nil) // digest paths: no requester ID, no resolver
-	if f.LinearAssignee != "" {
-		t.Errorf("LinearAssignee = %q, want empty when there's no requester to resolve", f.LinearAssignee)
+	applyLinearAssigneeMapping(f, "", nil) // digest paths: no requester ID, no resolver
+	if len(f.LinearResolvedAssignees) != 0 {
+		t.Errorf("LinearResolvedAssignees = %v, want empty when there's no requester to resolve", f.LinearResolvedAssignees)
 	}
 }
 
 // --- composeFiledReply's assignee/delegation reply suffix ---
 
 func TestComposeFiledReply_AssignedSuffix(t *testing.T) {
-	findings := investigation.Findings{Title: "t", Reasoning: "r", LinearAssignee: "alice@example.com"}
-	fileResult := &ticket.FileResult{Ref: &issuetracker.IssueRef{ID: "TOAD-1", URL: "https://linear.app/toad/issue/TOAD-1"}}
+	findings := investigation.Findings{Title: "t", Reasoning: "r"}
+	fileResult := &ticket.FileResult{Ref: &issuetracker.IssueRef{ID: "TOAD-1", URL: "https://linear.app/toad/issue/TOAD-1", AssignedTo: "alice@example.com"}}
 
 	got := composeFiledReply(findings, fileResult)
 	if !strings.Contains(got, `assigned to alice@example.com`) {
@@ -1562,22 +1574,22 @@ func TestComposeFiledReply_AssignedSuffix(t *testing.T) {
 }
 
 func TestComposeFiledReply_DelegatedSuffix(t *testing.T) {
-	findings := investigation.Findings{Title: "t", Reasoning: "r", LinearExtraLabels: []string{"biome-ready"}}
-	fileResult := &ticket.FileResult{Ref: &issuetracker.IssueRef{ID: "TOAD-1", URL: "https://linear.app/toad/issue/TOAD-1"}}
+	findings := investigation.Findings{Title: "t", Reasoning: "r"}
+	fileResult := &ticket.FileResult{Ref: &issuetracker.IssueRef{ID: "TOAD-1", URL: "https://linear.app/toad/issue/TOAD-1", DelegatedTo: "biome"}}
 
 	got := composeFiledReply(findings, fileResult)
-	if !strings.Contains(got, `delegated via biome-ready`) {
-		t.Errorf("expected reply to mention the delegate label, got %q", got)
+	if !strings.Contains(got, `delegated to biome`) {
+		t.Errorf("expected reply to mention the delegate, got %q", got)
 	}
 }
 
-func TestComposeFiledReply_UnresolvedAssigneeSaysSo(t *testing.T) {
-	findings := investigation.Findings{Title: "t", Reasoning: "r", LinearAssignee: "nobody"}
-	fileResult := &ticket.FileResult{Ref: &issuetracker.IssueRef{ID: "TOAD-1", URL: "https://linear.app/toad/issue/TOAD-1", AssigneeUnresolved: "nobody"}}
+func TestComposeFiledReply_UnresolvedNameSaysSo(t *testing.T) {
+	findings := investigation.Findings{Title: "t", Reasoning: "r"}
+	fileResult := &ticket.FileResult{Ref: &issuetracker.IssueRef{ID: "TOAD-1", URL: "https://linear.app/toad/issue/TOAD-1", UnresolvedAssignees: []string{"nobody"}}}
 
 	got := composeFiledReply(findings, fileResult)
-	if !strings.Contains(got, `couldn't resolve assignee "nobody"`) {
-		t.Errorf("expected reply to say the assignee couldn't be resolved, got %q", got)
+	if !strings.Contains(got, `couldn't resolve "nobody"`) {
+		t.Errorf("expected reply to say the name couldn't be resolved, got %q", got)
 	}
 	if strings.Contains(got, "assigned to nobody") {
 		t.Errorf("must not claim an assignment that didn't happen, got %q", got)
@@ -1586,13 +1598,13 @@ func TestComposeFiledReply_UnresolvedAssigneeSaysSo(t *testing.T) {
 
 func TestComposeFiledReply_NoAssigneeSuffixWhenAlreadyExisted(t *testing.T) {
 	// A re-observed (AlreadyExisted) ticket never actually applies an
-	// assignee/label — reobserve only posts a comment — so even if Findings
-	// carries a resolved LinearAssignee (set before FileOrUpdate ran down
-	// the reobserve path instead of file()), the reply must not claim an
+	// assignee/delegate — reobserve only posts a comment — so even if the
+	// filed IssueRef somehow carried AssignedTo (it won't, in practice,
+	// since reobserve never calls CreateIssue), the reply must not claim an
 	// assignment that never happened.
-	findings := investigation.Findings{Title: "t", Reasoning: "r", LinearAssignee: "alice@example.com"}
+	findings := investigation.Findings{Title: "t", Reasoning: "r"}
 	fileResult := &ticket.FileResult{
-		Ref:            &issuetracker.IssueRef{ID: "TOAD-1", URL: "https://linear.app/toad/issue/TOAD-1"},
+		Ref:            &issuetracker.IssueRef{ID: "TOAD-1", URL: "https://linear.app/toad/issue/TOAD-1", AssignedTo: "alice@example.com"},
 		AlreadyExisted: true,
 	}
 
@@ -1611,7 +1623,6 @@ const requesterAssigneeFindings = `{"feasible":true,"title":"Add user changes to
 
 func TestRunTriggeredInvestigation_AppliesRequesterAssigneeAndDelegate(t *testing.T) {
 	db, stateManager, tracker, _, deps := setupTriggeredTest(t, requesterAssigneeFindings, autoFileCfg())
-	deps.delegates = map[string]string{"biome": "biome-ready"}
 	deps.resolveRequesterIdentity = func(userID string) string {
 		if userID != "U_REPORTER" {
 			t.Errorf("resolveRequesterIdentity called with %q, want U_REPORTER", userID)
@@ -1640,16 +1651,23 @@ func TestRunTriggeredInvestigation_AppliesRequesterAssigneeAndDelegate(t *testin
 		t.Fatalf("expected exactly 1 CreateIssue call, got %d", len(tracker.createCalls))
 	}
 	created := tracker.createCalls[0]
-	if created.Assignee != "alice@example.com" {
-		t.Errorf("Assignee = %q, want alice@example.com (resolved from 'requester' via msg.User)", created.Assignee)
+	want := []string{"alice@example.com", "biome"}
+	if len(created.Assignees) != len(want) {
+		t.Fatalf("Assignees = %v, want %v", created.Assignees, want)
 	}
-	if len(created.ExtraLabels) != 1 || created.ExtraLabels[0] != "biome-ready" {
-		t.Errorf("ExtraLabels = %v, want [biome-ready]", created.ExtraLabels)
+	for i, w := range want {
+		if created.Assignees[i] != w {
+			t.Errorf("Assignees[%d] = %q, want %q", i, created.Assignees[i], w)
+		}
 	}
+	// ticketflowTrackerFake.CreateIssue simulates human-vs-agent routing
+	// (see its doc comment) well enough to prove the reply text is wired up
+	// end to end; the real routing decision is tested directly against
+	// LinearTracker in internal/issuetracker/linear_test.go.
 	if !strings.Contains(outcome.ReplyText, "assigned to alice@example.com") {
 		t.Errorf("expected reply to mention the assignee, got %q", outcome.ReplyText)
 	}
-	if !strings.Contains(outcome.ReplyText, "delegated via biome-ready") {
+	if !strings.Contains(outcome.ReplyText, "delegated to biome") {
 		t.Errorf("expected reply to mention the delegation, got %q", outcome.ReplyText)
 	}
 

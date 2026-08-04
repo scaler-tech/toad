@@ -264,13 +264,11 @@ issue_tracker:
   # feature_label_id: ""
   # respect_assignees: false
   # stale_days: 7
-  # delegates:
-  #   biome: biome-ready
 ```
 
 This is the tracker connection itself; `ticket.auto_file` above is the separate gate on top of it. Both `enabled` and `create_issues` must be true for toad to be capable of filing anything — see the troubleshooting note below on what happens if they aren't.
 
-`delegates` maps a requested name (case-insensitive) to a Linear label name: when a reporter asks toad to hand a ticket off to that name (e.g. "give this to biome"), toad applies the mapped label instead of assigning a user, so systems that poll a trigger label (e.g. Biome's `biome-ready`) pick the ticket up. Any other requested name is resolved as a Linear user (by display name, real name, or email) and set as the ticket's assignee — unresolved names are dropped with a warning rather than blocking the filing.
+When a reporter explicitly asks toad to assign or hand off a ticket ("assign this to me", "assign to dejan", "give this to biome"), toad resolves each requested name against the workspace's Linear users (by display name, real name, or email) and routes it to whichever slot fits: a human user becomes the issue's assignee, an app/agent user (like Biome, which Linear provisions as an OAuth-app user) becomes its native delegate — no separate config needed, since Linear itself already knows the difference. Unresolved names are dropped with a warning rather than blocking the filing, and Slack's reply says so.
 
 Prefer the `TOAD_LINEAR_API_TOKEN` environment variable over the `api_token` YAML key — it keeps the token out of a config file that might get committed or copied around. If you do set `api_token` directly in `.toad.yaml`, `chmod 0600` the file (owner read/write only) since it then holds a live credential in plain text.
 
