@@ -1221,22 +1221,46 @@ func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, db *sta
 	enforceCorroboration(&f, sentryCorroborated, islack.ExtractSentryRefs(msg.Text))
 	applyLinearAssigneeMapping(&f, "", nil)
 
-	investigationID := digestInvestigationID(db, msg.ThreadTS)
-	decision, fileResult, err := fileOrProposeFromFindings(ctx, ticketEngine, f, msg.Channel, msg.ThreadTS, investigationID, ticket.SourceDigest)
+	// A fresh top-level alert has no ThreadTS — its own Timestamp IS the
+	// thread anchor (v1 behavior, regressed in the v2 rewrite; PLF-3717).
+	// Slack treats an empty thread_ts as "post a new top-level message", so
+	// the raw value broke reply threading — and, worse, fed the ticket-index
+	// external key ("thread:<channel>:<ts>") and the investigation-record
+	// lookup, collapsing every top-level alert in a channel onto one
+	// degenerate "thread:<channel>:" key. digestThreadTS mirrors the fallback
+	// the digest engine already applies for claim scoping
+	// (internal/digest/digest.go) so claims, records, keys, and replies all
+	// anchor on the same timestamp.
+	threadTS := digestThreadTS(msg)
+
+	investigationID := digestInvestigationID(db, threadTS)
+	decision, fileResult, err := fileOrProposeFromFindings(ctx, ticketEngine, f, msg.Channel, threadTS, investigationID, ticket.SourceDigest)
 	if err != nil {
 		return err
 	}
 
 	if decision == ticket.DecisionAutoFile {
-		_, err := post(msg.Channel, msg.ThreadTS, composeFiledReply(f, fileResult), false)
+		_, err := post(msg.Channel, threadTS, composeFiledReply(f, fileResult), false)
 		return err
 	}
 
 	// See ReplyWithOptionalCTA's doc comment: the button is suppressed when
 	// the tracker can't actually create issues.
 	text := composeDigestProposalText(f)
-	_, err = post(msg.Channel, msg.ThreadTS, text, ticketEngine.ShouldCreateIssues())
+	_, err = post(msg.Channel, threadTS, text, ticketEngine.ShouldCreateIssues())
 	return err
+}
+
+// digestThreadTS returns the Slack thread anchor for a digest message: its
+// ThreadTS when it was already a thread reply, else its own Timestamp (a
+// top-level message anchors its own thread). Matches the digest engine's
+// claim-scoping fallback — every consumer of a digest message's thread
+// identity must use this, never raw msg.ThreadTS.
+func digestThreadTS(msg digest.Message) string {
+	if msg.ThreadTS != "" {
+		return msg.ThreadTS
+	}
+	return msg.Timestamp
 }
 
 // digestInvestigationID looks up the freshest InvestigationRecord saved for
@@ -1394,7 +1418,12 @@ func investigateFromDigest(
 	sentryCorroborated := isSentryCorroborated(msg.BotID, botAllowlist)
 	enforceCorroboration(findings, sentryCorroborated, sentryRefs)
 
-	saveInvestigationRecord(db, generateInvestigationID(), msg.ThreadTS, msg.Channel, findings)
+	// Keyed on the corrected thread anchor (see digestThreadTS) so
+	// proposeFromDigest's digestInvestigationID lookup — and a later CTA
+	// click on the in-thread reply — find this record. Raw msg.ThreadTS is
+	// empty for top-level alerts and would collapse every such record in a
+	// channel onto one key.
+	saveInvestigationRecord(db, generateInvestigationID(), digestThreadTS(msg), msg.Channel, findings)
 
 	return findings, nil
 }

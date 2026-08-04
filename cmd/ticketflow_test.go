@@ -1679,3 +1679,73 @@ func TestRunTriggeredInvestigation_AppliesRequesterAssigneeAndDelegate(t *testin
 		t.Fatal("expected a ticket_index row, got none")
 	}
 }
+
+func TestDigestThreadTS_FallbackToOwnTimestamp(t *testing.T) {
+	if got := digestThreadTS(digest.Message{ThreadTS: "111.1", Timestamp: "222.2"}); got != "111.1" {
+		t.Errorf("existing thread: got %q, want the original ThreadTS", got)
+	}
+	if got := digestThreadTS(digest.Message{ThreadTS: "", Timestamp: "222.2"}); got != "222.2" {
+		t.Errorf("top-level message: got %q, want its own Timestamp as thread anchor", got)
+	}
+}
+
+// PLF-3717 regression: a digest reply for a fresh TOP-LEVEL alert (empty
+// ThreadTS) must post into the alert's own thread (thread_ts = the alert's
+// Timestamp) — an empty thread_ts makes Slack create a new top-level
+// message — and the ticket-index external key must anchor on that same
+// timestamp, not collapse onto the degenerate "thread:<channel>:" key every
+// other top-level alert in the channel would share.
+func TestProposeFromDigest_TopLevelAlertAnchorsOwnThread(t *testing.T) {
+	db := newTestDB(t)
+	tracker := &ticketflowTrackerFake{}
+	ticketEngine := ticket.New(tracker, db, autoFileCfg(), nil)
+
+	f := investigation.Findings{
+		Feasible:   true,
+		Title:      "Top-level alert bug",
+		Problem:    "p",
+		RootCause:  "rc",
+		Confidence: 0.5,
+		Repo:       "svc",
+		Reasoning:  "reasoning",
+	}
+	msg := digest.Message{Channel: "C3", ThreadTS: "", Timestamp: "300.7", Text: "an alert"}
+
+	var calls []digestPostCall
+	post := func(channel, threadTS, text string, showCTA bool) (string, error) {
+		calls = append(calls, digestPostCall{channel, threadTS, text, showCTA})
+		return "999.3", nil
+	}
+
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg, false); err != nil {
+		t.Fatalf("proposeFromDigest: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 posted notice, got %d", len(calls))
+	}
+	if calls[0].threadTS != "300.7" {
+		t.Errorf("posted thread_ts = %q, want the alert's own Timestamp %q", calls[0].threadTS, "300.7")
+	}
+}
+
+func TestProposeFromDigest_ExistingThreadTSUnchanged(t *testing.T) {
+	db := newTestDB(t)
+	tracker := &ticketflowTrackerFake{}
+	ticketEngine := ticket.New(tracker, db, autoFileCfg(), nil)
+
+	f := investigation.Findings{Feasible: true, Title: "t", Problem: "p", RootCause: "rc", Confidence: 0.5, Repo: "svc", Reasoning: "r"}
+	msg := digest.Message{Channel: "C4", ThreadTS: "400.1", Timestamp: "400.9", Text: "reply in thread"}
+
+	var calls []digestPostCall
+	post := func(channel, threadTS, text string, showCTA bool) (string, error) {
+		calls = append(calls, digestPostCall{channel, threadTS, text, showCTA})
+		return "999.4", nil
+	}
+
+	if err := proposeFromDigest(context.Background(), ticketEngine, db, post, f, msg, false); err != nil {
+		t.Fatalf("proposeFromDigest: %v", err)
+	}
+	if len(calls) != 1 || calls[0].threadTS != "400.1" {
+		t.Fatalf("expected reply anchored on existing ThreadTS 400.1, got %+v", calls)
+	}
+}
