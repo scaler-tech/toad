@@ -251,6 +251,8 @@ func (e *Engine) file(ctx context.Context, f investigation.Findings, key, invest
 		StateID:     e.cfg.TriageStateID,
 		Team:        f.LinearTeam,
 		Project:     f.LinearProject,
+		Assignee:    f.LinearAssignee,
+		ExtraLabels: f.LinearExtraLabels,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating issue for %s: %w", key, err)
