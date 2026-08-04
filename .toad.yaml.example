@@ -102,6 +102,10 @@ issue_tracker:
   # feature_label_id: ""       # optional Linear label for features
   # respect_assignees: false   # defer to ticket assignee instead of re-filing
   stale_days: 7                # ignore assignments older than this many days
+  # delegates:                 # requested-name -> Linear label; toad applies
+  #   biome: biome-ready        # the label instead of assigning, so systems
+  #                              # that poll a trigger label (e.g. Biome's
+  #                              # biome-ready) pick the ticket up
 
 # ──────────────────────────────────────────────
 # VCS Platform — read-only PR/CI/issue lookups for ribbit (investigations

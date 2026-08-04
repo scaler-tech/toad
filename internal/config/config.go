@@ -90,6 +90,17 @@ type IssueTrackerConfig struct {
 	FeatureLabelID   string `yaml:"feature_label_id"`
 	RespectAssignees bool   `yaml:"respect_assignees"` // defer to ticket assignee instead of spawning
 	StaleDays        int    `yaml:"stale_days"`        // assignments older than this are ignored (default: 7)
+
+	// Delegates maps a requested name (case-insensitive, matched against
+	// investigation.Findings.LinearAssignees) to a Linear LABEL name that
+	// delegates the ticket to an external system instead of assigning a
+	// human user — e.g. {"biome": "biome-ready"} makes toad apply the
+	// "biome-ready" label (never an assignee) whenever a reporter asks to
+	// "give this to biome", so systems that poll a trigger label (Biome
+	// polls biome-ready) pick the ticket up. Default empty (no delegation
+	// configured — any such name falls through to a plain assignee-name
+	// resolution attempt instead).
+	Delegates map[string]string `yaml:"delegates"`
 }
 
 type VCSConfig struct {
