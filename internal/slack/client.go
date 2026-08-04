@@ -233,6 +233,44 @@ func (c *Client) API() *slack.Client {
 	return c.api
 }
 
+// GetUserEmail resolves a Slack user ID to the email in their profile —
+// used to identify the requesting user for Linear assignee resolution
+// ("assign to me"). Requires the users:read.email scope; returns an error
+// (rather than "", nil) both on a lookup failure and when the profile has
+// no email, so callers can distinguish "couldn't resolve" from "resolved to
+// empty" and fall back accordingly (see GetUserDisplayName).
+func (c *Client) GetUserEmail(userID string) (string, error) {
+	u, err := c.api.GetUserInfo(userID)
+	if err != nil {
+		return "", fmt.Errorf("fetching user info for %s: %w", userID, err)
+	}
+	if u.Profile.Email == "" {
+		return "", fmt.Errorf("user %s has no email in profile (missing users:read.email scope?)", userID)
+	}
+	return u.Profile.Email, nil
+}
+
+// GetUserDisplayName resolves a Slack user ID to a human-readable name,
+// preferring the profile display name, then falling back to real name, then
+// username — the fallback identity for Linear assignee resolution when
+// GetUserEmail fails (e.g. the users:read.email scope isn't granted).
+func (c *Client) GetUserDisplayName(userID string) (string, error) {
+	u, err := c.api.GetUserInfo(userID)
+	if err != nil {
+		return "", fmt.Errorf("fetching user info for %s: %w", userID, err)
+	}
+	if u.Profile.DisplayName != "" {
+		return u.Profile.DisplayName, nil
+	}
+	if u.RealName != "" {
+		return u.RealName, nil
+	}
+	if u.Name != "" {
+		return u.Name, nil
+	}
+	return "", fmt.Errorf("user %s has no usable display name", userID)
+}
+
 // SetMCPHandler configures the handler for /toad slash commands.
 func (c *Client) SetMCPHandler(h *SlashCommandHandler) {
 	c.mcpHandler = h
