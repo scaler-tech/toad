@@ -71,15 +71,22 @@ type IssueRef struct {
 	Title      string
 	InternalID string // provider's internal UUID, set when already resolved to skip lookups
 
-	// AssigneeUnresolved carries the requested-but-unresolved assignee name
-	// when CreateIssueOpts.Assignee was set but couldn't be resolved to a
-	// Linear user — the issue was still filed, just unassigned. Empty
-	// whenever no assignee was requested, or the requested one resolved
-	// successfully. Callers (cmd/ticketflow.go's composeFiledReply) surface
-	// this in the Slack reply so a silently-dropped assignment is visible,
-	// unlike LinearTeam/LinearProject's resolution failures, which fall
-	// back silently.
-	AssigneeUnresolved string
+	// AssignedTo and DelegatedTo carry the requested name/email that was
+	// actually applied — CreateIssueOpts.Assignees resolved to a human user
+	// (AssignedTo, -> assigneeId) and/or an app/agent user like Biome
+	// (DelegatedTo, -> delegateId). Both empty when no assignee/delegate was
+	// requested or none of the requested names resolved to anything usable
+	// for that slot. UnresolvedAssignees lists requested names that didn't
+	// resolve to any Linear user at all (as opposed to resolving fine but
+	// losing out to an earlier candidate for the same slot — see
+	// LinearTracker.resolveAssignees). Callers (cmd/ticketflow.go's
+	// composeFiledReply) surface all three in the Slack reply so a
+	// silently-dropped assignment/delegation is visible, unlike
+	// LinearTeam/LinearProject's resolution failures, which fall back
+	// silently.
+	AssignedTo          string
+	DelegatedTo         string
+	UnresolvedAssignees []string
 }
 
 // BranchPrefix returns a lowercased issue ID suitable for branch naming.
@@ -134,18 +141,18 @@ type CreateIssueOpts struct {
 	Team    string
 	Project string
 
-	// Assignee is a display name, real name, or email — resolved to a
-	// Linear user ID before filing. Empty means no assignee. Resolution
-	// failure warns and falls back to filing unassigned (never blocks
-	// creation) — the caller can inspect the returned IssueRef's
-	// AssigneeUnresolved field to know when that happened.
-	Assignee string
-
-	// ExtraLabels are label NAMES (not IDs — distinct from Labels above,
-	// which already carries resolved label IDs), resolved to IDs and merged
-	// in alongside Labels. A name that resolves to no label is dropped with
-	// a warning, same warn-and-fallback policy as Team/Project/Assignee.
-	ExtraLabels []string
+	// Assignees are display names, real names, or emails, in request order —
+	// each resolved to a Linear user (and, via that resolution, whether it's
+	// a human or an app/agent user like Biome). The tracker routes the
+	// first resolved HUMAN to the issue's single assignee slot and the
+	// first resolved AGENT to its single delegate slot (Linear supports one
+	// of each); later candidates of either kind are logged and skipped
+	// rather than silently dropped from visibility, and a name that doesn't
+	// resolve to any Linear user at all is warned and reported back via the
+	// returned IssueRef's UnresolvedAssignees. None of this ever blocks
+	// issue creation — resolution failures fall back to leaving that slot
+	// empty.
+	Assignees []string
 }
 
 // NoopTracker is a no-op implementation that returns nil for everything.

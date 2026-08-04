@@ -1465,27 +1465,33 @@ func TestCreateIssue_ProjectResolutionCached(t *testing.T) {
 	}
 }
 
-// fakeUser is a users(...) fixture: id/name/displayName/email.
+// fakeUser is a users(...) fixture: id/name/displayName/email, plus App —
+// Linear's native agent/app-user signal. App == nil simulates a user node
+// where the `app` field either wasn't requested (rejectAppField below) or
+// came back null; App != nil simulates the field being present and
+// authoritative, overriding the email-suffix fallback either way (see
+// resolveAgentKind).
 type fakeUser struct {
 	ID          string
 	Name        string
 	DisplayName string
 	Email       string
+	App         *bool
 }
 
-// fakeLabel is a labels/issueLabels fixture: id/name.
-type fakeLabel struct {
-	ID   string
-	Name string
-}
+func boolPtr(b bool) *bool { return &b }
 
-// assigneeAwareServer fakes every GraphQL call CreateIssue can make when an
-// Assignee/ExtraLabels request is present: a "users" query (both the
-// email-filtered lookup and the full-list lookup), a team+workspace labels
-// query, and the issueCreate mutation. It records the mutation variables and
-// counts label queries (for cache-hit assertions).
-func assigneeAwareServer(t *testing.T, users []fakeUser, teamLabels, wsLabels []fakeLabel,
-	capturedVars *map[string]any, labelQueries *int) *httptest.Server {
+// assigneeAwareServer fakes every GraphQL call CreateIssue's assignee/
+// delegate resolution can make: a "users" query (both the email-filtered
+// lookup and the full-list lookup), and the issueCreate mutation. It
+// records the mutation variables.
+//
+// rejectAppField simulates a Linear API version whose schema doesn't expose
+// `app` on User: any users query that requests the "app" field gets a
+// GraphQL validation error instead of data, forcing
+// queryUsersWithAgentSignal's defensive retry-without-app path — the
+// retried (app-less) query still succeeds normally.
+func assigneeAwareServer(t *testing.T, users []fakeUser, rejectAppField bool, capturedVars *map[string]any) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
@@ -1494,42 +1500,47 @@ func assigneeAwareServer(t *testing.T, users []fakeUser, teamLabels, wsLabels []
 		}
 		json.NewDecoder(r.Body).Decode(&payload)
 
+		requestsApp := strings.Contains(payload.Query, " app") || strings.Contains(payload.Query, "\tapp")
+
 		switch {
 		case strings.Contains(payload.Query, "email: { eq: $email }"):
+			if rejectAppField && requestsApp {
+				json.NewEncoder(w).Encode(map[string]any{
+					"errors": []map[string]any{{"message": `Cannot query field "app" on type "User".`}},
+				})
+				return
+			}
 			email, _ := payload.Variables["email"].(string)
 			var nodes []map[string]any
 			for _, u := range users {
 				if strings.EqualFold(u.Email, email) {
-					nodes = append(nodes, map[string]any{"id": u.ID})
+					n := map[string]any{"id": u.ID, "email": u.Email}
+					if requestsApp {
+						n["app"] = boolToJSON(u.App)
+					}
+					nodes = append(nodes, n)
 				}
 			}
 			json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{"users": map[string]any{"nodes": nodes}},
 			})
 		case strings.Contains(payload.Query, "users(first: 250)"):
+			if rejectAppField && requestsApp {
+				json.NewEncoder(w).Encode(map[string]any{
+					"errors": []map[string]any{{"message": `Cannot query field "app" on type "User".`}},
+				})
+				return
+			}
 			var nodes []map[string]any
 			for _, u := range users {
-				nodes = append(nodes, map[string]any{"id": u.ID, "name": u.Name, "displayName": u.DisplayName})
+				n := map[string]any{"id": u.ID, "name": u.Name, "displayName": u.DisplayName, "email": u.Email}
+				if requestsApp {
+					n["app"] = boolToJSON(u.App)
+				}
+				nodes = append(nodes, n)
 			}
 			json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{"users": map[string]any{"nodes": nodes}},
-			})
-		case strings.Contains(payload.Query, "labels(first:") && strings.Contains(payload.Query, "issueLabels(first:"):
-			if labelQueries != nil {
-				*labelQueries++
-			}
-			var teamNodes, wsNodes []map[string]any
-			for _, l := range teamLabels {
-				teamNodes = append(teamNodes, map[string]any{"id": l.ID, "name": l.Name})
-			}
-			for _, l := range wsLabels {
-				wsNodes = append(wsNodes, map[string]any{"id": l.ID, "name": l.Name})
-			}
-			json.NewEncoder(w).Encode(map[string]any{
-				"data": map[string]any{
-					"team":        map[string]any{"labels": map[string]any{"nodes": teamNodes}},
-					"issueLabels": map[string]any{"nodes": wsNodes},
-				},
 			})
 		default: // issueCreate
 			if capturedVars != nil {
@@ -1545,25 +1556,43 @@ func assigneeAwareServer(t *testing.T, users []fakeUser, teamLabels, wsLabels []
 	}))
 }
 
-func TestResolveUserID_ByEmail(t *testing.T) {
-	srv := assigneeAwareServer(t, []fakeUser{{ID: "u-1", Name: "Alice", Email: "alice@example.com"}}, nil, nil, nil, nil)
+// boolToJSON returns the value a *bool fixture should encode as: nil ->
+// JSON null (the "app field present but null" case), otherwise the pointed-
+// to value.
+func boolToJSON(b *bool) any {
+	if b == nil {
+		return nil
+	}
+	return *b
+}
+
+// biomeAgentUser is the fixture shape the operator's design describes for
+// Biome: a Linear OAuth-app/agent user with displayName "biome" and an
+// email ending in the OAuth-app suffix — resolvable by either signal.
+var biomeAgentUser = fakeUser{ID: "u-biome", Name: "Biome", DisplayName: "biome", Email: "biome@oauthapp.linear.app"}
+
+func TestResolveUser_ByEmail(t *testing.T) {
+	srv := assigneeAwareServer(t, []fakeUser{{ID: "u-1", Name: "Alice", Email: "alice@example.com"}}, false, nil)
 	defer srv.Close()
 
 	lt := projectTestTracker(srv)
-	id, err := lt.resolveUserID(context.Background(), "alice@example.com")
+	id, isAgent, err := lt.resolveUser(context.Background(), "alice@example.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if id != "u-1" {
 		t.Errorf("id = %q, want u-1", id)
 	}
+	if isAgent {
+		t.Error("isAgent = true, want false for a plain human email")
+	}
 }
 
-func TestResolveUserID_ByName(t *testing.T) {
+func TestResolveUser_ByName(t *testing.T) {
 	srv := assigneeAwareServer(t, []fakeUser{
 		{ID: "u-1", Name: "alice", DisplayName: "Alice A"},
 		{ID: "u-2", Name: "bob", DisplayName: "Bob B"},
-	}, nil, nil, nil, nil)
+	}, false, nil)
 	defer srv.Close()
 
 	lt := projectTestTracker(srv)
@@ -1571,7 +1600,7 @@ func TestResolveUserID_ByName(t *testing.T) {
 		{"Alice", "u-1"}, // case-insensitive exact match on Name
 		{"Bob B", "u-2"}, // case-insensitive exact match on DisplayName
 	} {
-		id, err := lt.resolveUserID(context.Background(), tc.query)
+		id, _, err := lt.resolveUser(context.Background(), tc.query)
 		if err != nil {
 			t.Fatalf("query %q: unexpected error: %v", tc.query, err)
 		}
@@ -1581,115 +1610,200 @@ func TestResolveUserID_ByName(t *testing.T) {
 	}
 }
 
-func TestResolveUserID_AmbiguousAndUnknown(t *testing.T) {
+func TestResolveUser_AmbiguousAndUnknown(t *testing.T) {
 	srv := assigneeAwareServer(t, []fakeUser{
 		{ID: "u-1", Name: "alice-billing", DisplayName: "Alice Billing"},
 		{ID: "u-2", Name: "alice-growth", DisplayName: "Alice Growth"},
-	}, nil, nil, nil, nil)
+	}, false, nil)
 	defer srv.Close()
 
 	lt := projectTestTracker(srv)
-	if _, err := lt.resolveUserID(context.Background(), "alice"); err == nil {
+	if _, _, err := lt.resolveUser(context.Background(), "alice"); err == nil {
 		t.Error("expected ambiguous-match error, got nil")
 	}
-	if _, err := lt.resolveUserID(context.Background(), "nonexistent"); err == nil {
+	if _, _, err := lt.resolveUser(context.Background(), "nonexistent"); err == nil {
 		t.Error("expected not-found error, got nil")
 	}
 }
 
-func TestCreateIssue_AssigneeResolvedByName(t *testing.T) {
-	var vars map[string]any
-	srv := assigneeAwareServer(t, []fakeUser{{ID: "u-1", Name: "dejan", DisplayName: "Dejan"}}, nil, nil, &vars, nil)
+// TestResolveUser_AgentViaEmailSuffix covers the fallback signal: the `app`
+// field is present but null for this node (App: nil in the fixture, still
+// requested by the query since rejectAppField is false), so resolution must
+// fall back to the "@oauthapp.linear.app" email-suffix heuristic.
+func TestResolveUser_AgentViaEmailSuffix(t *testing.T) {
+	srv := assigneeAwareServer(t, []fakeUser{biomeAgentUser}, false, nil)
 	defer srv.Close()
 
 	lt := projectTestTracker(srv)
-	ref, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Assignee: "dejan"})
+	id, isAgent, err := lt.resolveUser(context.Background(), "biome")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if vars["assigneeId"] != "u-1" {
-		t.Errorf("assigneeId = %v, want u-1", vars["assigneeId"])
-	}
-	if ref.AssigneeUnresolved != "" {
-		t.Errorf("AssigneeUnresolved = %q, want empty", ref.AssigneeUnresolved)
+	if id != "u-biome" || !isAgent {
+		t.Errorf("id=%q isAgent=%v, want u-biome/true (email-suffix fallback)", id, isAgent)
 	}
 }
 
-func TestCreateIssue_UnresolvedAssigneeFilesUnassigned(t *testing.T) {
-	var vars map[string]any
-	srv := assigneeAwareServer(t, nil, nil, nil, &vars, nil)
+// TestResolveUser_AgentViaAppFieldPrimarySignal covers the primary signal:
+// `app: true` is present in the response even though the email doesn't use
+// the OAuth-app suffix — the app field must win.
+func TestResolveUser_AgentViaAppFieldPrimarySignal(t *testing.T) {
+	srv := assigneeAwareServer(t, []fakeUser{
+		{ID: "u-agent", Name: "Custom Agent", DisplayName: "custom-agent", Email: "agent@example.com", App: boolPtr(true)},
+	}, false, nil)
 	defer srv.Close()
 
 	lt := projectTestTracker(srv)
-	ref, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Assignee: "nobody"})
+	id, isAgent, err := lt.resolveUser(context.Background(), "custom-agent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "u-agent" || !isAgent {
+		t.Errorf("id=%q isAgent=%v, want u-agent/true (app field takes priority)", id, isAgent)
+	}
+}
+
+// TestResolveUser_AppFieldAbsentFromSchemaFallsBackToEmailSuffix exercises
+// queryUsersWithAgentSignal's defensive retry: when the whole query fails
+// because this Linear API version doesn't expose `app` on User at all,
+// resolution must retry without it and still succeed, falling back to the
+// email-suffix heuristic.
+func TestResolveUser_AppFieldAbsentFromSchemaFallsBackToEmailSuffix(t *testing.T) {
+	srv := assigneeAwareServer(t, []fakeUser{biomeAgentUser}, true /* rejectAppField */, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	id, isAgent, err := lt.resolveUser(context.Background(), "biome")
+	if err != nil {
+		t.Fatalf("unexpected error: %v (must tolerate the app field being absent from the schema)", err)
+	}
+	if id != "u-biome" || !isAgent {
+		t.Errorf("id=%q isAgent=%v, want u-biome/true", id, isAgent)
+	}
+}
+
+func TestCreateIssue_HumanAndAgentBothSet(t *testing.T) {
+	var vars map[string]any
+	srv := assigneeAwareServer(t, []fakeUser{
+		{ID: "u-alice", Name: "alice", DisplayName: "Alice", Email: "alice@example.com"},
+		biomeAgentUser,
+	}, false, &vars)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	ref, err := lt.CreateIssue(context.Background(), CreateIssueOpts{
+		Title:     "t",
+		Assignees: []string{"alice@example.com", "biome"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if vars["assigneeId"] != "u-alice" {
+		t.Errorf("assigneeId = %v, want u-alice", vars["assigneeId"])
+	}
+	if vars["delegateId"] != "u-biome" {
+		t.Errorf("delegateId = %v, want u-biome", vars["delegateId"])
+	}
+	if ref.AssignedTo != "alice@example.com" {
+		t.Errorf("AssignedTo = %q, want alice@example.com", ref.AssignedTo)
+	}
+	if ref.DelegatedTo != "biome" {
+		t.Errorf("DelegatedTo = %q, want biome", ref.DelegatedTo)
+	}
+	if len(ref.UnresolvedAssignees) != 0 {
+		t.Errorf("UnresolvedAssignees = %v, want empty", ref.UnresolvedAssignees)
+	}
+}
+
+func TestCreateIssue_AgentOnlySetsDelegateOnly(t *testing.T) {
+	var vars map[string]any
+	srv := assigneeAwareServer(t, []fakeUser{biomeAgentUser}, false, &vars)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	ref, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Assignees: []string{"biome"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := vars["assigneeId"]; ok {
+		t.Errorf("assigneeId = %v, want absent (only an agent was requested)", vars["assigneeId"])
+	}
+	if vars["delegateId"] != "u-biome" {
+		t.Errorf("delegateId = %v, want u-biome", vars["delegateId"])
+	}
+	if ref.AssignedTo != "" {
+		t.Errorf("AssignedTo = %q, want empty", ref.AssignedTo)
+	}
+}
+
+func TestCreateIssue_UnknownNameSkipped(t *testing.T) {
+	var vars map[string]any
+	srv := assigneeAwareServer(t, nil, false, &vars)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	ref, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Assignees: []string{"nobody"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v (resolution failure must not block creation)", err)
 	}
 	if _, ok := vars["assigneeId"]; ok {
-		t.Errorf("assigneeId = %v, want absent when the assignee cannot be resolved", vars["assigneeId"])
+		t.Errorf("assigneeId = %v, want absent when the name cannot be resolved", vars["assigneeId"])
 	}
-	if ref.AssigneeUnresolved != "nobody" {
-		t.Errorf("AssigneeUnresolved = %q, want %q", ref.AssigneeUnresolved, "nobody")
+	if len(ref.UnresolvedAssignees) != 1 || ref.UnresolvedAssignees[0] != "nobody" {
+		t.Errorf("UnresolvedAssignees = %v, want [nobody]", ref.UnresolvedAssignees)
 	}
 }
 
-func TestCreateIssue_ExtraLabelsMergedFromTeamAndWorkspace(t *testing.T) {
+// TestCreateIssue_DuplicateHumansFirstWins covers resolveAssignees' single-
+// assignee-slot rule: a second human candidate resolves fine but has
+// nowhere to go, so it's dropped (not reported as unresolved — it DID
+// resolve, there's just no second assignee slot).
+func TestCreateIssue_DuplicateHumansFirstWins(t *testing.T) {
 	var vars map[string]any
-	srv := assigneeAwareServer(t, nil,
-		[]fakeLabel{{ID: "lbl-team", Name: "urgent"}},
-		[]fakeLabel{{ID: "lbl-ws", Name: "biome-ready"}},
-		&vars, nil)
+	srv := assigneeAwareServer(t, []fakeUser{
+		{ID: "u-alice", Name: "alice", Email: "alice@example.com"},
+		{ID: "u-bob", Name: "bob", Email: "bob@example.com"},
+	}, false, &vars)
 	defer srv.Close()
 
 	lt := projectTestTracker(srv)
-	if _, err := lt.CreateIssue(context.Background(), CreateIssueOpts{
-		Title:       "t",
-		Labels:      []string{"lbl-existing"},
-		ExtraLabels: []string{"urgent", "biome-ready"},
-	}); err != nil {
+	ref, err := lt.CreateIssue(context.Background(), CreateIssueOpts{
+		Title:     "t",
+		Assignees: []string{"alice@example.com", "bob@example.com"},
+	})
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	ids, _ := vars["labelIds"].([]any)
-	got := map[string]bool{}
-	for _, id := range ids {
-		got[id.(string)] = true
+	if vars["assigneeId"] != "u-alice" {
+		t.Errorf("assigneeId = %v, want u-alice (first human candidate wins)", vars["assigneeId"])
 	}
-	for _, want := range []string{"lbl-existing", "lbl-team", "lbl-ws"} {
-		if !got[want] {
-			t.Errorf("labelIds = %v, want to include %q", ids, want)
-		}
+	if ref.AssignedTo != "alice@example.com" {
+		t.Errorf("AssignedTo = %q, want alice@example.com", ref.AssignedTo)
+	}
+	if len(ref.UnresolvedAssignees) != 0 {
+		t.Errorf("UnresolvedAssignees = %v, want empty (bob resolved fine, just lost the single assignee slot)", ref.UnresolvedAssignees)
 	}
 }
 
-func TestCreateIssue_UnknownExtraLabelSkipped(t *testing.T) {
-	var vars map[string]any
-	srv := assigneeAwareServer(t, nil, []fakeLabel{{ID: "lbl-a", Name: "known"}}, nil, &vars, nil)
-	defer srv.Close()
-
-	lt := projectTestTracker(srv)
-	if _, err := lt.CreateIssue(context.Background(), CreateIssueOpts{
-		Title:       "t",
-		ExtraLabels: []string{"unknown"},
-	}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, ok := vars["labelIds"]; ok {
-		t.Errorf("labelIds = %v, want absent when no requested label resolves", vars["labelIds"])
-	}
-}
-
-func TestResolveLabelID_ResolutionCached(t *testing.T) {
+func TestResolveUser_ResolutionCached(t *testing.T) {
 	queries := 0
-	srv := assigneeAwareServer(t, nil, []fakeLabel{{ID: "lbl-a", Name: "urgent"}}, nil, nil, &queries)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries++
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"users": map[string]any{"nodes": []map[string]any{
+				{"id": "u-1", "name": "alice", "displayName": "Alice", "email": "alice@example.com", "app": nil},
+			}}},
+		})
+	}))
 	defer srv.Close()
 
 	lt := projectTestTracker(srv)
 	for i := 0; i < 2; i++ {
-		if _, err := lt.resolveLabelID(context.Background(), testTeamUUID, "urgent"); err != nil {
+		if _, _, err := lt.resolveUser(context.Background(), "alice"); err != nil {
 			t.Fatalf("call %d: unexpected error: %v", i, err)
 		}
 	}
 	if queries != 1 {
-		t.Errorf("label queries = %d, want 1 (second call must hit the cache)", queries)
+		t.Errorf("user queries = %d, want 1 (second call must hit the cache)", queries)
 	}
 }

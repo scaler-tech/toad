@@ -43,11 +43,13 @@ type Findings struct {
 	// reporter says "me"/"myself" — i.e. assign it to whoever made the
 	// request, not a name the model has to guess. Empty otherwise. Like
 	// LinearTeam/LinearProject, this is model output and therefore
-	// untrusted — but it can only ever narrow WHO the ticket is assigned to
-	// (or which delegate label gets applied): cmd-level code resolves it
-	// against the Linear workspace's existing users and the configured
-	// issue_tracker.delegates map, with warn-and-skip on any resolution
-	// failure. It never influences WHETHER a ticket is filed.
+	// untrusted — but it can only ever narrow WHO ends up as the issue's
+	// assignee or delegate: cmd-level code resolves "requester" against the
+	// requesting Slack user's identity, and the Linear client (which alone
+	// knows whether a resolved name is a human or an app/agent user like
+	// Biome) resolves everything else against the workspace's existing
+	// users, with warn-and-skip on any resolution failure. It never
+	// influences WHETHER a ticket is filed.
 	LinearAssignees []string `json:"linear_assignees"`
 
 	FilesFound []string `json:"files_found"` // from extractFilePaths
@@ -61,17 +63,22 @@ type Findings struct {
 	// append a user-visible staleness caveat.
 	RepoSyncFailed bool `json:"-"`
 
-	// LinearAssignee and LinearExtraLabels are RESOLVED-input fields: unlike
-	// LinearAssignees above (raw, untrusted model output), these are set by
+	// LinearResolvedAssignees is a RESOLVED-input field: unlike
+	// LinearAssignees above (raw, untrusted model output), this is set by
 	// cmd-level code (cmd/ticketflow.go's applyLinearAssigneeMapping)
 	// immediately before a ticket is filed or re-filed — never by the model,
-	// hence json:"-". They're re-derived fresh on every filing attempt
-	// (never trusted from a persisted/reused investigation record) because
-	// the requester making "assign to me" mean something different between
-	// the original report and a later CTA click by someone else — the same
+	// hence json:"-". It's LinearAssignees with "requester" substituted for
+	// the requesting Slack user's resolved identity (order-preserved,
+	// everything else copied through unchanged) — re-derived fresh on every
+	// filing attempt (never trusted from a persisted/reused investigation
+	// record) because "assign to me" means something different between the
+	// original report and a later CTA click by someone else, the same
 	// re-derive-every-time discipline enforceCorroboration uses for
-	// SentryIssueIDs. ticket.Engine.file copies these straight into
-	// issuetracker.CreateIssueOpts.Assignee/ExtraLabels.
-	LinearAssignee    string   `json:"-"`
-	LinearExtraLabels []string `json:"-"`
+	// SentryIssueIDs. Deciding which entries end up as the issue's assignee
+	// vs. delegate (human vs. app/agent user) happens downstream, in
+	// issuetracker.LinearTracker.CreateIssue — that's a Linear concept, not
+	// something cmd-level code can determine on its own.
+	// ticket.Engine.file copies this straight into
+	// issuetracker.CreateIssueOpts.Assignees.
+	LinearResolvedAssignees []string `json:"-"`
 }

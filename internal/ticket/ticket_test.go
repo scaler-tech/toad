@@ -591,15 +591,14 @@ func TestFileOrUpdate_PassesRequestedTeamAndProject(t *testing.T) {
 	}
 }
 
-func TestFileOrUpdate_PassesResolvedAssigneeAndExtraLabels(t *testing.T) {
+func TestFileOrUpdate_PassesResolvedAssignees(t *testing.T) {
 	tracker := &fakeTracker{nextID: "ANA-8"}
 	store := newFakeStore()
 	e := New(tracker, store, config.TicketConfig{}, fixedPermalink("https://slack.example.com/x"))
 
 	f := investigation.Findings{
-		Problem:           "User changes should be added to the audit logs.",
-		LinearAssignee:    "alice@example.com",
-		LinearExtraLabels: []string{"biome-ready"},
+		Problem:                 "User changes should be added to the audit logs.",
+		LinearResolvedAssignees: []string{"alice@example.com", "biome"},
 	}
 
 	if _, err := e.FileOrUpdate(context.Background(), f, "C123", "1722.0003", "inv-3", SourceCTA); err != nil {
@@ -609,10 +608,13 @@ func TestFileOrUpdate_PassesResolvedAssigneeAndExtraLabels(t *testing.T) {
 		t.Fatalf("CreateIssue calls = %d, want 1", len(tracker.createCalls))
 	}
 	created := tracker.createCalls[0]
-	if created.Assignee != "alice@example.com" {
-		t.Errorf("Assignee = %q, want the findings' resolved assignee passed through", created.Assignee)
+	want := []string{"alice@example.com", "biome"}
+	if len(created.Assignees) != len(want) {
+		t.Fatalf("Assignees = %v, want %v", created.Assignees, want)
 	}
-	if len(created.ExtraLabels) != 1 || created.ExtraLabels[0] != "biome-ready" {
-		t.Errorf("ExtraLabels = %v, want [biome-ready]", created.ExtraLabels)
+	for i, w := range want {
+		if created.Assignees[i] != w {
+			t.Errorf("Assignees[%d] = %q, want %q", i, created.Assignees[i], w)
+		}
 	}
 }
