@@ -37,6 +37,19 @@ type Findings struct {
 	LinearTeam    string `json:"linear_team"`
 	LinearProject string `json:"linear_project"`
 
+	// LinearAssignees names who the reporter EXPLICITLY asked to assign or
+	// delegate the ticket to, copied verbatim from their request (e.g.
+	// "dejan", "biome"). The literal token "requester" is used when the
+	// reporter says "me"/"myself" — i.e. assign it to whoever made the
+	// request, not a name the model has to guess. Empty otherwise. Like
+	// LinearTeam/LinearProject, this is model output and therefore
+	// untrusted — but it can only ever narrow WHO the ticket is assigned to
+	// (or which delegate label gets applied): cmd-level code resolves it
+	// against the Linear workspace's existing users and the configured
+	// issue_tracker.delegates map, with warn-and-skip on any resolution
+	// failure. It never influences WHETHER a ticket is filed.
+	LinearAssignees []string `json:"linear_assignees"`
+
 	FilesFound []string `json:"files_found"` // from extractFilePaths
 	Reasoning  string   `json:"reasoning"`   // Slack-postable prose
 
@@ -47,4 +60,18 @@ type Findings struct {
 	// field) — callers (cmd/ticketflow.go's runInvestigation) use it to
 	// append a user-visible staleness caveat.
 	RepoSyncFailed bool `json:"-"`
+
+	// LinearAssignee and LinearExtraLabels are RESOLVED-input fields: unlike
+	// LinearAssignees above (raw, untrusted model output), these are set by
+	// cmd-level code (cmd/ticketflow.go's applyLinearAssigneeMapping)
+	// immediately before a ticket is filed or re-filed — never by the model,
+	// hence json:"-". They're re-derived fresh on every filing attempt
+	// (never trusted from a persisted/reused investigation record) because
+	// the requester making "assign to me" mean something different between
+	// the original report and a later CTA click by someone else — the same
+	// re-derive-every-time discipline enforceCorroboration uses for
+	// SentryIssueIDs. ticket.Engine.file copies these straight into
+	// issuetracker.CreateIssueOpts.Assignee/ExtraLabels.
+	LinearAssignee    string   `json:"-"`
+	LinearExtraLabels []string `json:"-"`
 }

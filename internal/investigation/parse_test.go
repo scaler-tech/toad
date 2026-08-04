@@ -289,3 +289,40 @@ func TestPrompt_InstructsLinearDestinationExtraction(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFindings_LinearAssigneesField(t *testing.T) {
+	raw := `{"feasible": true, "title": "t", "problem": "p", "root_cause": "r", "evidence": [], "scope": [], "non_goals": [], "acceptance_criteria": [], "confidence": 0.5, "repo": "biome", "sentry_issue_ids": [], "issue_id": "", "linear_team": "", "linear_project": "", "linear_assignees": ["requester", "biome"], "files_found": [], "reasoning": "x"}`
+	f, err := ParseFindings(raw)
+	if err != nil {
+		t.Fatalf("ParseFindings() error = %v", err)
+	}
+	want := []string{"requester", "biome"}
+	if len(f.LinearAssignees) != len(want) {
+		t.Fatalf("LinearAssignees = %v, want %v", f.LinearAssignees, want)
+	}
+	for i, w := range want {
+		if f.LinearAssignees[i] != w {
+			t.Errorf("LinearAssignees[%d] = %q, want %q", i, f.LinearAssignees[i], w)
+		}
+	}
+}
+
+func TestParseFindings_LinearAssigneesEmptyByDefault(t *testing.T) {
+	raw := `{"feasible": true, "title": "t", "problem": "p", "root_cause": "r", "evidence": [], "scope": [], "non_goals": [], "acceptance_criteria": [], "confidence": 0.5, "repo": "biome", "sentry_issue_ids": [], "issue_id": "", "linear_team": "", "linear_project": "", "files_found": [], "reasoning": "x"}`
+	f, err := ParseFindings(raw)
+	if err != nil {
+		t.Fatalf("ParseFindings() error = %v", err)
+	}
+	if len(f.LinearAssignees) != 0 {
+		t.Errorf("LinearAssignees = %v, want empty", f.LinearAssignees)
+	}
+}
+
+func TestPrompt_InstructsLinearAssigneeExtraction(t *testing.T) {
+	p := buildPrompt(Request{Text: "assign this to me and biome"})
+	for _, want := range []string{`"linear_assignees"`, `"requester"`, "explicitly asks to assign or hand off the ticket"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+}
