@@ -79,7 +79,7 @@ ticket:
 digest:
   enabled: false                # opt-in batch analysis
   batch_minutes: 5              # how often to analyze batched messages
-  min_confidence: 0.95          # confidence floor
+  min_confidence: 0.8           # confidence floor for digest proposals
   max_auto_spawn_hour: 3        # max auto-filed tickets per hour
   allowed_categories: ["bug"]   # categories eligible for auto-file
   max_est_size: "medium"        # max estimated fix size

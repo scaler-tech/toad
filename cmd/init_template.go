@@ -131,7 +131,7 @@ triage:
 digest:
   enabled: {{ .Digest.Enabled }}
   # batch_minutes: 5           # How often to analyze batched messages
-  # min_confidence: 0.95        # Minimum confidence to auto-spawn
+  # min_confidence: 0.8         # Minimum confidence for a digest proposal
   # max_auto_spawn_hour: 3      # Max auto-spawns per hour
   # allowed_categories: ["bug"] # Categories eligible for auto-spawn
   # max_est_size: "medium"      # Maximum estimated fix size

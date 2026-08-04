@@ -4,13 +4,13 @@ import (
 	"time"
 )
 
-// minConfidence returns the active confidence floor: 0.95 by default,
+// minConfidence returns the active confidence floor: 0.8 by default,
 // overridden by cfg.MinConfidence when set. A nil cfg just falls back to the
-// 0.95 default (each caller's own nil-cfg handling for anything beyond
+// 0.8 default (each caller's own nil-cfg handling for anything beyond
 // confidence — e.g. passesGuardrails' fail-closed category/size checks — is
 // unaffected).
 func (e *Engine) minConfidence() float64 {
-	minConf := 0.95
+	minConf := 0.8
 	if e.cfg != nil && e.cfg.MinConfidence > 0 {
 		minConf = e.cfg.MinConfidence
 	}

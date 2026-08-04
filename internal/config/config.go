@@ -70,7 +70,7 @@ type ClaudeConfig struct {
 type DigestConfig struct {
 	Enabled                bool     `yaml:"enabled"`                  // default: false (opt-in)
 	BatchMinutes           int      `yaml:"batch_minutes"`            // default: 5
-	MinConfidence          float64  `yaml:"min_confidence"`           // default: 0.95
+	MinConfidence          float64  `yaml:"min_confidence"`           // default: 0.8
 	MaxAutoSpawnHour       int      `yaml:"max_auto_spawn_hour"`      // default: 3
 	AllowedCategories      []string `yaml:"allowed_categories"`       // default: ["bug"]
 	MaxEstSize             string   `yaml:"max_est_size"`             // default: "medium"
@@ -162,7 +162,7 @@ func defaults() *Config {
 		Digest: DigestConfig{
 			Enabled:                false,
 			BatchMinutes:           5,
-			MinConfidence:          0.95,
+			MinConfidence:          0.8,
 			MaxAutoSpawnHour:       3,
 			AllowedCategories:      []string{"bug"},
 			MaxEstSize:             "medium",
