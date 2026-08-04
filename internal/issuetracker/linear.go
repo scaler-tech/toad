@@ -64,6 +64,14 @@ type LinearTracker struct {
 	// lower-cased project name.
 	resolvedTeams    map[string]string
 	resolvedProjects map[string]string
+
+	// resolvedUsers / resolvedLabels extend the same success-only cache
+	// policy to assignee and extra-label resolution (resolveUserID,
+	// resolveLabelID), also guarded by teamIDMu. Keys: resolvedUsers by
+	// lower-cased name/email; resolvedLabels by teamID + "\x00" +
+	// lower-cased label name.
+	resolvedUsers  map[string]string
+	resolvedLabels map[string]string
 }
 
 // NewLinearTracker creates a Linear tracker from config.
@@ -479,6 +487,187 @@ func (lt *LinearTracker) resolveProjectID(ctx context.Context, teamID, name stri
 	return "", fmt.Errorf("linear project %q not found", name)
 }
 
+// resolveUserID resolves a display name, real name, or email to a Linear
+// user ID. A value containing "@" is treated as an email and looked up via
+// the users email filter; otherwise it's matched case-insensitively against
+// name OR displayName — an exact match wins, and an unambiguous
+// case-insensitive substring match is accepted otherwise (mirrors
+// resolveProjectID's partial-match rules). Successful resolutions are
+// cached under teamIDMu for the tracker's lifetime; failures are not.
+func (lt *LinearTracker) resolveUserID(ctx context.Context, nameOrEmail string) (string, error) {
+	if uuidRe.MatchString(nameOrEmail) {
+		return nameOrEmail, nil
+	}
+
+	cacheKey := "user\x00" + strings.ToLower(nameOrEmail)
+	lt.teamIDMu.Lock()
+	defer lt.teamIDMu.Unlock()
+	if id, ok := lt.resolvedUsers[cacheKey]; ok {
+		return id, nil
+	}
+
+	if strings.Contains(nameOrEmail, "@") {
+		data, err := lt.doGraphQL(ctx,
+			`query($email: String!) { users(filter: { email: { eq: $email } }, first: 1) { nodes { id } } }`,
+			map[string]any{"email": nameOrEmail},
+		)
+		if err != nil {
+			return "", fmt.Errorf("fetching user by email: %w", err)
+		}
+		var result struct {
+			Users struct {
+				Nodes []struct {
+					ID string `json:"id"`
+				} `json:"nodes"`
+			} `json:"users"`
+		}
+		if err := json.Unmarshal(data, &result); err != nil {
+			return "", fmt.Errorf("parsing users response: %w", err)
+		}
+		if len(result.Users.Nodes) == 0 {
+			return "", fmt.Errorf("linear user with email %q not found", nameOrEmail)
+		}
+		id := result.Users.Nodes[0].ID
+		lt.cacheUserLocked(cacheKey, id)
+		return id, nil
+	}
+
+	data, err := lt.doGraphQL(ctx, `{ users(first: 250) { nodes { id name displayName } } }`, nil)
+	if err != nil {
+		return "", fmt.Errorf("fetching users: %w", err)
+	}
+	var result struct {
+		Users struct {
+			Nodes []struct {
+				ID          string `json:"id"`
+				Name        string `json:"name"`
+				DisplayName string `json:"displayName"`
+			} `json:"nodes"`
+		} `json:"users"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parsing users response: %w", err)
+	}
+
+	var partial []string
+	lower := strings.ToLower(nameOrEmail)
+	for _, u := range result.Users.Nodes {
+		if strings.EqualFold(u.Name, nameOrEmail) || strings.EqualFold(u.DisplayName, nameOrEmail) {
+			lt.cacheUserLocked(cacheKey, u.ID)
+			return u.ID, nil
+		}
+		if strings.Contains(strings.ToLower(u.Name), lower) || strings.Contains(strings.ToLower(u.DisplayName), lower) {
+			partial = append(partial, u.ID)
+		}
+	}
+	if len(partial) == 1 {
+		lt.cacheUserLocked(cacheKey, partial[0])
+		return partial[0], nil
+	}
+	if len(partial) > 1 {
+		return "", fmt.Errorf("linear user %q is ambiguous (%d partial matches)", nameOrEmail, len(partial))
+	}
+	return "", fmt.Errorf("linear user %q not found", nameOrEmail)
+}
+
+// cacheUserLocked records a successful user resolution. Callers must already
+// hold teamIDMu.
+func (lt *LinearTracker) cacheUserLocked(key, id string) {
+	if lt.resolvedUsers == nil {
+		lt.resolvedUsers = make(map[string]string)
+	}
+	lt.resolvedUsers[key] = id
+}
+
+// resolveLabelIDs resolves a list of label NAMES to IDs, warning and
+// skipping any name that can't be resolved (never blocks issue creation on
+// a bad label name). Returns nil for an empty input.
+func (lt *LinearTracker) resolveLabelIDs(ctx context.Context, teamID string, names []string) []string {
+	var ids []string
+	for _, name := range names {
+		id, err := lt.resolveLabelID(ctx, teamID, name)
+		if err != nil {
+			slog.Warn("requested Linear label not resolved, skipping", "label", name, "error", err)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// resolveLabelID resolves a single label name to its UUID, searching both
+// the given team's labels and workspace-level labels — a case-insensitive
+// exact match only (unlike resolveProjectID, no partial-match fallback, so
+// an ambiguous or generic name never silently attaches the wrong label).
+// Successful resolutions are cached under teamIDMu for the tracker's
+// lifetime; failures are not.
+func (lt *LinearTracker) resolveLabelID(ctx context.Context, teamID, name string) (string, error) {
+	if uuidRe.MatchString(name) {
+		return name, nil
+	}
+
+	cacheKey := teamID + "\x00" + strings.ToLower(name)
+	lt.teamIDMu.Lock()
+	defer lt.teamIDMu.Unlock()
+	if id, ok := lt.resolvedLabels[cacheKey]; ok {
+		return id, nil
+	}
+
+	data, err := lt.doGraphQL(ctx,
+		`query($teamId: String!) {
+			team(id: $teamId) { labels(first: 250) { nodes { id name } } }
+			issueLabels(first: 250) { nodes { id name } }
+		}`,
+		map[string]any{"teamId": teamID},
+	)
+	if err != nil {
+		return "", fmt.Errorf("fetching labels: %w", err)
+	}
+
+	var result struct {
+		Team struct {
+			Labels struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Name string `json:"name"`
+				} `json:"nodes"`
+			} `json:"labels"`
+		} `json:"team"`
+		IssueLabels struct {
+			Nodes []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"nodes"`
+		} `json:"issueLabels"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parsing labels response: %w", err)
+	}
+
+	for _, l := range result.Team.Labels.Nodes {
+		if strings.EqualFold(l.Name, name) {
+			lt.cacheLabelLocked(cacheKey, l.ID)
+			return l.ID, nil
+		}
+	}
+	for _, l := range result.IssueLabels.Nodes {
+		if strings.EqualFold(l.Name, name) {
+			lt.cacheLabelLocked(cacheKey, l.ID)
+			return l.ID, nil
+		}
+	}
+	return "", fmt.Errorf("linear label %q not found", name)
+}
+
+// cacheLabelLocked records a successful label resolution. Callers must
+// already hold teamIDMu.
+func (lt *LinearTracker) cacheLabelLocked(key, id string) {
+	if lt.resolvedLabels == nil {
+		lt.resolvedLabels = make(map[string]string)
+	}
+	lt.resolvedLabels[key] = id
+}
+
 // CreateIssue creates a new Linear issue via the GraphQL API.
 func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) (*IssueRef, error) {
 	if lt.apiToken == "" {
@@ -517,6 +706,9 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 		}
 	}
 	labelIDs = append(labelIDs, opts.Labels...)
+	if len(opts.ExtraLabels) > 0 {
+		labelIDs = append(labelIDs, lt.resolveLabelIDs(ctx, teamID, opts.ExtraLabels)...)
+	}
 
 	variables := map[string]any{
 		"title":       opts.Title,
@@ -537,8 +729,22 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 		}
 	}
 
-	query := `mutation IssueCreate($title: String!, $description: String, $teamId: String!, $labelIds: [String!], $stateId: String, $projectId: String) {
-		issueCreate(input: { title: $title, description: $description, teamId: $teamId, labelIds: $labelIds, stateId: $stateId, projectId: $projectId }) {
+	// An unresolved assignee warns and falls back to filing unassigned
+	// (never blocks creation) — assigneeUnresolved is threaded onto the
+	// returned IssueRef so callers can surface it, unlike Team/Project
+	// which fall back silently.
+	assigneeUnresolved := ""
+	if opts.Assignee != "" {
+		if uid, uerr := lt.resolveUserID(ctx, opts.Assignee); uerr != nil {
+			slog.Warn("requested Linear assignee not resolved, filing unassigned", "assignee", opts.Assignee, "error", uerr)
+			assigneeUnresolved = opts.Assignee
+		} else {
+			variables["assigneeId"] = uid
+		}
+	}
+
+	query := `mutation IssueCreate($title: String!, $description: String, $teamId: String!, $labelIds: [String!], $stateId: String, $projectId: String, $assigneeId: String) {
+		issueCreate(input: { title: $title, description: $description, teamId: $teamId, labelIds: $labelIds, stateId: $stateId, projectId: $projectId, assigneeId: $assigneeId }) {
 			success
 			issue {
 				id
@@ -575,11 +781,12 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 
 	issue := result.IssueCreate.Issue
 	return &IssueRef{
-		Provider:   "linear",
-		ID:         issue.Identifier,
-		URL:        issue.URL,
-		Title:      issue.Title,
-		InternalID: issue.ID,
+		Provider:           "linear",
+		ID:                 issue.Identifier,
+		URL:                issue.URL,
+		Title:              issue.Title,
+		InternalID:         issue.ID,
+		AssigneeUnresolved: assigneeUnresolved,
 	}, nil
 }
 

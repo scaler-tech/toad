@@ -70,6 +70,16 @@ type IssueRef struct {
 	URL        string
 	Title      string
 	InternalID string // provider's internal UUID, set when already resolved to skip lookups
+
+	// AssigneeUnresolved carries the requested-but-unresolved assignee name
+	// when CreateIssueOpts.Assignee was set but couldn't be resolved to a
+	// Linear user — the issue was still filed, just unassigned. Empty
+	// whenever no assignee was requested, or the requested one resolved
+	// successfully. Callers (cmd/ticketflow.go's composeFiledReply) surface
+	// this in the Slack reply so a silently-dropped assignment is visible,
+	// unlike LinearTeam/LinearProject's resolution failures, which fall
+	// back silently.
+	AssigneeUnresolved string
 }
 
 // BranchPrefix returns a lowercased issue ID suitable for branch naming.
@@ -123,6 +133,19 @@ type CreateIssueOpts struct {
 	// with no project — resolution failures never block issue creation.
 	Team    string
 	Project string
+
+	// Assignee is a display name, real name, or email — resolved to a
+	// Linear user ID before filing. Empty means no assignee. Resolution
+	// failure warns and falls back to filing unassigned (never blocks
+	// creation) — the caller can inspect the returned IssueRef's
+	// AssigneeUnresolved field to know when that happened.
+	Assignee string
+
+	// ExtraLabels are label NAMES (not IDs — distinct from Labels above,
+	// which already carries resolved label IDs), resolved to IDs and merged
+	// in alongside Labels. A name that resolves to no label is dropped with
+	// a warning, same warn-and-fallback policy as Team/Project/Assignee.
+	ExtraLabels []string
 }
 
 // NoopTracker is a no-op implementation that returns nil for everything.

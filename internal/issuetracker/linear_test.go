@@ -1464,3 +1464,232 @@ func TestCreateIssue_ProjectResolutionCached(t *testing.T) {
 		t.Errorf("projects queries = %d, want 1 (second call must hit the cache)", queries)
 	}
 }
+
+// fakeUser is a users(...) fixture: id/name/displayName/email.
+type fakeUser struct {
+	ID          string
+	Name        string
+	DisplayName string
+	Email       string
+}
+
+// fakeLabel is a labels/issueLabels fixture: id/name.
+type fakeLabel struct {
+	ID   string
+	Name string
+}
+
+// assigneeAwareServer fakes every GraphQL call CreateIssue can make when an
+// Assignee/ExtraLabels request is present: a "users" query (both the
+// email-filtered lookup and the full-list lookup), a team+workspace labels
+// query, and the issueCreate mutation. It records the mutation variables and
+// counts label queries (for cache-hit assertions).
+func assigneeAwareServer(t *testing.T, users []fakeUser, teamLabels, wsLabels []fakeLabel,
+	capturedVars *map[string]any, labelQueries *int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+
+		switch {
+		case strings.Contains(payload.Query, "email: { eq: $email }"):
+			email, _ := payload.Variables["email"].(string)
+			var nodes []map[string]any
+			for _, u := range users {
+				if strings.EqualFold(u.Email, email) {
+					nodes = append(nodes, map[string]any{"id": u.ID})
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"users": map[string]any{"nodes": nodes}},
+			})
+		case strings.Contains(payload.Query, "users(first: 250)"):
+			var nodes []map[string]any
+			for _, u := range users {
+				nodes = append(nodes, map[string]any{"id": u.ID, "name": u.Name, "displayName": u.DisplayName})
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"users": map[string]any{"nodes": nodes}},
+			})
+		case strings.Contains(payload.Query, "labels(first:") && strings.Contains(payload.Query, "issueLabels(first:"):
+			if labelQueries != nil {
+				*labelQueries++
+			}
+			var teamNodes, wsNodes []map[string]any
+			for _, l := range teamLabels {
+				teamNodes = append(teamNodes, map[string]any{"id": l.ID, "name": l.Name})
+			}
+			for _, l := range wsLabels {
+				wsNodes = append(wsNodes, map[string]any{"id": l.ID, "name": l.Name})
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"team":        map[string]any{"labels": map[string]any{"nodes": teamNodes}},
+					"issueLabels": map[string]any{"nodes": wsNodes},
+				},
+			})
+		default: // issueCreate
+			if capturedVars != nil {
+				*capturedVars = payload.Variables
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"issueCreate": map[string]any{
+					"success": true,
+					"issue":   map[string]any{"identifier": "PLF-99", "url": "https://linear.app/x/issue/PLF-99", "title": "t"},
+				}},
+			})
+		}
+	}))
+}
+
+func TestResolveUserID_ByEmail(t *testing.T) {
+	srv := assigneeAwareServer(t, []fakeUser{{ID: "u-1", Name: "Alice", Email: "alice@example.com"}}, nil, nil, nil, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	id, err := lt.resolveUserID(context.Background(), "alice@example.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if id != "u-1" {
+		t.Errorf("id = %q, want u-1", id)
+	}
+}
+
+func TestResolveUserID_ByName(t *testing.T) {
+	srv := assigneeAwareServer(t, []fakeUser{
+		{ID: "u-1", Name: "alice", DisplayName: "Alice A"},
+		{ID: "u-2", Name: "bob", DisplayName: "Bob B"},
+	}, nil, nil, nil, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	for _, tc := range []struct{ query, want string }{
+		{"Alice", "u-1"}, // case-insensitive exact match on Name
+		{"Bob B", "u-2"}, // case-insensitive exact match on DisplayName
+	} {
+		id, err := lt.resolveUserID(context.Background(), tc.query)
+		if err != nil {
+			t.Fatalf("query %q: unexpected error: %v", tc.query, err)
+		}
+		if id != tc.want {
+			t.Errorf("query %q: id = %q, want %q", tc.query, id, tc.want)
+		}
+	}
+}
+
+func TestResolveUserID_AmbiguousAndUnknown(t *testing.T) {
+	srv := assigneeAwareServer(t, []fakeUser{
+		{ID: "u-1", Name: "alice-billing", DisplayName: "Alice Billing"},
+		{ID: "u-2", Name: "alice-growth", DisplayName: "Alice Growth"},
+	}, nil, nil, nil, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	if _, err := lt.resolveUserID(context.Background(), "alice"); err == nil {
+		t.Error("expected ambiguous-match error, got nil")
+	}
+	if _, err := lt.resolveUserID(context.Background(), "nonexistent"); err == nil {
+		t.Error("expected not-found error, got nil")
+	}
+}
+
+func TestCreateIssue_AssigneeResolvedByName(t *testing.T) {
+	var vars map[string]any
+	srv := assigneeAwareServer(t, []fakeUser{{ID: "u-1", Name: "dejan", DisplayName: "Dejan"}}, nil, nil, &vars, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	ref, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Assignee: "dejan"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if vars["assigneeId"] != "u-1" {
+		t.Errorf("assigneeId = %v, want u-1", vars["assigneeId"])
+	}
+	if ref.AssigneeUnresolved != "" {
+		t.Errorf("AssigneeUnresolved = %q, want empty", ref.AssigneeUnresolved)
+	}
+}
+
+func TestCreateIssue_UnresolvedAssigneeFilesUnassigned(t *testing.T) {
+	var vars map[string]any
+	srv := assigneeAwareServer(t, nil, nil, nil, &vars, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	ref, err := lt.CreateIssue(context.Background(), CreateIssueOpts{Title: "t", Assignee: "nobody"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v (resolution failure must not block creation)", err)
+	}
+	if _, ok := vars["assigneeId"]; ok {
+		t.Errorf("assigneeId = %v, want absent when the assignee cannot be resolved", vars["assigneeId"])
+	}
+	if ref.AssigneeUnresolved != "nobody" {
+		t.Errorf("AssigneeUnresolved = %q, want %q", ref.AssigneeUnresolved, "nobody")
+	}
+}
+
+func TestCreateIssue_ExtraLabelsMergedFromTeamAndWorkspace(t *testing.T) {
+	var vars map[string]any
+	srv := assigneeAwareServer(t, nil,
+		[]fakeLabel{{ID: "lbl-team", Name: "urgent"}},
+		[]fakeLabel{{ID: "lbl-ws", Name: "biome-ready"}},
+		&vars, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	if _, err := lt.CreateIssue(context.Background(), CreateIssueOpts{
+		Title:       "t",
+		Labels:      []string{"lbl-existing"},
+		ExtraLabels: []string{"urgent", "biome-ready"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ids, _ := vars["labelIds"].([]any)
+	got := map[string]bool{}
+	for _, id := range ids {
+		got[id.(string)] = true
+	}
+	for _, want := range []string{"lbl-existing", "lbl-team", "lbl-ws"} {
+		if !got[want] {
+			t.Errorf("labelIds = %v, want to include %q", ids, want)
+		}
+	}
+}
+
+func TestCreateIssue_UnknownExtraLabelSkipped(t *testing.T) {
+	var vars map[string]any
+	srv := assigneeAwareServer(t, nil, []fakeLabel{{ID: "lbl-a", Name: "known"}}, nil, &vars, nil)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	if _, err := lt.CreateIssue(context.Background(), CreateIssueOpts{
+		Title:       "t",
+		ExtraLabels: []string{"unknown"},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := vars["labelIds"]; ok {
+		t.Errorf("labelIds = %v, want absent when no requested label resolves", vars["labelIds"])
+	}
+}
+
+func TestResolveLabelID_ResolutionCached(t *testing.T) {
+	queries := 0
+	srv := assigneeAwareServer(t, nil, []fakeLabel{{ID: "lbl-a", Name: "urgent"}}, nil, nil, &queries)
+	defer srv.Close()
+
+	lt := projectTestTracker(srv)
+	for i := 0; i < 2; i++ {
+		if _, err := lt.resolveLabelID(context.Background(), testTeamUUID, "urgent"); err != nil {
+			t.Fatalf("call %d: unexpected error: %v", i, err)
+		}
+	}
+	if queries != 1 {
+		t.Errorf("label queries = %d, want 1 (second call must hit the cache)", queries)
+	}
+}
