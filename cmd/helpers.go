@@ -11,6 +11,7 @@ import (
 
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/issuetracker"
+	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/vcs"
 )
@@ -282,4 +283,29 @@ func buildVCSResolver(cfg *config.Config) (vcs.Resolver, error) {
 		BotUsernames: fallbackVCS.BotUsernames,
 	}
 	return vcs.NewResolver(repoVCS, fallbackCfg)
+}
+
+// resolveRequesterIdentity builds flowDeps.resolveRequesterIdentity's real
+// implementation: given a Slack user ID, prefer their profile email
+// (GetUserEmail — requires the users:read.email scope), falling back to a
+// display name (GetUserDisplayName) when the email lookup fails, and
+// finally "" (logged) if neither resolves. This is the one place this
+// package touches *islack.Client for identity resolution — kept out of
+// ticketflow.go's decision functions (see that file's package doc comment)
+// by injecting the returned closure into flowDeps instead.
+func resolveRequesterIdentity(client *islack.Client) func(userID string) string {
+	return func(userID string) string {
+		email, err := client.GetUserEmail(userID)
+		if err == nil {
+			return email
+		}
+		slog.Warn("could not resolve requester email for Linear assignment, falling back to display name", "user", userID, "error", err)
+
+		name, err := client.GetUserDisplayName(userID)
+		if err == nil {
+			return name
+		}
+		slog.Warn("could not resolve requester display name for Linear assignment", "user", userID, "error", err)
+		return ""
+	}
 }

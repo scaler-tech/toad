@@ -272,13 +272,15 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// point in cmd/ needs (see its doc comment in ticketflow.go) — built once
 	// here and passed down as a single value instead of six positional params.
 	deps := flowDeps{
-		stateManager:       stateManager,
-		tracker:            tracker,
-		resolver:           resolver,
-		investRunner:       investRunner,
-		ticketEngine:       ticketEngine,
-		investigateSem:     investigateSem,
-		investigateTimeout: time.Duration(cfg.Limits.TimeoutMinutes) * time.Minute,
+		stateManager:             stateManager,
+		tracker:                  tracker,
+		resolver:                 resolver,
+		investRunner:             investRunner,
+		ticketEngine:             ticketEngine,
+		investigateSem:           investigateSem,
+		investigateTimeout:       time.Duration(cfg.Limits.TimeoutMinutes) * time.Minute,
+		delegates:                cfg.IssueTracker.Delegates,
+		resolveRequesterIdentity: resolveRequesterIdentity(slackClient),
 	}
 
 	// 9. Initialize MCP server if enabled (started after context is created below)
@@ -314,7 +316,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 				// the full rule — never merely because the digest batched a
 				// message with a Sentry reference in its text.
 				sentryCorroborated := isSentryCorroborated(msg.BotID, cfg.Intake.BotAllowlist)
-				return proposeFromDigest(ctx, ticketEngine, stateDB, slackClient.ReplyWithOptionalCTA, f, msg, sentryCorroborated)
+				return proposeFromDigest(ctx, ticketEngine, stateDB, slackClient.ReplyWithOptionalCTA, f, msg, sentryCorroborated, cfg.IssueTracker.Delegates)
 			},
 			Notify: func(channel, threadTS, text string) {
 				slackClient.ReplyInThread(channel, threadTS, text)

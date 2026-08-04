@@ -95,6 +95,24 @@ type flowDeps struct {
 	ticketEngine   *ticket.Engine
 	investigateSem chan struct{}
 
+	// delegates is cfg.IssueTracker.Delegates — a requested-name -> Linear
+	// label map consulted by applyLinearAssigneeMapping. May be nil (no
+	// delegation configured).
+	delegates map[string]string
+
+	// resolveRequesterIdentity resolves a Slack user ID to the best
+	// available identity for Linear assignee resolution (email preferred,
+	// falling back to display name; "" if neither is available) — wired in
+	// root.go over slackClient.GetUserEmail/GetUserDisplayName. Kept as an
+	// injectable function value rather than a *islack.Client field, same
+	// rationale as digestPostFunc below: it keeps this file's decision
+	// functions (runTriggeredInvestigation, runTicketRequest) directly
+	// unit-testable with a fake instead of a live Slack client. May be nil
+	// (e.g. in tests that don't exercise assignee resolution) —
+	// applyLinearAssigneeMapping treats a nil func the same as an empty
+	// requesterID: any "requester" entry simply drops.
+	resolveRequesterIdentity func(userID string) string
+
 	// investigateTimeout bounds a single message-path investigation run
 	// (triggered bug/feature and CTA/escalation requests). Sourced from
 	// limits.timeout_minutes in root.go — the same knob that bounds ribbit —
@@ -376,6 +394,124 @@ func fileOrProposeFromFindings(ctx context.Context, ticketEngine *ticket.Engine,
 	return decision, res, err
 }
 
+// mapLinearAssignees is the pure decision core behind applyLinearAssigneeMapping:
+// resolve each raw name in names (Findings.LinearAssignees — copied verbatim
+// by the model from an explicit reporter request) into either the single
+// Linear assignee candidate or a delegate label, following toad's
+// issue_tracker.delegates config. It is Slack-client-free and
+// network-free — the caller resolves "requester" to requesterIdentity (a
+// Slack email/display name, or "" if unavailable) before calling this.
+//
+// Resolution order per name (case-insensitive, in names' order):
+//  1. the literal token "requester" -> requesterIdentity (dropped
+//     entirely — not even counted as a candidate — if requesterIdentity
+//     is "")
+//  2. a name matching a delegates key -> its configured label, collected
+//     into labels
+//  3. anything else -> an assignee candidate
+//
+// The FIRST assignee candidate found wins — Linear has a single assignee
+// slot. Any later candidates are returned in dropped, for the caller to log
+// (never silently discarded from visibility, just from the actual filing).
+func mapLinearAssignees(names []string, delegates map[string]string, requesterIdentity string) (assignee string, labels []string, dropped []string) {
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+
+		if strings.EqualFold(name, "requester") {
+			if requesterIdentity == "" {
+				continue
+			}
+			assignee, dropped = addCandidate(assignee, dropped, requesterIdentity)
+			continue
+		}
+
+		if label, ok := lookupDelegateLabel(delegates, name); ok {
+			labels = append(labels, label)
+			continue
+		}
+
+		assignee, dropped = addCandidate(assignee, dropped, name)
+	}
+	return assignee, labels, dropped
+}
+
+// addCandidate returns (assignee, dropped) updated with candidate: it fills
+// assignee if empty (first candidate wins), otherwise appends to dropped —
+// shared by both branches of mapLinearAssignees that can produce an
+// assignee candidate ("requester" and a plain name).
+func addCandidate(assignee string, dropped []string, candidate string) (string, []string) {
+	if assignee == "" {
+		return candidate, dropped
+	}
+	return assignee, append(dropped, candidate)
+}
+
+// lookupDelegateLabel looks up name in delegates case-insensitively — the
+// map itself is user-authored YAML config (issue_tracker.delegates), so a
+// literal, case-sensitive Go map lookup would make "Biome" vs "biome" a
+// silent miss; case folding it here is cheap given delegates is always a
+// small, human-sized list.
+func lookupDelegateLabel(delegates map[string]string, name string) (string, bool) {
+	for k, v := range delegates {
+		if strings.EqualFold(k, name) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// applyLinearAssigneeMapping resolves f.LinearAssignees — the model's raw,
+// verbatim names — into the RESOLVED-input fields ticket.Engine.file reads
+// (f.LinearAssignee, f.LinearExtraLabels), mutating f in place. It is the
+// single call site for this resolution, invoked immediately before every
+// FileOrUpdate call in this file (runTriggeredInvestigation's auto-file
+// branch, runTicketRequest's direct-file path, and proposeFromDigest before
+// its own fileOrProposeFromFindings call) — never cached or reused across
+// calls, so a re-derivation always reflects the CURRENT request's own
+// requester, never a persisted/reused investigation record's original
+// reporter (mirrors enforceCorroboration's re-derive-every-time rule, and
+// for the same reason: "assign to me" means something different depending
+// on who is asking right now).
+//
+// requesterID is the Slack user ID of whoever made THIS specific request; it
+// may be "" (digest paths have no requester at all — see flowDeps.
+// resolveRequesterIdentity's doc comment), in which case a "requester" entry
+// in f.LinearAssignees simply drops (logged at Info, same as any other
+// dropped extra candidate).
+func applyLinearAssigneeMapping(f *investigation.Findings, delegates map[string]string, requesterID string, resolveIdentity func(string) string) {
+	if f == nil || len(f.LinearAssignees) == 0 {
+		return
+	}
+
+	identity := ""
+	if requesterID != "" && resolveIdentity != nil {
+		identity = resolveIdentity(requesterID)
+	}
+	if containsFold(f.LinearAssignees, "requester") && identity == "" {
+		slog.Info("could not resolve requester identity for Linear assignment, dropping 'requester'", "requester", requesterID)
+	}
+
+	assignee, labels, dropped := mapLinearAssignees(f.LinearAssignees, delegates, identity)
+	f.LinearAssignee = assignee
+	f.LinearExtraLabels = labels
+	if len(dropped) > 0 {
+		slog.Info("dropping extra Linear assignee candidates (Linear allows only one)", "kept", assignee, "dropped", dropped)
+	}
+}
+
+// containsFold reports whether names contains s, case-insensitively.
+func containsFold(names []string, s string) bool {
+	for _, n := range names {
+		if strings.EqualFold(strings.TrimSpace(n), s) {
+			return true
+		}
+	}
+	return false
+}
+
 // composeFiledReply renders the Slack reply text for a successful
 // ticketEngine.FileOrUpdate call — shared by the triggered auto-file path
 // and the CTA/escalation direct-file path so both produce identical wording
@@ -386,11 +522,13 @@ func fileOrProposeFromFindings(ctx context.Context, ticketEngine *ticket.Engine,
 func composeFiledReply(findings investigation.Findings, fileResult *ticket.FileResult) string {
 	title := findings.Title
 	url := ""
+	assigneeUnresolved := ""
 	if fileResult != nil && fileResult.Ref != nil {
 		if fileResult.Ref.Title != "" {
 			title = fileResult.Ref.Title
 		}
 		url = fileResult.Ref.URL
+		assigneeUnresolved = fileResult.Ref.AssigneeUnresolved
 	}
 	if title == "" {
 		title = "(untitled)"
@@ -398,7 +536,32 @@ func composeFiledReply(findings investigation.Findings, fileResult *ticket.FileR
 	if fileResult != nil && fileResult.AlreadyExisted {
 		return fmt.Sprintf(":ticket: Already tracked as %s — *%s*\n\n%s", url, title, findings.Reasoning)
 	}
-	return fmt.Sprintf(":ticket: Filed %s — *%s*\n\n%s", url, title, findings.Reasoning)
+	return fmt.Sprintf(":ticket: Filed %s — *%s*\n\n%s%s", url, title, findings.Reasoning,
+		assigneeReplySuffix(findings, assigneeUnresolved))
+}
+
+// assigneeReplySuffix renders the trailing "assigned to X" / "couldn't
+// resolve assignee" / "delegated via LABEL" line(s) appended to a
+// newly-filed ticket's reply — never for a re-observed (AlreadyExisted)
+// ticket, since assignment/labeling only ever happens on the CreateIssue
+// path composeFiledReply's caller took (reobserve only posts a comment, it
+// never touches the existing ticket's assignee or labels). assigneeUnresolved
+// comes from the filed IssueRef (empty unless CreateIssue actually tried and
+// failed to resolve an assignee); findings carries the RESOLVED-input
+// LinearAssignee/LinearExtraLabels fields applyLinearAssigneeMapping set
+// before filing.
+func assigneeReplySuffix(findings investigation.Findings, assigneeUnresolved string) string {
+	var b strings.Builder
+	switch {
+	case assigneeUnresolved != "":
+		fmt.Fprintf(&b, "\n\n_couldn't resolve assignee %q — filed unassigned_", assigneeUnresolved)
+	case findings.LinearAssignee != "":
+		fmt.Fprintf(&b, "\n\n_assigned to %s_", findings.LinearAssignee)
+	}
+	if len(findings.LinearExtraLabels) > 0 {
+		fmt.Fprintf(&b, "\n\n_delegated via %s_", strings.Join(findings.LinearExtraLabels, ", "))
+	}
+	return b.String()
 }
 
 // maxInfeasibleReasoningLen bounds how much of an infeasible finding's
@@ -574,6 +737,12 @@ func runTriggeredInvestigation(
 			"reasoning", findings.Reasoning, "summary", result.Summary)
 		return triggeredOutcome{Kind: outcomeFallThrough, Findings: findings}
 	}
+
+	// Resolve any explicit assign/delegate request against msg.User — the
+	// Slack user who sent THIS message — before the ticket might be filed.
+	// See applyLinearAssigneeMapping's doc comment for why this always
+	// happens fresh here rather than being trusted from anywhere else.
+	applyLinearAssigneeMapping(findings, deps.delegates, msg.User, deps.resolveRequesterIdentity)
 
 	decision, fileResult, fileErr := fileOrProposeFromFindings(ctx, deps.ticketEngine, *findings, msg.Channel, threadTS, recordID, ticket.SourceAuto)
 	if fileErr != nil {
@@ -753,6 +922,14 @@ func runTicketRequest(
 	// — the CURRENT request's own trusted refs, not whatever refs (if any)
 	// were in scope when the reused record was first produced.
 	enforceCorroboration(findings, sentryCorroborated, msg.SentryRefs)
+
+	// Re-derive the assignee/delegate mapping too, for the same reason as
+	// enforceCorroboration above: msg.User here is whoever made THIS
+	// request (the CTA clicker, or the escalating message's author) — not
+	// necessarily the same person who originally reported the problem when
+	// findings came from a reused record. See applyLinearAssigneeMapping's
+	// doc comment.
+	applyLinearAssigneeMapping(findings, deps.delegates, msg.User, deps.resolveRequesterIdentity)
 
 	fileResult, err := deps.ticketEngine.FileOrUpdate(ctx, *findings, msg.Channel, threadTS, recordID, src)
 	if err != nil {
@@ -1081,9 +1258,15 @@ func composeDigestProposalText(f investigation.Findings) string {
 // a model-emitted ID that isn't actually present in the corroborating
 // message's own text must not survive, even on an otherwise-corroborated
 // thread.
+// delegates is cfg.IssueTracker.Delegates, threaded through for
+// applyLinearAssigneeMapping below. requesterID is always passed as ""
+// (digest paths have no requester — see flowDeps.resolveRequesterIdentity's
+// doc comment): a "requester" entry in a digest-sourced Findings.LinearAssignees
+// simply drops, but a delegates match (e.g. "biome") still applies.
 func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, db *state.DB, post digestPostFunc,
-	f investigation.Findings, msg digest.Message, sentryCorroborated bool) error {
+	f investigation.Findings, msg digest.Message, sentryCorroborated bool, delegates map[string]string) error {
 	enforceCorroboration(&f, sentryCorroborated, islack.ExtractSentryRefs(msg.Text))
+	applyLinearAssigneeMapping(&f, delegates, "", nil)
 
 	investigationID := digestInvestigationID(db, msg.ThreadTS)
 	decision, fileResult, err := fileOrProposeFromFindings(ctx, ticketEngine, f, msg.Channel, msg.ThreadTS, investigationID, ticket.SourceDigest)
