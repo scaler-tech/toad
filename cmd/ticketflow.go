@@ -94,6 +94,14 @@ type flowDeps struct {
 	investRunner   *investigation.Runner
 	ticketEngine   *ticket.Engine
 	investigateSem chan struct{}
+
+	// investigateTimeout bounds a single message-path investigation run
+	// (triggered bug/feature and CTA/escalation requests). Sourced from
+	// limits.timeout_minutes in root.go — the same knob that bounds ribbit —
+	// replacing an old hardcoded 4m that regularly expired once the
+	// workspace grew to several repos (digest investigations already had a
+	// configurable 10m via digest.investigate_timeout_secs).
+	investigateTimeout time.Duration
 }
 
 // staleCaveat is appended to Findings.Reasoning when the repo sync failed
@@ -541,7 +549,7 @@ func runTriggeredInvestigation(
 		SentryRefs:    msg.SentryRefs,
 		TicketContext: buildTicketContextBlock(issueDetails),
 		Repo:          repo,
-		Timeout:       4 * time.Minute,
+		Timeout:       deps.investigateTimeout,
 	}
 
 	findings, err := runInvestigation(ctx, deps.investRunner, deps.investigateSem, req)
@@ -708,7 +716,7 @@ func runTicketRequest(
 			SentryRefs:    msg.SentryRefs,
 			TicketContext: buildTicketContextBlock(issueDetails),
 			Repo:          repo,
-			Timeout:       4 * time.Minute,
+			Timeout:       deps.investigateTimeout,
 		}
 
 		f, err := runInvestigation(ctx, deps.investRunner, deps.investigateSem, req)

@@ -272,12 +272,13 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	// point in cmd/ needs (see its doc comment in ticketflow.go) — built once
 	// here and passed down as a single value instead of six positional params.
 	deps := flowDeps{
-		stateManager:   stateManager,
-		tracker:        tracker,
-		resolver:       resolver,
-		investRunner:   investRunner,
-		ticketEngine:   ticketEngine,
-		investigateSem: investigateSem,
+		stateManager:       stateManager,
+		tracker:            tracker,
+		resolver:           resolver,
+		investRunner:       investRunner,
+		ticketEngine:       ticketEngine,
+		investigateSem:     investigateSem,
+		investigateTimeout: time.Duration(cfg.Limits.TimeoutMinutes) * time.Minute,
 	}
 
 	// 9. Initialize MCP server if enabled (started after context is created below)
