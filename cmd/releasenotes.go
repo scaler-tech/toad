@@ -282,7 +282,9 @@ func buildReleaseNotesPrompt(oldVersion, newVersion string, delta commitDelta) s
 	for _, s := range delta.Subjects {
 		sb.WriteString("- " + s + "\n")
 	}
-	sb.WriteString("\nWrite concise, user-facing release notes for the team:\n")
+	sb.WriteString("\nWriting style:\n")
+	sb.WriteString(agent.ProseStyleRules)
+	sb.WriteString("\n\nWrite concise, user-facing release notes for the team:\n")
 	sb.WriteString("- 3 to 6 bullet points\n")
 	sb.WriteString("- Plain language, not engineering jargon\n")
 	sb.WriteString("- Group related commits into a single bullet rather than listing each one\n")

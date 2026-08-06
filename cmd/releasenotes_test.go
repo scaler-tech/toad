@@ -323,6 +323,13 @@ func TestGenerateReleaseNotesText_Success(t *testing.T) {
 	}
 }
 
+func TestPrompt_IncludesProseStyleRules(t *testing.T) {
+	p := buildReleaseNotesPrompt("v1.0.0", "v1.1.0", commitDelta{Subjects: []string{"fix: bug"}})
+	if !strings.Contains(p, "cut deploy time from 40 to 4 minutes") {
+		t.Error("prompt missing the shared prose style rules")
+	}
+}
+
 func TestGenerateReleaseNotesText_FailureFallsBackToDeterministic(t *testing.T) {
 	provider := &agent.MockProvider{RunErr: errors.New("agent unavailable")}
 	delta := commitDelta{Subjects: []string{"fix: bug", "feat: thing"}}
