@@ -69,6 +69,13 @@ type Client struct {
 	channelNames     map[string]string    // channelID → name cache
 	channelIDsByName map[string]string    // channel name → ID cache (reverse of channelNames)
 	channelNamesMu   sync.RWMutex
+	// onReady, if set via SetOnReady, is invoked once by Run() right after
+	// channel join/resolution completes and before the Socket Mode event
+	// loop starts. Used by the daemon to publish an initial known-channels
+	// snapshot (see cmd/channels.go's publishKnownChannels) as soon as the
+	// channel cache is populated, rather than waiting for the next hourly
+	// refresh.
+	onReady func()
 }
 
 // NewClient creates a new Slack client configured for Socket Mode.
@@ -106,6 +113,12 @@ func (c *Client) OnMessage(handler MessageHandler) {
 	c.handler = handler
 }
 
+// SetOnReady registers a callback invoked once by Run(), after channel
+// join/resolution completes and before the Socket Mode event loop starts.
+func (c *Client) SetOnReady(fn func()) {
+	c.onReady = fn
+}
+
 // Run starts the Socket Mode event loop. Blocks until context is canceled.
 func (c *Client) Run(ctx context.Context) error {
 	// Identify ourselves so we can filter our own messages
@@ -122,6 +135,10 @@ func (c *Client) Run(ctx context.Context) error {
 		c.joinConfiguredChannels()
 	} else {
 		c.joinAllPublicChannels()
+	}
+
+	if c.onReady != nil {
+		c.onReady()
 	}
 
 	go c.handleEvents(ctx)
@@ -154,6 +171,10 @@ func (c *Client) joinConfiguredChannels() {
 				}
 				c.channels[ch.ID] = true
 				resolved[ch.Name] = true
+				c.channelNamesMu.Lock()
+				c.channelNames[ch.ID] = ch.Name
+				c.channelIDsByName[ch.Name] = ch.ID
+				c.channelNamesMu.Unlock()
 				if ch.IsMember {
 					alreadyMember++
 					continue
@@ -200,6 +221,11 @@ func (c *Client) joinAllPublicChannels() {
 			return
 		}
 		for _, ch := range channels {
+			c.channelNamesMu.Lock()
+			c.channelNames[ch.ID] = ch.Name
+			c.channelIDsByName[ch.Name] = ch.ID
+			c.channelNamesMu.Unlock()
+
 			if ch.IsMember {
 				skipped++
 				continue

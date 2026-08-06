@@ -6,7 +6,52 @@ import (
 	"time"
 
 	goslack "github.com/slack-go/slack"
+
+	"github.com/scaler-tech/toad/internal/config"
 )
+
+func TestChannelSnapshot_EmptyByDefault(t *testing.T) {
+	c := NewClient(config.SlackConfig{})
+	if snap := c.ChannelSnapshot(); len(snap) != 0 {
+		t.Fatalf("expected empty snapshot, got %v", snap)
+	}
+}
+
+func TestChannelSnapshot_SortedByName(t *testing.T) {
+	c := NewClient(config.SlackConfig{})
+	c.channelNamesMu.Lock()
+	c.channelNames["C3"] = "zzz-channel"
+	c.channelNames["C1"] = "aaa-channel"
+	c.channelNames["C2"] = "mmm-channel"
+	c.channelNamesMu.Unlock()
+
+	snap := c.ChannelSnapshot()
+	if len(snap) != 3 {
+		t.Fatalf("expected 3 channels, got %d", len(snap))
+	}
+	wantOrder := []string{"aaa-channel", "mmm-channel", "zzz-channel"}
+	for i, want := range wantOrder {
+		if snap[i].Name != want {
+			t.Errorf("index %d: expected name %q, got %q", i, want, snap[i].Name)
+		}
+	}
+	if snap[0].ID != "C1" || snap[2].ID != "C3" {
+		t.Errorf("expected IDs to travel with their names, got %+v", snap)
+	}
+}
+
+func TestSetOnReady_InvokedOnce(t *testing.T) {
+	c := NewClient(config.SlackConfig{})
+	calls := 0
+	c.SetOnReady(func() { calls++ })
+	if c.onReady == nil {
+		t.Fatal("expected onReady to be set")
+	}
+	c.onReady()
+	if calls != 1 {
+		t.Fatalf("expected onReady to be called once, got %d", calls)
+	}
+}
 
 func TestAppendUnique_NewText(t *testing.T) {
 	parts := []string{"hello"}

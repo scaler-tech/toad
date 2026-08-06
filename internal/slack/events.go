@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/slack-go/slack"
@@ -185,4 +186,30 @@ func (c *Client) ResolveChannelName(channelID string) string {
 	c.channelNames[channelID] = ch.Name
 	c.channelNamesMu.Unlock()
 	return ch.Name
+}
+
+// ChannelInfo is a minimal (id, name) pair for a Slack channel — the shape
+// the dashboard needs to render a channel picker without a live Slack
+// connection of its own.
+type ChannelInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// ChannelSnapshot returns every channel currently known to this client's
+// id↔name cache — populated during auto-join/configured-channel resolution
+// in Run(), and grown further by ResolveChannelName/ResolveChannelIDByName
+// as messages arrive or lookups happen — sorted by name. The daemon uses
+// this to publish a known_channels settings row (see cmd/channels.go's
+// publishKnownChannels) that the dashboard process, which has no Slack
+// connection of its own, reads to build its per-channel digest toggle list.
+func (c *Client) ChannelSnapshot() []ChannelInfo {
+	c.channelNamesMu.RLock()
+	defer c.channelNamesMu.RUnlock()
+	out := make([]ChannelInfo, 0, len(c.channelNames))
+	for id, name := range c.channelNames {
+		out = append(out, ChannelInfo{ID: id, Name: name})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
