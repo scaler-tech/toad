@@ -77,6 +77,7 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 - On startup, `RecoverOnStartup` marks runs left in an active state (e.g. `investigating`) by a previous crash as failed, and returns any digest opportunities stuck mid-investigation so the digest engine can resume them
 - Ribbit retries once on empty result
 - Digest has a single mode (enabled/disabled); its confidence floor is `digest.min_confidence` (default 0.8 — passing it only proposes a human-gated CTA, or auto-files when Sentry-corroborated)
+- Per-channel digest opt-out is runtime state, not config: the dashboard writes `digest_channel:<id>` = `"off"` rows to the shared `settings` table (`state.DB.SetDigestChannelEnabled`/`DisabledDigestChannels`); the daemon's `digestChannelGate` (`cmd/digestgate.go`) polls it at most every 60s and fails open on a DB error, and the daemon publishes its channel inventory to the `known_channels` setting (`cmd/channels.go`) so the dashboard — which has no Slack connection of its own — can render the toggle list
 - The "Create Linear ticket" CTA button appears on proposed (non-auto-filed) findings — both from a triggered Slack-thread investigation and from a digest proposal
 - An hourly outcome poller (`cmd/outcomes.go`) checks `ticket_index` entries against Linear for status changes and logs transitions — visibility only, it never changes toad's filing behavior
 - Linear ticket comments (up to 20) are fetched alongside issue details for investigation context

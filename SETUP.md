@@ -249,7 +249,7 @@ digest:
   # bot_list: []
 ```
 
-This is Toad King: passive batch analysis of channel traffic that feeds the same investigate-then-gate flow as triggered messages, never spawning anything of its own — it proposes via Slack CTA or auto-files only when Sentry-corroborated (see `ticket.auto_file` above). Digest has a single mode: `enabled: true` or `false`. The confidence floor is `min_confidence` (default 0.8; passing it only proposes a human-gated CTA, or auto-files when Sentry-corroborated). `bot_list`, if set, restricts which bot IDs the digest will actively engage with — leave empty to consider all.
+This is Toad King: passive batch analysis of channel traffic that feeds the same investigate-then-gate flow as triggered messages, never spawning anything of its own — it proposes via Slack CTA or auto-files only when Sentry-corroborated (see `ticket.auto_file` above). Digest has a single mode: `enabled: true` or `false`. The confidence floor is `min_confidence` (default 0.8; passing it only proposes a human-gated CTA, or auto-files when Sentry-corroborated). `bot_list`, if set, restricts which bot IDs the digest will actively engage with — leave empty to consider all. Per-channel opt-out (e.g. to keep the digest out of marketing/personal channels) is runtime state managed from the dashboard's System tab, not config — toggles take effect within about a minute, no restart needed.
 
 ### `issue_tracker`
 
