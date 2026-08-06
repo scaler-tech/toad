@@ -31,8 +31,16 @@ type IssueStatus struct {
 	State        string    // e.g. "In Progress", "Todo", "Done"
 	StateType    string    // Linear workflow state type: triage/backlog/unstarted/started/completed/canceled (empty if unknown/unsupported)
 	AssigneeName string    // display name of assignee, empty if unassigned
+	DelegateName string    // display name of the agent this issue is delegated to (Linear's native delegate field), empty if none
 	AssignedAt   time.Time // when the issue was last updated (proxy for assignment recency)
 	InternalID   string    // provider's internal UUID (needed for mutations)
+}
+
+// IsDelegated reports whether the issue has been delegated to an agent (e.g.
+// Biome) via Linear's native delegate field. Once delegated, the ticket has
+// moved past toad's area of influence — toad must not comment on it.
+func (s *IssueStatus) IsDelegated() bool {
+	return s.DelegateName != ""
 }
 
 // terminalStates lists issue states that mean the work is finished.

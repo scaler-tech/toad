@@ -1059,6 +1059,90 @@ func TestGetIssueStatus_Unassigned(t *testing.T) {
 	}
 }
 
+// TestGetIssueStatus_Delegated confirms the GraphQL response's delegate
+// field is parsed into IssueStatus.DelegateName.
+func TestGetIssueStatus_Delegated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issues": map[string]any{
+					"nodes": []map[string]any{
+						{
+							"id":        "uuid-delegated",
+							"state":     map[string]any{"name": "In Progress", "type": "started"},
+							"assignee":  nil,
+							"delegate":  map[string]any{"id": "agent-uuid", "name": "Biome", "displayName": "Biome"},
+							"updatedAt": "2026-03-01T12:00:00Z",
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lt := &LinearTracker{
+		apiToken:   "token",
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+
+	status, err := lt.GetIssueStatus(context.Background(), &IssueRef{ID: "PLF-4"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status == nil {
+		t.Fatal("expected non-nil status")
+	}
+	if status.DelegateName != "Biome" {
+		t.Errorf("expected delegate 'Biome', got %q", status.DelegateName)
+	}
+	if !status.IsDelegated() {
+		t.Error("expected IsDelegated() to be true")
+	}
+}
+
+// TestGetIssueStatus_DelegateNull confirms a null delegate (the common case
+// for most issues) parses to an empty DelegateName rather than erroring.
+func TestGetIssueStatus_DelegateNull(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"issues": map[string]any{
+					"nodes": []map[string]any{
+						{
+							"id":        "uuid-no-delegate",
+							"state":     map[string]any{"name": "Todo"},
+							"assignee":  nil,
+							"delegate":  nil,
+							"updatedAt": "2026-03-01T12:00:00Z",
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	lt := &LinearTracker{
+		apiToken:   "token",
+		httpClient: &http.Client{Transport: &rewriteTransport{url: srv.URL}},
+	}
+
+	status, err := lt.GetIssueStatus(context.Background(), &IssueRef{ID: "PLF-5"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status == nil {
+		t.Fatal("expected non-nil status")
+	}
+	if status.DelegateName != "" {
+		t.Errorf("expected empty delegate, got %q", status.DelegateName)
+	}
+	if status.IsDelegated() {
+		t.Error("expected IsDelegated() to be false for a null delegate")
+	}
+}
+
 func TestGetIssueStatus_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{

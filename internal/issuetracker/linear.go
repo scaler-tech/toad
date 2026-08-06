@@ -818,6 +818,7 @@ func (lt *LinearTracker) GetIssueStatus(ctx context.Context, ref *IssueRef) (*Is
 				id
 				state { name type }
 				assignee { displayName }
+				delegate { id name displayName }
 				updatedAt
 			}
 		}
@@ -846,6 +847,11 @@ func (lt *LinearTracker) GetIssueStatus(ctx context.Context, ref *IssueRef) (*Is
 				Assignee *struct {
 					DisplayName string `json:"displayName"`
 				} `json:"assignee"`
+				Delegate *struct {
+					ID          string `json:"id"`
+					Name        string `json:"name"`
+					DisplayName string `json:"displayName"`
+				} `json:"delegate"`
 				UpdatedAt time.Time `json:"updatedAt"`
 			} `json:"nodes"`
 		} `json:"issues"`
@@ -867,6 +873,12 @@ func (lt *LinearTracker) GetIssueStatus(ctx context.Context, ref *IssueRef) (*Is
 	}
 	if node.Assignee != nil {
 		status.AssigneeName = node.Assignee.DisplayName
+	}
+	if node.Delegate != nil {
+		status.DelegateName = node.Delegate.DisplayName
+		if status.DelegateName == "" {
+			status.DelegateName = node.Delegate.Name
+		}
 	}
 	return status, nil
 }

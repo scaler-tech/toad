@@ -60,6 +60,13 @@ type fakeTracker struct {
 	postErr      error
 	cannotCreate bool
 	nilRef       bool
+
+	// status/statusErr drive GetIssueStatus, used by the reobserve delegate
+	// check. statusCalls counts invocations so tests can assert the
+	// best-effort lookup actually happened (or didn't).
+	status      *issuetracker.IssueStatus
+	statusErr   error
+	statusCalls int
 }
 
 func (t *fakeTracker) ShouldCreateIssues() bool {
@@ -79,6 +86,14 @@ func (t *fakeTracker) CreateIssue(_ context.Context, opts issuetracker.CreateIss
 		id = "TOAD-1"
 	}
 	return &issuetracker.IssueRef{Provider: "linear", ID: id, URL: "https://linear.app/toad/issue/" + id, Title: opts.Title}, nil
+}
+
+func (t *fakeTracker) GetIssueStatus(_ context.Context, _ *issuetracker.IssueRef) (*issuetracker.IssueStatus, error) {
+	t.statusCalls++
+	if t.statusErr != nil {
+		return nil, t.statusErr
+	}
+	return t.status, nil
 }
 
 func (t *fakeTracker) PostComment(_ context.Context, ref *issuetracker.IssueRef, body string) error {
@@ -315,6 +330,147 @@ func TestFileOrUpdate_Idempotent(t *testing.T) {
 	}
 	if entry.IssueID != "TOAD-7" {
 		t.Errorf("entry.IssueID = %q, want TOAD-7 unchanged", entry.IssueID)
+	}
+}
+
+// TestFileOrUpdate_ReobserveDelegatedSkipsComment covers the core delegation
+// behavior: once a ticket has a delegate (e.g. Biome), toad must stay
+// hands-off on the Linear side of a repeat observation — no PostComment —
+// while still bumping the ticket index (LastSeenAt) and reporting
+// AlreadyExisted so the Slack-side reply still says "already tracked".
+func TestFileOrUpdate_ReobserveDelegatedSkipsComment(t *testing.T) {
+	tracker := &fakeTracker{
+		nextID: "TOAD-7",
+		status: &issuetracker.IssueStatus{DelegateName: "Biome"},
+	}
+	store := newFakeStore()
+	e := New(tracker, store, config.TicketConfig{}, fixedPermalink("https://slack.example.com/thread"))
+
+	seeded := &state.TicketIndexEntry{
+		ExternalKey: "sentry:BILLING-2291",
+		IssueID:     "TOAD-EXISTING",
+		IssueURL:    "https://linear.app/toad/issue/TOAD-EXISTING",
+		Source:      string(SourceAuto),
+		CreatedAt:   time.Now().Add(-time.Hour),
+		LastSeenAt:  time.Now().Add(-time.Hour),
+	}
+	if err := store.UpsertTicketIndex(seeded); err != nil {
+		t.Fatalf("seeding ticket index: %v", err)
+	}
+
+	f := investigation.Findings{
+		Problem:        "Export fails again for empty accounts.",
+		SentryIssueIDs: []string{"BILLING-2291"},
+		Reasoning:      "Seen again in #billing-alerts.",
+	}
+
+	result, err := e.FileOrUpdate(context.Background(), f, "C123", "1722.0001", "inv-2", SourceDigest)
+	if err != nil {
+		t.Fatalf("FileOrUpdate() error = %v", err)
+	}
+	if !result.AlreadyExisted {
+		t.Error("AlreadyExisted = false, want true (Slack side must still say already tracked)")
+	}
+	if result.Ref == nil || result.Ref.ID != "TOAD-EXISTING" {
+		t.Errorf("Ref = %+v, want ID TOAD-EXISTING", result.Ref)
+	}
+	if len(tracker.commentCalls) != 0 {
+		t.Errorf("PostComment calls = %d, want 0 — toad must stay hands-off on a delegated ticket", len(tracker.commentCalls))
+	}
+	if tracker.statusCalls == 0 {
+		t.Error("expected GetIssueStatus to be called to check for a delegate")
+	}
+
+	entry, err := store.GetTicketIndex("sentry:BILLING-2291")
+	if err != nil {
+		t.Fatalf("GetTicketIndex() error = %v", err)
+	}
+	if entry.IssueID != "TOAD-EXISTING" {
+		t.Errorf("entry.IssueID = %q, want unchanged TOAD-EXISTING", entry.IssueID)
+	}
+	if !entry.LastSeenAt.After(seeded.LastSeenAt) {
+		t.Errorf("entry.LastSeenAt = %v, want bumped past seeded %v", entry.LastSeenAt, seeded.LastSeenAt)
+	}
+}
+
+// TestFileOrUpdate_ReobserveStatusFetchErrorStillComments is the regression
+// counterpart: when the best-effort delegate check itself fails (network
+// blip), reobserve must fall through to posting the comment as before —
+// commenting is better than silently dropping an observation signal.
+func TestFileOrUpdate_ReobserveStatusFetchErrorStillComments(t *testing.T) {
+	tracker := &fakeTracker{
+		nextID:    "TOAD-7",
+		statusErr: errors.New("linear status api unavailable"),
+	}
+	store := newFakeStore()
+	e := New(tracker, store, config.TicketConfig{}, nil)
+
+	seeded := &state.TicketIndexEntry{
+		ExternalKey: "sentry:BILLING-2291",
+		IssueID:     "TOAD-EXISTING",
+		IssueURL:    "https://linear.app/toad/issue/TOAD-EXISTING",
+		Source:      string(SourceAuto),
+		CreatedAt:   time.Now(),
+		LastSeenAt:  time.Now(),
+	}
+	if err := store.UpsertTicketIndex(seeded); err != nil {
+		t.Fatalf("seeding ticket index: %v", err)
+	}
+
+	f := investigation.Findings{
+		Problem:        "Export fails again for empty accounts.",
+		SentryIssueIDs: []string{"BILLING-2291"},
+	}
+
+	result, err := e.FileOrUpdate(context.Background(), f, "C123", "1722.0001", "inv-2", SourceDigest)
+	if err != nil {
+		t.Fatalf("FileOrUpdate() error = %v, want nil (status-fetch failure must not block the comment)", err)
+	}
+	if !result.AlreadyExisted {
+		t.Error("AlreadyExisted = false, want true")
+	}
+	if len(tracker.commentCalls) != 1 {
+		t.Errorf("PostComment calls = %d, want 1 (fall through to commenting on status-fetch error)", len(tracker.commentCalls))
+	}
+}
+
+// TestFileOrUpdate_ReobserveNonDelegatedStillComments is the non-delegated
+// regression: a ticket with a status but no delegate must behave exactly as
+// before — comment posted.
+func TestFileOrUpdate_ReobserveNonDelegatedStillComments(t *testing.T) {
+	tracker := &fakeTracker{
+		nextID: "TOAD-7",
+		status: &issuetracker.IssueStatus{AssigneeName: "Jane Doe"},
+	}
+	store := newFakeStore()
+	e := New(tracker, store, config.TicketConfig{}, nil)
+
+	seeded := &state.TicketIndexEntry{
+		ExternalKey: "sentry:BILLING-2291",
+		IssueID:     "TOAD-EXISTING",
+		IssueURL:    "https://linear.app/toad/issue/TOAD-EXISTING",
+		Source:      string(SourceAuto),
+		CreatedAt:   time.Now(),
+		LastSeenAt:  time.Now(),
+	}
+	if err := store.UpsertTicketIndex(seeded); err != nil {
+		t.Fatalf("seeding ticket index: %v", err)
+	}
+
+	f := investigation.Findings{
+		Problem:        "Export fails again for empty accounts.",
+		SentryIssueIDs: []string{"BILLING-2291"},
+	}
+
+	result, err := e.FileOrUpdate(context.Background(), f, "C123", "1722.0001", "inv-2", SourceDigest)
+	if err != nil {
+		t.Fatalf("FileOrUpdate() error = %v", err)
+	}
+	if !result.AlreadyExisted {
+		t.Error("AlreadyExisted = false, want true")
+	}
+	if len(tracker.commentCalls) != 1 {
+		t.Errorf("PostComment calls = %d, want 1 (non-delegated ticket must still get the re-observation comment)", len(tracker.commentCalls))
 	}
 }
 

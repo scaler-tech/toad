@@ -197,6 +197,72 @@ func TestCheckAssigneeGate_CanceledTicket(t *testing.T) {
 	}
 }
 
+func TestCheckAssigneeGate_DelegatedTicket(t *testing.T) {
+	mt := &mockTracker{status: &IssueStatus{
+		State:        "In Progress",
+		DelegateName: "Biome",
+		InternalID:   "uuid-1",
+	}}
+	gate := CheckAssigneeGate(context.Background(), mt, GateOpts{
+		IssueRef:  &IssueRef{ID: "PLF-1"},
+		StaleDays: 7,
+		Findings:  "Fix something",
+	})
+	if !gate.Gated {
+		t.Fatal("expected gated for delegated ticket")
+	}
+	if !gate.Delegated {
+		t.Error("expected Delegated=true for a ticket with a delegate")
+	}
+	if gate.Done {
+		t.Error("expected Done=false for a delegated (non-terminal) ticket")
+	}
+	if mt.commented {
+		t.Error("should NOT post a comment on a delegated ticket — toad stays hands-off")
+	}
+}
+
+// TestCheckAssigneeGate_DelegatedTakesPriorityOverAssignment covers a ticket
+// that's both delegated AND actively assigned (e.g. delegated to an agent
+// that Linear also surfaces as the assignee) — delegation must still win and
+// stay silent, not fall into the assignee-gate comment path.
+func TestCheckAssigneeGate_DelegatedTakesPriorityOverAssignment(t *testing.T) {
+	mt := &mockTracker{status: &IssueStatus{
+		State:        "In Progress",
+		AssigneeName: "Jane Doe",
+		AssignedAt:   time.Now(),
+		DelegateName: "Biome",
+		InternalID:   "uuid-1",
+	}}
+	gate := CheckAssigneeGate(context.Background(), mt, GateOpts{
+		IssueRef:  &IssueRef{ID: "PLF-1"},
+		StaleDays: 7,
+		Findings:  "Fix something",
+	})
+	if !gate.Delegated {
+		t.Error("expected Delegated=true even when an assignee is also present")
+	}
+	if mt.commented {
+		t.Error("should NOT post a comment when delegated, regardless of assignment")
+	}
+}
+
+func TestIsDelegated(t *testing.T) {
+	tests := []struct {
+		delegateName string
+		want         bool
+	}{
+		{"Biome", true},
+		{"", false},
+	}
+	for _, tt := range tests {
+		s := &IssueStatus{DelegateName: tt.delegateName}
+		if got := s.IsDelegated(); got != tt.want {
+			t.Errorf("IsDelegated() for delegate %q = %v, want %v", tt.delegateName, got, tt.want)
+		}
+	}
+}
+
 func TestIsDone(t *testing.T) {
 	tests := []struct {
 		state string

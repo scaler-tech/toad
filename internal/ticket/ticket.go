@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -187,6 +188,16 @@ func (e *Engine) FileOrUpdate(ctx context.Context, f investigation.Findings,
 // value in the upsert — Store's COALESCE guard preserves whatever is
 // already stored for those fields; only identity and last-seen are meant to
 // move here.
+//
+// Before commenting, it checks whether the ticket has since been delegated
+// to an agent (e.g. Biome) — delegation marks the intake→delivery handoff,
+// so toad must stay hands-off and skip the comment, same as
+// issuetracker.CheckAssigneeGate's silent skip on the triggered/digest
+// path. The status check is best-effort: a fetch error is NOT fatal here —
+// unlike the assignee gate, this is a repeat OBSERVATION of an already-filed
+// ticket, so silently dropping the comment on a transient network blip
+// would lose that signal entirely; falling through to comment is the safer
+// default. index bookkeeping (LastSeenAt) still happens either way.
 func (e *Engine) reobserve(ctx context.Context, existing *state.TicketIndexEntry,
 	f investigation.Findings, key, permalink string, src Source) (*FileResult, error) {
 	ref := &issuetracker.IssueRef{
@@ -195,7 +206,18 @@ func (e *Engine) reobserve(ctx context.Context, existing *state.TicketIndexEntry
 		URL:      existing.IssueURL,
 	}
 
-	if err := e.tracker.PostComment(ctx, ref, reobserveComment(f, permalink)); err != nil {
+	delegateName := ""
+	if status, err := e.tracker.GetIssueStatus(ctx, ref); err != nil {
+		slog.Warn("re-observation delegate check failed, proceeding with comment",
+			"issue", existing.IssueID, "error", err)
+	} else if status != nil {
+		delegateName = status.DelegateName
+	}
+
+	if delegateName != "" {
+		slog.Info("ticket delegated to an agent, skipping re-observation comment",
+			"issue", existing.IssueID, "delegate", delegateName)
+	} else if err := e.tracker.PostComment(ctx, ref, reobserveComment(f, permalink)); err != nil {
 		return nil, fmt.Errorf("posting re-observation comment on %s: %w", existing.IssueID, err)
 	}
 

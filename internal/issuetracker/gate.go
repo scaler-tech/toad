@@ -7,11 +7,13 @@ import (
 )
 
 // GateResult describes the outcome of checking whether a spawn should be gated
-// because the referenced ticket is actively assigned to someone or already done.
+// because the referenced ticket is actively assigned to someone, already
+// done, or delegated to an agent.
 type GateResult struct {
-	Gated  bool         // true if the spawn should be blocked
-	Done   bool         // true if the ticket is in a terminal state (Done, Canceled, etc.)
-	Status *IssueStatus // the fetched status (non-nil only when Gated)
+	Gated     bool         // true if the spawn should be blocked
+	Done      bool         // true if the ticket is in a terminal state (Done, Canceled, etc.)
+	Delegated bool         // true if the ticket is delegated to an agent (Linear's native delegate field) — toad stays hands-off
+	Status    *IssueStatus // the fetched status (non-nil only when Gated)
 }
 
 // GateOpts holds the parameters for CheckAssigneeGate.
@@ -49,6 +51,15 @@ func CheckAssigneeGate(ctx context.Context, tracker Tracker, opts GateOpts) *Gat
 		slog.Info("ticket is in terminal state, skipping silently",
 			"issue", opts.IssueRef.ID, "state", status.State)
 		return &GateResult{Gated: true, Done: true, Status: status}
+	}
+
+	// Delegated to an agent (e.g. Biome): the work has moved past toad's
+	// area of influence — silently skip, same as the terminal-state case
+	// above. No comment, no spawn.
+	if status.IsDelegated() {
+		slog.Info("ticket delegated to an agent, staying hands-off",
+			"issue", opts.IssueRef.ID, "delegate", status.DelegateName)
+		return &GateResult{Gated: true, Delegated: true, Status: status}
 	}
 
 	if !status.IsActivelyAssigned(opts.StaleDays) {

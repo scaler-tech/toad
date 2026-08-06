@@ -781,7 +781,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			})
 			if gate.Gated {
 				gatedTickets[issueRef.ID] = true
-				if !gate.Done && e.notify != nil {
+				if !gate.Done && !gate.Delegated && e.notify != nil {
 					e.notify(msg.Channel, threadTS,
 						fmt.Sprintf(":clipboard: %s is assigned to %s — I posted my findings as a comment on the ticket.",
 							issueRef.ID, gate.Status.AssigneeName))
