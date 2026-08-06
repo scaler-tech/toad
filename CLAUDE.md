@@ -84,3 +84,4 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 - Toad never comments on tickets delegated to an agent — delegation marks the intake→delivery handoff
 - GitHub Actions: `tag.yml` (manual version tagging with auto-bump) triggers `release.yml` (GoReleaser + Docker)
 - `release_notes.channel` (default empty = disabled): when set, toad posts AI-generated release notes to that Slack channel on startup, exactly once per version, tracked via the `last_announced_version` setting (`cmd/releasenotes.go`)
+- `agent.ProseStyleRules`/`ProseStyleRulesSlim` (`internal/agent/style.go`) is a shared anti-AI-slop writing-style block folded into every user-facing generation prompt — ribbit replies, investigation findings prose, release notes, and (the slim variant) digest summaries
