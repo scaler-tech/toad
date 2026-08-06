@@ -341,13 +341,22 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		})
 	}
 
+	// digestGate answers "should the digest collect from this channel?",
+	// backed by dashboard-writable settings rows (see digestgate.go) — lets
+	// the operator opt noisy/marketing/personal channels out of passive
+	// analysis at runtime, no config change or restart needed. Constructed
+	// unconditionally (not just when cfg.Digest.Enabled) since it's nil-db
+	// safe and cheap; handleMessage's digestEngine != nil check already
+	// gates the digest path as a whole.
+	digestGate := newDigestChannelGate(stateDB)
+
 	// 10. Set up message handler — dispatch into goroutines so the event loop stays responsive
 	var messageWg sync.WaitGroup
 	slackClient.OnMessage(func(ctx context.Context, msg *islack.IncomingMessage) {
 		messageWg.Add(1)
 		go func() {
 			defer messageWg.Done()
-			handleMessage(ctx, msg, triageEngine, ribbitEngine, slackClient, deps, ribbitSem, digestEngine, repoPaths, cfg.Intake.BotAllowlist)
+			handleMessage(ctx, msg, triageEngine, ribbitEngine, slackClient, deps, ribbitSem, digestEngine, digestGate, repoPaths, cfg.Intake.BotAllowlist)
 		}()
 	})
 
@@ -465,13 +474,19 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
-	// Prune expired thread memories every hour
+	// Prune expired thread memories every hour, and piggyback the known-
+	// channels re-publish (see publishKnownChannels, cmd/channels.go) on the
+	// same hourly tick — an initial publish already happens via
+	// slackClient's onReady hook (set below) right after auto-join
+	// completes, so this just keeps the dashboard's channel list current as
+	// toad joins new channels over time.
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
+				publishKnownChannels(stateDB, slackClient)
 				if n, err := stateDB.PruneThreadMemory(state.ThreadMemoryTTL); err != nil {
 					slog.Warn("thread memory prune failed", "error", err)
 				} else if n > 0 {
@@ -567,6 +582,14 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}()
+
+	// Publish the daemon's channel inventory as soon as auto-join/channel
+	// resolution completes (before the event loop starts), so the
+	// dashboard's channel toggle list is populated on first load rather than
+	// waiting up to an hour for the periodic re-publish above.
+	slackClient.SetOnReady(func() {
+		publishKnownChannels(stateDB, slackClient)
+	})
 
 	slackErr := slackClient.Run(ctx)
 	<-poolDone

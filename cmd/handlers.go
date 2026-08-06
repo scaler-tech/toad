@@ -24,6 +24,7 @@ func handleMessage(
 	deps flowDeps,
 	ribbitSem chan struct{},
 	digestEngine *digest.Engine,
+	digestGate *digestChannelGate,
 	repoPaths map[string]string,
 	botAllowlist []string,
 ) {
@@ -81,7 +82,11 @@ func handleMessage(
 	// Feed untriggered messages to digest engine (Toad King) for batch analysis.
 	// This includes bot messages (Sentry alerts, CI failures, etc.) — the digest
 	// will determine if they're actionable. Triggered messages are handled above.
-	if digestEngine != nil {
+	// digestGate.enabled gates on the CHANNEL ID (not name) — it's backed by
+	// dashboard-writable settings rows the operator uses to opt noisy/
+	// marketing/personal channels out of passive analysis without a config
+	// change or restart (see digestgate.go).
+	if digestEngine != nil && digestGate.enabled(msg.Channel) {
 		digestEngine.Collect(digest.Message{
 			Channel:     msg.Channel,
 			ChannelName: channelName,
