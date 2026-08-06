@@ -53,21 +53,22 @@ type MessageHandler func(ctx context.Context, msg *IncomingMessage)
 
 // Client manages the Slack Socket Mode connection and event routing.
 type Client struct {
-	api            *slack.Client
-	socket         *socketmode.Client
-	cfgChannels    map[string]bool // channel names from config (empty = all)
-	channels       map[string]bool // resolved channel IDs to monitor (empty when cfgChannels is empty)
-	triggers       config.Triggers
-	handler        MessageHandler
-	botUserID      string
-	seen           map[string]time.Time // dedup: key → first-seen time
-	seenMu         sync.Mutex
-	replies        map[string]time.Time // toad's own reply timestamps (channel:ts → sent time)
-	repliesMu      sync.RWMutex
-	pathScrubber   func(string) string  // replaces absolute paths with repo-relative
-	mcpHandler     *SlashCommandHandler // handles /toad slash commands
-	channelNames   map[string]string    // channelID → name cache
-	channelNamesMu sync.RWMutex
+	api              *slack.Client
+	socket           *socketmode.Client
+	cfgChannels      map[string]bool // channel names from config (empty = all)
+	channels         map[string]bool // resolved channel IDs to monitor (empty when cfgChannels is empty)
+	triggers         config.Triggers
+	handler          MessageHandler
+	botUserID        string
+	seen             map[string]time.Time // dedup: key → first-seen time
+	seenMu           sync.Mutex
+	replies          map[string]time.Time // toad's own reply timestamps (channel:ts → sent time)
+	repliesMu        sync.RWMutex
+	pathScrubber     func(string) string  // replaces absolute paths with repo-relative
+	mcpHandler       *SlashCommandHandler // handles /toad slash commands
+	channelNames     map[string]string    // channelID → name cache
+	channelIDsByName map[string]string    // channel name → ID cache (reverse of channelNames)
+	channelNamesMu   sync.RWMutex
 }
 
 // NewClient creates a new Slack client configured for Socket Mode.
@@ -88,14 +89,15 @@ func NewClient(cfg config.SlackConfig) *Client {
 	}
 
 	return &Client{
-		api:          api,
-		socket:       socket,
-		cfgChannels:  cfgChannels,
-		channels:     make(map[string]bool),
-		triggers:     cfg.Triggers,
-		seen:         make(map[string]time.Time),
-		replies:      make(map[string]time.Time),
-		channelNames: make(map[string]string),
+		api:              api,
+		socket:           socket,
+		cfgChannels:      cfgChannels,
+		channels:         make(map[string]bool),
+		triggers:         cfg.Triggers,
+		seen:             make(map[string]time.Time),
+		replies:          make(map[string]time.Time),
+		channelNames:     make(map[string]string),
+		channelIDsByName: make(map[string]string),
 	}
 }
 
@@ -598,6 +600,78 @@ func (c *Client) SetPathScrubber(repoPaths map[string]string) {
 		return
 	}
 	c.pathScrubber = buildPathScrubber(repoPaths)
+}
+
+// ResolveChannelIDByName resolves a channel name to its ID — the reverse of
+// the channelID→name cache used elsewhere (e.g. ResolveChannelName). Lists
+// public and private conversations (paginated), the same enumeration
+// joinConfiguredChannels/joinAllPublicChannels already do during auto-join,
+// and populates both directions of the cache along the way so repeated
+// lookups (of this or other names) are free afterward. Returns an error if
+// the name isn't found among channels the bot can see (e.g. it isn't a
+// member of a private channel with that name).
+func (c *Client) ResolveChannelIDByName(name string) (string, error) {
+	c.channelNamesMu.RLock()
+	if id, ok := c.channelIDsByName[name]; ok {
+		c.channelNamesMu.RUnlock()
+		return id, nil
+	}
+	c.channelNamesMu.RUnlock()
+
+	for _, chType := range []string{"public_channel", "private_channel"} {
+		cursor := ""
+		for {
+			params := &slack.GetConversationsParameters{
+				Types:           []string{chType},
+				Limit:           200,
+				Cursor:          cursor,
+				ExcludeArchived: true,
+			}
+			channels, nextCursor, err := c.api.GetConversations(params)
+			if err != nil {
+				return "", fmt.Errorf("listing %s channels: %w", chType, err)
+			}
+			c.channelNamesMu.Lock()
+			for _, ch := range channels {
+				c.channelNames[ch.ID] = ch.Name
+				c.channelIDsByName[ch.Name] = ch.ID
+			}
+			c.channelNamesMu.Unlock()
+			if nextCursor == "" {
+				break
+			}
+			cursor = nextCursor
+		}
+	}
+
+	c.channelNamesMu.RLock()
+	id, ok := c.channelIDsByName[name]
+	c.channelNamesMu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("channel %q not found (toad may not be a member)", name)
+	}
+	return id, nil
+}
+
+// PostToChannel posts a plain top-level message (not a thread reply) to the
+// named Slack channel — used for daemon-initiated announcements (e.g.
+// release notes) that aren't anchored to any existing thread. Resolves the
+// name via ResolveChannelIDByName and tracks the sent message the same way
+// ReplyInThread does, so isToadMessage/IsToadReply recognize it later.
+func (c *Client) PostToChannel(channelName, text string) (string, error) {
+	id, err := c.ResolveChannelIDByName(channelName)
+	if err != nil {
+		return "", fmt.Errorf("resolving channel %q: %w", channelName, err)
+	}
+	if c.pathScrubber != nil {
+		text = c.pathScrubber(text)
+	}
+	_, ts, err := c.api.PostMessage(id, slack.MsgOptionText(text, false))
+	if err != nil {
+		return "", fmt.Errorf("posting to channel %q: %w", channelName, err)
+	}
+	c.trackReply(id, ts)
+	return ts, nil
 }
 
 // buildPathScrubber creates a function that replaces absolute paths with repo names.
