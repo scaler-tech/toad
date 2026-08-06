@@ -448,6 +448,23 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
+	// Announce a new toad version to release_notes.channel, if configured —
+	// exactly once per version, guarded by the last_announced_version
+	// setting (see announceReleaseIfNeeded, cmd/releasenotes.go). Started
+	// here in the same bgWg-tracked group as the other startup background
+	// work (MCP server, repo sync, digest engine, outcome poller) so
+	// shutdown waits for it to finish rather than closing stateDB mid-write.
+	// Uses agentProvider (the failure-tracker-wrapped one, same as triage)
+	// with PermissionNone — no tool access needed to summarize commit
+	// subjects.
+	if cfg.ReleaseNotes.Channel != "" {
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			announceReleaseIfNeeded(ctx, cfg, stateDB, profiles, agentProvider, slackClient.PostToChannel, Version)
+		}()
+	}
+
 	// Prune expired thread memories every hour
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
