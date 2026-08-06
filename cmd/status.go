@@ -83,6 +83,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	mux.HandleFunc("/api/update", apiUpdateHandler())
 	mux.HandleFunc("/api/restart", apiRestartHandler(db))
 	mux.HandleFunc("/api/auto-update", apiAutoUpdateHandler(db))
+	mux.HandleFunc("/api/channels/digest", apiChannelDigestHandler(db))
 	mux.HandleFunc("/api/dev/info", apiDevInfoHandler(cfg))
 	mux.HandleFunc("/api/dev/download-log", apiDevDownloadLogHandler(cfg))
 	mux.HandleFunc("/api/dev/download-db", apiDevDownloadDBHandler())
@@ -123,6 +124,7 @@ type apiResponse struct {
 	Tickets            []apiTicket         `json:"tickets"`
 	Aggregates         *apiAggregates      `json:"aggregates,omitempty"`
 	Series             *apiSeries          `json:"series,omitempty"`
+	Channels           []apiChannel        `json:"channels,omitempty"`
 	AutoUpdate         bool                `json:"auto_update"`
 	AutoRestarting     bool                `json:"auto_restarting,omitempty"`
 	AutoRestartPID     int                 `json:"auto_restart_pid,omitempty"`
@@ -313,6 +315,17 @@ type apiSeries struct {
 	IntakeDaily  []int `json:"intake_daily"`
 	QAHourly     []int `json:"qa_hourly"`
 	QADaily      []int `json:"qa_daily"`
+}
+
+// apiChannel is a row in the dashboard's System-tab channel list — the merge
+// of the daemon-published channel inventory (id/name; the dashboard has no
+// Slack connection of its own, see cmd/channels.go's publishKnownChannels)
+// with the digest opt-out overrides stored under "digest_channel:<id>"
+// settings rows (state.DB.DisabledDigestChannels).
+type apiChannel struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	DigestEnabled bool   `json:"digest_enabled"`
 }
 
 // dbQueryTimeout bounds the ad-hoc timestamp-bucketing queries the dashboard
@@ -694,6 +707,25 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 			QADaily:      db.MetricSeriesDaily("qa", 30, now),
 		}
 
+		// --- Channels (System tab) --- omitted entirely (via omitempty) when
+		// the daemon hasn't published a known_channels inventory yet — the
+		// dashboard shows "channel list not yet published by daemon" rather
+		// than an empty toggle list in that case.
+		if raw, _ := db.GetSetting(knownChannelsSettingKey); raw != "" {
+			var known []knownChannel
+			if err := json.Unmarshal([]byte(raw), &known); err == nil {
+				disabled, _ := db.DisabledDigestChannels()
+				resp.Channels = make([]apiChannel, 0, len(known))
+				for _, ch := range known {
+					resp.Channels = append(resp.Channels, apiChannel{
+						ID:            ch.ID,
+						Name:          ch.Name,
+						DigestEnabled: !disabled[ch.ID],
+					})
+				}
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
@@ -852,6 +884,37 @@ func apiAutoUpdateHandler(db *state.DB) http.HandlerFunc {
 
 		v, _ := db.GetSetting("auto_update")
 		json.NewEncoder(w).Encode(map[string]any{"enabled": v == "1"})
+	}
+}
+
+// apiChannelDigestHandler handles POST /api/channels/digest?id=C..&enabled=0|1,
+// the dashboard's per-channel digest toggle. Same auth posture as
+// /api/dev/reset-log and /api/dev/reset-db (bare 127.0.0.1-bound dashboard,
+// no token — the mutation is gated on the request method only): POST
+// required, everything else 405. The write goes straight to the shared
+// SQLite state DB (WAL mode) via state.DB.SetDigestChannelEnabled — the
+// daemon process picks it up on its own next digestChannelGate refresh
+// (cmd/digestgate.go), no daemon restart or IPC needed.
+func apiChannelDigestHandler(db *state.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			json.NewEncoder(w).Encode(map[string]any{"error": "missing id"})
+			return
+		}
+		enabled := r.URL.Query().Get("enabled") == "1"
+
+		if err := db.SetDigestChannelEnabled(id, enabled); err != nil {
+			json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"id": id, "enabled": enabled})
 	}
 }
 

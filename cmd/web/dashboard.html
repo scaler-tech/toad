@@ -63,6 +63,13 @@
   .toggle.on .tk{background:var(--ink)}
   .toggle.on .tk::after{left:14px}
 
+  .ch-filter{display:block;width:100%;font-family:var(--font);font-size:13px;color:var(--ink);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:10px}
+  .ch-filter:focus-visible{outline:2px solid var(--accent);outline-offset:-1px}
+  .ch-list{max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:6px}
+  .ch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border-bottom:1px solid var(--border)}
+  .ch-row:last-child{border-bottom:none}
+  .ch-row .ch-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+
   .grid{display:grid;gap:16px}
   .cols-4{grid-template-columns:repeat(4,1fr)}
   .cols-3{grid-template-columns:repeat(3,1fr)}
@@ -339,6 +346,12 @@
         <h3>Configuration <span class="subnote" style="text-transform:none;letter-spacing:0">— as reported by the running daemon (falls back to local config file when offline)</span></h3>
         <div id="sys-config"></div>
       </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h3>Channels <span class="subnote" style="text-transform:none;letter-spacing:0" id="ch-summary"></span></h3>
+      <input type="text" id="ch-filter" class="ch-filter" placeholder="Filter channels…" autocomplete="off">
+      <div id="ch-list" class="ch-list"></div>
     </div>
 
     <div class="card">
@@ -847,6 +860,41 @@
       confHTML = `<p class="subnote">No configuration loaded.</p>`;
     }
     $("#sys-config").innerHTML = confHTML;
+
+    renderChannels(d);
+  }
+
+  // ================= render: channels card =================
+  // Toad auto-joins every public Slack channel it can (hundreds, typically),
+  // and the digest (Toad King) passively analyzes all of them by default —
+  // this card lets the operator opt individual channels out at runtime
+  // (state.DB.SetDigestChannelEnabled via POST /api/channels/digest), no
+  // config change or daemon restart needed. d.channels is absent/empty
+  // until the daemon has published at least one known_channels snapshot
+  // (see cmd/channels.go's publishKnownChannels) — until then this shows a
+  // neutral "not yet published" message rather than an empty toggle list.
+  let channelFilter = "";
+  function renderChannels(d){
+    const channels = d.channels||[];
+    if (!channels.length) {
+      $("#ch-summary").textContent = "";
+      $("#ch-list").innerHTML = '<div class="empty">Channel list not yet published by daemon.</div>';
+      return;
+    }
+    const enabledCount = channels.filter(c=>c.digest_enabled).length;
+    $("#ch-summary").textContent = `— digest active in ${enabledCount} of ${channels.length} channels`;
+
+    const q = channelFilter.trim().toLowerCase();
+    const rows = q ? channels.filter(c=>(c.name||"").toLowerCase().includes(q)) : channels;
+    if (!rows.length) {
+      $("#ch-list").innerHTML = '<div class="empty">No channels match.</div>';
+      return;
+    }
+    $("#ch-list").innerHTML = rows.map(c=>`
+      <div class="ch-row">
+        <span class="ch-name mono" title="${esc(c.name)}">#${esc(c.name)}</span>
+        <label class="toggle${c.digest_enabled?" on":""}" data-ch="${esc(c.id)}" title="digest"><span class="tk"></span> digest</label>
+      </div>`).join("");
   }
 
   // ================= main render =================
@@ -959,6 +1007,28 @@
       await fetch("/api/auto-update?enabled="+(enabling?"1":"0"), {method:"POST"});
     } catch(err) { /* next refresh resyncs from server state */ }
   }
+
+  // ================= channels card wiring =================
+  $("#ch-filter").addEventListener("input", e=>{
+    channelFilter = e.target.value;
+    if (lastData) renderChannels(lastData);
+  });
+  // Event delegation on the list container (not one listener per row) —
+  // this list can hold ~300+ rows.
+  $("#ch-list").addEventListener("click", async e=>{
+    const t = e.target.closest("label.toggle[data-ch]");
+    if (!t) return;
+    const id = t.dataset.ch;
+    const enabling = !t.classList.contains("on");
+    t.classList.toggle("on", enabling); // optimistic flip, same pattern as toggleAutoUpdate
+    if (lastData) {
+      const ch = (lastData.channels||[]).find(c=>c.id===id);
+      if (ch) ch.digest_enabled = enabling;
+    }
+    try {
+      await fetch("/api/channels/digest?id="+encodeURIComponent(id)+"&enabled="+(enabling?"1":"0"), {method:"POST"});
+    } catch(err) { /* next refresh resyncs from server state */ }
+  });
 
   // ================= tabs + range + toggles =================
   function gotoTab(t){

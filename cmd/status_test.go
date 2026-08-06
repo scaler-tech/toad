@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -229,6 +230,130 @@ func TestApiDataHandler_EmptyDBDegradesGracefully(t *testing.T) {
 	}
 	if resp.Daemon == nil || resp.Daemon.Running {
 		t.Errorf("expected daemon.running=false with no heartbeat written, got %+v", resp.Daemon)
+	}
+	if len(resp.Channels) != 0 {
+		t.Errorf("expected no channels when known_channels was never published, got %+v", resp.Channels)
+	}
+}
+
+// TestApiDataHandler_ChannelsMergesKnownChannelsWithDigestOverrides verifies
+// /api/data's channels field merges the daemon-published known_channels
+// inventory (see publishKnownChannels, channels.go) with the digest opt-out
+// overrides in DisabledDigestChannels — channels with no override default to
+// digest_enabled=true.
+func TestApiDataHandler_ChannelsMergesKnownChannelsWithDigestOverrides(t *testing.T) {
+	db := newTestDB(t)
+
+	known := []knownChannel{
+		{ID: "C1", Name: "general"},
+		{ID: "C2", Name: "marketing"},
+		{ID: "C3", Name: "engineering"},
+	}
+	data, err := json.Marshal(known)
+	if err != nil {
+		t.Fatalf("marshal known channels: %v", err)
+	}
+	if err := db.SetSetting(knownChannelsSettingKey, string(data)); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	if err := db.SetDigestChannelEnabled("C2", false); err != nil {
+		t.Fatalf("SetDigestChannelEnabled: %v", err)
+	}
+
+	handler := apiDataHandler(db, nil)
+	req := httptest.NewRequest("GET", "/api/data", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+
+	var resp apiResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v, body=%s", err, rec.Body.String())
+	}
+
+	if len(resp.Channels) != 3 {
+		t.Fatalf("expected 3 channels, got %+v", resp.Channels)
+	}
+	byID := make(map[string]apiChannel, len(resp.Channels))
+	for _, c := range resp.Channels {
+		byID[c.ID] = c
+	}
+	if !byID["C1"].DigestEnabled {
+		t.Errorf("expected C1 (no override) to be digest_enabled, got %+v", byID["C1"])
+	}
+	if byID["C2"].DigestEnabled {
+		t.Errorf("expected C2 (disabled) to be digest_enabled=false, got %+v", byID["C2"])
+	}
+	if byID["C2"].Name != "marketing" {
+		t.Errorf("expected C2 name to round-trip, got %+v", byID["C2"])
+	}
+	if !byID["C3"].DigestEnabled {
+		t.Errorf("expected C3 (no override) to be digest_enabled, got %+v", byID["C3"])
+	}
+}
+
+func TestApiChannelDigestHandler_TogglesSetting(t *testing.T) {
+	db := newTestDB(t)
+	handler := apiChannelDigestHandler(db)
+
+	// Disable a channel.
+	req := httptest.NewRequest("POST", "/api/channels/digest?id=C123&enabled=0", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status code: got %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	disabled, err := db.DisabledDigestChannels()
+	if err != nil {
+		t.Fatalf("DisabledDigestChannels: %v", err)
+	}
+	if !disabled["C123"] {
+		t.Fatalf("expected C123 to be disabled after enabled=0, got %v", disabled)
+	}
+
+	// Re-enable it.
+	req = httptest.NewRequest("POST", "/api/channels/digest?id=C123&enabled=1", nil)
+	rec = httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status code: got %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	disabled, err = db.DisabledDigestChannels()
+	if err != nil {
+		t.Fatalf("DisabledDigestChannels: %v", err)
+	}
+	if disabled["C123"] {
+		t.Fatalf("expected C123 to be re-enabled after enabled=1, got %v", disabled)
+	}
+}
+
+func TestApiChannelDigestHandler_RequiresPOST(t *testing.T) {
+	db := newTestDB(t)
+	handler := apiChannelDigestHandler(db)
+
+	req := httptest.NewRequest("GET", "/api/channels/digest?id=C123&enabled=0", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status code: got %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestApiChannelDigestHandler_MissingID(t *testing.T) {
+	db := newTestDB(t)
+	handler := apiChannelDigestHandler(db)
+
+	req := httptest.NewRequest("POST", "/api/channels/digest?enabled=1", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status code: got %d, want 200 (errors are reported in-body), body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["error"] == nil {
+		t.Fatalf("expected an error for missing id, got %+v", resp)
 	}
 }
 
