@@ -26,6 +26,7 @@ type Config struct {
 	MCP          MCPConfig          `yaml:"mcp"`
 	Intake       IntakeConfig       `yaml:"intake"`
 	Ticket       TicketConfig       `yaml:"ticket"`
+	ReleaseNotes ReleaseNotesConfig `yaml:"release_notes"`
 }
 
 type SlackConfig struct {
@@ -131,6 +132,13 @@ type TicketConfig struct {
 	AutoFile           bool    `yaml:"auto_file"`
 	AutoFileConfidence float64 `yaml:"auto_file_confidence"` // default 0.85
 	TriageStateID      string  `yaml:"triage_state_id"`
+}
+
+// ReleaseNotesConfig controls the auto-announcement toad posts to Slack when
+// it starts up running a new version. There is no separate enabled flag — a
+// non-empty Channel enables the feature; the empty default disables it.
+type ReleaseNotesConfig struct {
+	Channel string `yaml:"channel"` // channel NAME (not ID); empty disables the feature
 }
 
 type MCPServerConfig struct {
