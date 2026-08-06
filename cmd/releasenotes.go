@@ -144,8 +144,8 @@ func composeReleaseNotesMessage(
 
 	delta, err := gitCommitDelta(ctx, repoPath, oldVersion, newVersion)
 	if err != nil {
-		slog.Warn("release notes: git commit delta unavailable, posting plain version-bump line", "error", err)
-		return header
+		slog.Warn("release notes: exact release range unavailable, posting version line with compare link", "error", err)
+		return header + "\nChanges: " + compareURL(oldVersion, newVersion)
 	}
 
 	notes := generateReleaseNotesText(ctx, provider, cfg.Triage.Model, oldVersion, newVersion, delta)
@@ -174,34 +174,55 @@ func findToadRepoPath(cfg *config.Config, profiles []config.RepoProfile) (string
 }
 
 // commitDelta holds the raw commit subjects used to build the release-notes
-// prompt (and the deterministic fallback), plus whether we had to fall back
-// to "recent commits" rather than an exact tag..tag range.
+// prompt (and the deterministic fallback).
 type commitDelta struct {
-	Subjects   []string
-	RecentOnly bool // true when oldVersion/newVersion couldn't be resolved as refs
+	Subjects []string
 }
 
-// gitCommitDelta returns the commit subjects between oldVersion and
-// newVersion (as git refs, e.g. tags "v1.2.3"). If either ref is missing —
-// clones can lag tags — it falls back to the last 30 commits and sets
-// RecentOnly. Only returns an error if even that fallback fails (e.g. the
-// path isn't a git repo at all), so callers can degrade to a plain message.
+// versionTag normalizes a version string to its git tag form: releases are
+// tagged "vX.Y.Z" while the compiled-in Version constant is bare "X.Y.Z".
+// The original implementation built the range from the bare versions, so
+// "0.2.12..0.2.13" never resolved and every announcement silently summarized
+// the wrong commits via a recent-commits fallback (since removed).
+func versionTag(version string) string {
+	return "v" + strings.TrimPrefix(version, "v")
+}
+
+// gitCommitDelta returns the commit subjects between the two release tags.
+// It first fetches tags explicitly (best-effort): the periodic repo sync
+// fetches with an explicit branch refspec, which does NOT auto-follow tags —
+// the server clone's tags were observed frozen several releases behind. And
+// even a fresh tag can postdate the last sync, since the announcer runs
+// right after the post-upgrade restart.
+//
+// There is deliberately NO recent-commits fallback: an announcement built
+// from the wrong commit range confidently describes the previous releases
+// (observed live for three consecutive announcements), which is worse than
+// no notes at all. If the exact range is unavailable, the caller posts the
+// plain version line with a GitHub compare link instead.
 func gitCommitDelta(ctx context.Context, repoPath, oldVersion, newVersion string) (commitDelta, error) {
-	out, err := runGit(ctx, repoPath, "log", "--oneline", "--no-merges", oldVersion+".."+newVersion)
-	if err == nil {
-		if subs := splitCommitLines(out); len(subs) > 0 {
-			return commitDelta{Subjects: subs}, nil
-		}
-		// Range resolved but produced nothing useful (e.g. identical refs) —
-		// fall through to "recent commits" so the announcement still has
-		// something to summarize.
+	if _, err := runGit(ctx, repoPath, "fetch", "--tags", "--force", "--quiet", "origin"); err != nil {
+		slog.Warn("release notes: tag fetch failed, trying local refs", "error", err)
 	}
 
-	out, err = runGit(ctx, repoPath, "log", "--oneline", "--no-merges", "-30")
+	out, err := runGit(ctx, repoPath, "log", "--oneline", "--no-merges",
+		versionTag(oldVersion)+".."+versionTag(newVersion))
 	if err != nil {
-		return commitDelta{}, fmt.Errorf("git log fallback failed: %w", err)
+		return commitDelta{}, fmt.Errorf("resolving release range: %w", err)
 	}
-	return commitDelta{Subjects: splitCommitLines(out), RecentOnly: true}, nil
+	subs := splitCommitLines(out)
+	if len(subs) == 0 {
+		return commitDelta{}, fmt.Errorf("release range %s..%s resolved but contains no commits",
+			versionTag(oldVersion), versionTag(newVersion))
+	}
+	return commitDelta{Subjects: subs}, nil
+}
+
+// compareURL is the honest degradation when the exact commit range is
+// unavailable locally: link the reader to GitHub's own diff instead of
+// summarizing commits that may span other releases.
+func compareURL(oldVersion, newVersion string) string {
+	return "https://" + toadModulePath + "/compare/" + versionTag(oldVersion) + "..." + versionTag(newVersion)
 }
 
 // runGit runs a bounded git subcommand against repoPath and returns combined
@@ -267,9 +288,6 @@ func generateReleaseNotesText(
 // model to treat them only as source material, never as instructions.
 func buildReleaseNotesPrompt(oldVersion, newVersion string, delta commitDelta) string {
 	changeLabel := "commits since " + oldVersion
-	if delta.RecentOnly {
-		changeLabel = "the most recent commits (the exact range since " + oldVersion + " wasn't available)"
-	}
 
 	var sb strings.Builder
 	sb.WriteString("You are writing an internal Slack announcement that Toad (an internal Slack bot) ")

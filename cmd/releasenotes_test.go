@@ -213,12 +213,9 @@ func TestGitCommitDelta_ExactRange(t *testing.T) {
 	commitFile(t, dir, "c.txt", "feat: third")
 	runGitOrFail(t, dir, "tag", "v1.1.0")
 
-	delta, err := gitCommitDelta(context.Background(), dir, "v1.0.0", "v1.1.0")
+	delta, err := gitCommitDelta(context.Background(), dir, "1.0.0", "1.1.0")
 	if err != nil {
 		t.Fatalf("gitCommitDelta failed: %v", err)
-	}
-	if delta.RecentOnly {
-		t.Error("expected an exact range, not the recent-commits fallback")
 	}
 	if len(delta.Subjects) != 2 {
 		t.Fatalf("expected 2 commit subjects, got %d: %v", len(delta.Subjects), delta.Subjects)
@@ -229,22 +226,32 @@ func TestGitCommitDelta_ExactRange(t *testing.T) {
 	}
 }
 
-func TestGitCommitDelta_MissingTagFallsBackToRecent(t *testing.T) {
+// A missing tag must ERROR, never summarize unrelated commits: three
+// consecutive production announcements confidently described the previous
+// releases because a recent-commits fallback fired when tags lagged. The
+// caller degrades to a plain version line + GitHub compare link instead.
+func TestGitCommitDelta_MissingTagErrors(t *testing.T) {
 	dir := setupTestRepo(t)
 	commitFile(t, dir, "a.txt", "feat: first")
 	commitFile(t, dir, "b.txt", "fix: second")
 	runGitOrFail(t, dir, "tag", "v1.1.0")
 	// Deliberately no v1.0.0 tag — simulates a clone that lags tags.
 
-	delta, err := gitCommitDelta(context.Background(), dir, "v1.0.0", "v1.1.0")
-	if err != nil {
-		t.Fatalf("gitCommitDelta should degrade to recent-commits, not error: %v", err)
+	if _, err := gitCommitDelta(context.Background(), dir, "1.0.0", "1.1.0"); err == nil {
+		t.Fatal("expected an error when the old tag is missing — summarizing the wrong range is worse than no notes")
 	}
-	if !delta.RecentOnly {
-		t.Error("expected RecentOnly fallback when a tag is missing")
+}
+
+func TestVersionTag(t *testing.T) {
+	if versionTag("0.2.13") != "v0.2.13" || versionTag("v0.2.13") != "v0.2.13" {
+		t.Errorf("versionTag normalization broken: %q / %q", versionTag("0.2.13"), versionTag("v0.2.13"))
 	}
-	if len(delta.Subjects) != 2 {
-		t.Fatalf("expected 2 recent commit subjects, got %d: %v", len(delta.Subjects), delta.Subjects)
+}
+
+func TestCompareURL(t *testing.T) {
+	want := "https://github.com/scaler-tech/toad/compare/v0.2.12...v0.2.13"
+	if got := compareURL("0.2.12", "0.2.13"); got != want {
+		t.Errorf("compareURL = %q, want %q", got, want)
 	}
 }
 
