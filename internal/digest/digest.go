@@ -561,9 +561,16 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 
 		// Cross-batch dedup: skip if a similar opportunity was already processed recently.
 		// Uses keyword overlap to catch semantically equivalent issues with different wording.
+		// 24h window: recurring monitor alerts commonly fire hourly, and the
+		// original 1h window let every other occurrence back through — one
+		// alert produced ~16 near-identical proposals/tickets in a day
+		// (2026-08-06 incident). A recurrence inside the window is by
+		// definition already represented by the previous proposal/ticket;
+		// investigation-error dismissals stay excluded so genuine retries
+		// still happen (see InvestigationErrorPrefix).
 		if e.db != nil {
 			kw := strings.Join(opp.Keywords, ",")
-			if recent, err := e.db.HasRecentOpportunity(opp.Summary, kw, 1*time.Hour); err == nil && recent {
+			if recent, err := e.db.HasRecentOpportunity(opp.Summary, kw, 24*time.Hour); err == nil && recent {
 				slog.Info("digest skipping duplicate opportunity (similar recently processed)",
 					"summary", opp.Summary)
 				continue
@@ -736,18 +743,17 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 			if issueRef == nil {
 				issueRef = e.tracker.ExtractIssueRef(msg.Text)
 			}
-			if issueRef == nil && e.tracker.ShouldCreateIssues() {
-				ref, err := e.tracker.CreateIssue(ctx, issuetracker.CreateIssueOpts{
-					Title:       opp.Summary,
-					Description: taskDescription,
-					Category:    opp.Category,
-				})
-				if err != nil {
-					slog.Warn("failed to create issue", "error", err, "summary", opp.Summary)
-				} else {
-					issueRef = ref
-				}
-			}
+			// NO create-new fallback here. This block only DETECTS an
+			// existing referenced ticket (for the assignee gate and the
+			// terminal-state skip below) — ticket CREATION is exclusively
+			// e.propose → cmd's proposeFromDigest → ticket.Engine, which
+			// enforces Decide's corroboration/confidence gates, the
+			// ticket_index idempotency that dedups recurring alerts, and the
+			// structured ticket body. A v1-era CreateIssue fallback that
+			// survived here bypassed all of that and filed a bare-reasoning
+			// ticket for every recurrence of an hourly monitor alert
+			// (~16 duplicates on 2026-08-06) alongside the engine's own CTA
+			// proposal.
 		}
 
 		// Ticket assignee gate: if the ticket is actively assigned,
@@ -777,8 +783,7 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 				gatedTickets[issueRef.ID] = true
 				if !gate.Done && e.notify != nil {
 					e.notify(msg.Channel, threadTS,
-						fmt.Sprintf(":clipboard: %s is assigned to %s — I posted my findings as a comment on the ticket. "+
-							"Say `@toad fix this` if you'd like me to investigate anyway.",
+						fmt.Sprintf(":clipboard: %s is assigned to %s — I posted my findings as a comment on the ticket.",
 							issueRef.ID, gate.Status.AssigneeName))
 				}
 				if e.unclaim != nil {

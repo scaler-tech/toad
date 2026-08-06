@@ -195,6 +195,42 @@ func isSentryCorroborated(botID string, allowlist []string) bool {
 //
 // Nil-safe — a no-op when f is nil — so callers can pass a possibly-nil
 // *Findings without a separate guard.
+// enforceExplicitDestinations clears model-extracted Linear destination and
+// assignee fields whose value does not literally appear in the triggering
+// message's own text. The investigation prompt already says "verbatim only,
+// never infer" — but a prompt rule is not enforcement: on 2026-08-06 the
+// model inferred a different team per recurrence of the same monitor alert,
+// scattering duplicate tickets across three teams. The deterministic rule:
+// a team/project/assignee is honored only when the reporter's own words
+// contain it (case-insensitive substring). The literal "requester" token is
+// exempt — it is substituted by cmd code, never model-invented. Applied at
+// every filing path alongside enforceCorroboration, including on reused
+// records (destinations persisted in findings_json must re-qualify against
+// the CURRENT request's text).
+func enforceExplicitDestinations(f *investigation.Findings, requestText string) {
+	lower := strings.ToLower(requestText)
+	appears := func(s string) bool { return s != "" && strings.Contains(lower, strings.ToLower(s)) }
+	if f.LinearTeam != "" && !appears(f.LinearTeam) {
+		slog.Info("dropping inferred linear_team (not in request text)", "team", f.LinearTeam)
+		f.LinearTeam = ""
+	}
+	if f.LinearProject != "" && !appears(f.LinearProject) {
+		slog.Info("dropping inferred linear_project (not in request text)", "project", f.LinearProject)
+		f.LinearProject = ""
+	}
+	if len(f.LinearAssignees) > 0 {
+		kept := f.LinearAssignees[:0]
+		for _, a := range f.LinearAssignees {
+			if a == "requester" || appears(a) {
+				kept = append(kept, a)
+			} else {
+				slog.Info("dropping inferred linear_assignee (not in request text)", "assignee", a)
+			}
+		}
+		f.LinearAssignees = kept
+	}
+}
+
 func enforceCorroboration(f *investigation.Findings, corroborated bool, trustedRefs []string) {
 	if f == nil {
 		return
@@ -680,6 +716,7 @@ func runTriggeredInvestigation(
 	// report's own (corroborating, when sentryCorroborated) message text —
 	// not merely whatever the model happened to emit.
 	enforceCorroboration(findings, sentryCorroborated, msg.SentryRefs)
+	enforceExplicitDestinations(findings, msg.Text)
 
 	recordID := generateInvestigationID()
 	saveInvestigationRecord(db, recordID, threadTS, msg.Channel, findings)
@@ -874,6 +911,7 @@ func runTicketRequest(
 	// — the CURRENT request's own trusted refs, not whatever refs (if any)
 	// were in scope when the reused record was first produced.
 	enforceCorroboration(findings, sentryCorroborated, msg.SentryRefs)
+	enforceExplicitDestinations(findings, msg.Text)
 
 	// Re-derive the assignee/delegate mapping too, for the same reason as
 	// enforceCorroboration above: msg.User here is whoever made THIS
@@ -1219,6 +1257,7 @@ func composeDigestProposalText(f investigation.Findings) string {
 func proposeFromDigest(ctx context.Context, ticketEngine *ticket.Engine, db *state.DB, post digestPostFunc,
 	f investigation.Findings, msg digest.Message, sentryCorroborated bool) error {
 	enforceCorroboration(&f, sentryCorroborated, islack.ExtractSentryRefs(msg.Text))
+	enforceExplicitDestinations(&f, msg.Text)
 	applyLinearAssigneeMapping(&f, "", nil)
 
 	// A fresh top-level alert has no ThreadTS — its own Timestamp IS the

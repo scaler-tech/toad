@@ -689,7 +689,14 @@ func TestProcessOpportunities_TrackerExtractsRef(t *testing.T) {
 	}
 }
 
-func TestProcessOpportunities_TrackerCreatesIssue(t *testing.T) {
+// PLF-3717-adjacent regression (2026-08-06 hourly-duplicate incident): the
+// digest engine must NEVER create tickets itself — a v1-era CreateIssue
+// fallback here bypassed ticket.Engine's Decide gates, the ticket_index
+// idempotency, and the structured ticket body, filing a bare-reasoning
+// duplicate for every recurrence of an hourly monitor alert. Ticket creation
+// is exclusively e.propose → cmd → ticket.Engine; this block only DETECTS
+// existing refs for the assignee gate.
+func TestProcessOpportunities_NeverCreatesIssueDirectly(t *testing.T) {
 	cfg := &config.DigestConfig{
 		MinConfidence:     0.5,
 		AllowedCategories: []string{"bug"},
@@ -719,15 +726,13 @@ func TestProcessOpportunities_TrackerCreatesIssue(t *testing.T) {
 
 	e.processOpportunities(context.Background(), msgs, opps, map[string]bool{})
 
-	if !tracker.createCalled {
-		t.Error("expected CreateIssue to be called when no ref extracted and createIssues=true")
+	if tracker.createCalled {
+		t.Error("digest engine must never call CreateIssue directly — creation belongs to ticket.Engine via propose")
 	}
-	if proposedFindings.IssueID == "" {
-		t.Fatal("expected proposed findings to have IssueID")
+	if proposedFindings.IssueID != "" {
+		t.Errorf("expected no IssueID on proposed findings when no existing ref was detected, got %q", proposedFindings.IssueID)
 	}
-	if proposedFindings.IssueID != "PLF-99" {
-		t.Errorf("expected PLF-99, got %q", proposedFindings.IssueID)
-	}
+	_ = createdRef // fixture retained: proves a configured createRef is never used
 }
 
 func TestProcessOpportunities_TrackerNoCreateWhenDisabled(t *testing.T) {

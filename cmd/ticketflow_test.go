@@ -1749,3 +1749,31 @@ func TestProposeFromDigest_ExistingThreadTSUnchanged(t *testing.T) {
 		t.Fatalf("expected reply anchored on existing ThreadTS 400.1, got %+v", calls)
 	}
 }
+
+func TestEnforceExplicitDestinations(t *testing.T) {
+	f := investigation.Findings{
+		LinearTeam:      "Integrations team",
+		LinearProject:   "Biome",
+		LinearAssignees: []string{"requester", "dejan", "biome"},
+	}
+	// Request names the Biome project and dejan, but never the team; the
+	// model's inferred team must drop, everything explicitly named stays,
+	// and "requester" always survives (cmd-substituted, never model-invented).
+	enforceExplicitDestinations(&f, "create a ticket in the biome project and assign to me and Dejan")
+	if f.LinearTeam != "" {
+		t.Errorf("inferred team survived: %q", f.LinearTeam)
+	}
+	if f.LinearProject != "Biome" {
+		t.Errorf("explicitly named project dropped: %q", f.LinearProject)
+	}
+	want := []string{"requester", "dejan", "biome"}
+	if len(f.LinearAssignees) != 3 || f.LinearAssignees[0] != want[0] || f.LinearAssignees[1] != want[1] || f.LinearAssignees[2] != want[2] {
+		t.Errorf("assignees = %v, want %v", f.LinearAssignees, want)
+	}
+
+	f2 := investigation.Findings{LinearTeam: "Growth Platform", LinearAssignees: []string{"alice"}}
+	enforceExplicitDestinations(&f2, "jobs stuck in queued state for >1hr")
+	if f2.LinearTeam != "" || len(f2.LinearAssignees) != 0 {
+		t.Errorf("monitor-alert text must clear all inferred destinations, got team=%q assignees=%v", f2.LinearTeam, f2.LinearAssignees)
+	}
+}
