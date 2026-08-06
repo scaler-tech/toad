@@ -430,3 +430,21 @@ func TestRespond_ThreadContextTruncatedKeepsOldest(t *testing.T) {
 		t.Error("expected truncation marker for an oversized thread")
 	}
 }
+
+func TestPrompt_IncludesProseStyleRules(t *testing.T) {
+	mock := &agent.MockProvider{RunResult: &agent.RunResult{Result: "answer"}}
+	cfg := &config.Config{
+		Agent:  config.AgentConfig{Model: "sonnet"},
+		Limits: config.LimitsConfig{TimeoutMinutes: 10},
+	}
+	e := New(mock, cfg, nil)
+
+	_, err := e.Respond(context.Background(), "q", &triage.Result{}, nil, nil, "/repo", "main", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	prompt := mock.LastRunOpts().Prompt
+	if !strings.Contains(prompt, "cut deploy time from 40 to 4 minutes") {
+		t.Error("expected the shared prose style rules in the ribbit prompt")
+	}
+}
