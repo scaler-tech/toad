@@ -290,6 +290,13 @@ func TestPrompt_InstructsLinearDestinationExtraction(t *testing.T) {
 	}
 }
 
+func TestPrompt_IncludesProseStyleRules(t *testing.T) {
+	p := buildPrompt(Request{Text: "the export job double-counts refunds"})
+	if !strings.Contains(p, "cut deploy time from 40 to 4 minutes") {
+		t.Error("prompt missing the shared prose style rules")
+	}
+}
+
 func TestParseFindings_LinearAssigneesField(t *testing.T) {
 	raw := `{"feasible": true, "title": "t", "problem": "p", "root_cause": "r", "evidence": [], "scope": [], "non_goals": [], "acceptance_criteria": [], "confidence": 0.5, "repo": "biome", "sentry_issue_ids": [], "issue_id": "", "linear_team": "", "linear_project": "", "linear_assignees": ["requester", "biome"], "files_found": [], "reasoning": "x"}`
 	f, err := ParseFindings(raw)
