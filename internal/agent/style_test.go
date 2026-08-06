@@ -29,16 +29,18 @@ func TestProseStyleRules_NoStrayPercent(t *testing.T) {
 }
 
 // TestProseStyleRules_SprintfSafe belt-and-suspenders: injecting either
-// constant as a %s argument (the mechanism every current call site uses)
-// must round-trip unchanged, regardless of its content.
+// constant as a %s argument into a surrounding format string (the mechanism
+// every current call site uses) must carry the content through unchanged,
+// regardless of what it contains.
 func TestProseStyleRules_SprintfSafe(t *testing.T) {
 	for name, s := range map[string]string{
 		"ProseStyleRules":     ProseStyleRules,
 		"ProseStyleRulesSlim": ProseStyleRulesSlim,
 	} {
-		got := fmt.Sprintf("%s", s)
-		if got != s {
-			t.Errorf("%s: fmt.Sprintf round-trip mismatch", name)
+		got := fmt.Sprintf("Writing style:\n%s\n", s)
+		want := "Writing style:\n" + s + "\n"
+		if got != want {
+			t.Errorf("%s: fmt.Sprintf injection mismatch", name)
 		}
 		if strings.Contains(got, "%!") {
 			t.Errorf("%s: Sprintf output contains a formatting-error marker: %q", name, got)
