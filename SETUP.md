@@ -283,6 +283,15 @@ vcs:
 
 Used for ribbit's read-only PR/CI/issue lookups (`gh pr view`, `gh issue view`, etc. — or the `glab` equivalents). Investigations do not get `gh`/`glab` — they run with Read/Glob/Grep plus any configured MCP tools only. Per-repo overrides are supported via `repos[].vcs` with the same fields.
 
+### `release_notes`
+
+```yaml
+release_notes:
+  channel: "toad-dev"   # channel NAME; empty (default) disables the feature
+```
+
+When toad starts up running a new version (typically after the Homebrew auto-update + supervisord restart), it posts AI-generated release notes to this channel — exactly once per version, tracked via an internal setting. The first startup after enabling the feature just records the current version silently, so upgrading to *this* release doesn't itself trigger an announcement. Leave `channel` unset to disable.
+
 ### `log`
 
 ```yaml

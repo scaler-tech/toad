@@ -81,3 +81,4 @@ Toad is a Go daemon that monitors Slack channels, triages messages with Claude H
 - An hourly outcome poller (`cmd/outcomes.go`) checks `ticket_index` entries against Linear for status changes and logs transitions — visibility only, it never changes toad's filing behavior
 - Linear ticket comments (up to 20) are fetched alongside issue details for investigation context
 - GitHub Actions: `tag.yml` (manual version tagging with auto-bump) triggers `release.yml` (GoReleaser + Docker)
+- `release_notes.channel` (default empty = disabled): when set, toad posts AI-generated release notes to that Slack channel on startup, exactly once per version, tracked via the `last_announced_version` setting (`cmd/releasenotes.go`)

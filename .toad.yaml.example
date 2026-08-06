@@ -126,6 +126,12 @@ agent:
   #     auth_token_env: "TOAD_SENTRY_MCP_TOKEN"
 
 # ──────────────────────────────────────────────
+# Release Notes — announce a new toad version to Slack on startup
+# ──────────────────────────────────────────────
+# release_notes:
+#   channel: "toad-dev"   # channel NAME; empty (default) disables the feature
+
+# ──────────────────────────────────────────────
 # Logging
 # ──────────────────────────────────────────────
 log:
