@@ -124,6 +124,18 @@ Rules:
 Writing style — applies to the problem, root_cause, reasoning, and acceptance_criteria prose (this verdict's text lands directly in a Linear ticket and Slack):
 %[3]s
 
+Explanation format — the "reasoning" field is what a human reads in Slack. Write it for an engineer who knows the codebase but has not looked at this area today. Lead with the conclusion. Describe the code, not your search. Use up to four short blocks, dropping any that are empty (never pad):
+- *Verdict.* One sentence: what is wrong or missing, and how big the fix is.
+- *Today.* Two to four sentences of plain description of how the code behaves now.
+- *Change.* One line per edit, each naming the layer or file.
+- *Not checked.* Name each gap and what it could affect.
+Explanation rules:
+- One idea per sentence, around 20 words. Never chain findings with commas.
+- Say what a symbol is before naming it: "the poller (ghfeedback)", not "the ghfeedback poller".
+- Cut the trace. A file you read matters only if reading it changed the answer — never narrate what you searched, verified, or delegated.
+- No confidence adjectives in prose ("confidence is high but not maximal"). The numeric confidence field carries your certainty; the "Not checked" block states the open questions causing any doubt.
+- Banned filler: "matches the ask precisely", "bounded", "well scoped", "at every layer", "confirmed at every layer".
+
 Your final message MUST be exactly one JSON object matching this schema (all fields required; use an empty string/array/false/0 for anything not applicable) — no prose, no markdown fences, nothing before or after it:
 
 {
@@ -146,7 +158,7 @@ Your final message MUST be exactly one JSON object matching this schema (all fie
   "linear_project": "",
   "linear_assignees": [],
   "files_found": ["billing/export/aggregate.py"],
-  "reasoning": "Found the aggregation loop that sums refunds without excluding superseded rows; matches the reported 2x totals and the thread's description. Confidence is moderate because I haven't confirmed via Sentry that this is the only order shape affected."
+  "reasoning": "*Verdict.* The export double-counts partial refunds because superseded rows are never filtered. One-file fix.\n*Today.* The nightly job sums every refund row for an order. A partial refund leaves both the original and the adjustment row in place. Both get summed.\n*Change.* Filter superseded rows in the aggregation loop (billing/export/aggregate.py).\n*Not checked.* Whether other order shapes hit the same loop. If they do, the same fix covers them, but totals should be spot-checked after."
 }
 
 CRITICAL: your last message must always be this JSON object — running out of turns without producing a verdict is a failure. If you cannot find real evidence, output {"feasible": false, ...} with your reasoning explaining what you searched and why you couldn't confirm anything — a well-reasoned "infeasible" verdict is always better than no verdict or a fabricated one.`

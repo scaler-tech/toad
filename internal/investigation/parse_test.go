@@ -333,3 +333,21 @@ func TestPrompt_InstructsLinearAssigneeExtraction(t *testing.T) {
 		}
 	}
 }
+
+func TestPrompt_IncludesExplanationFormat(t *testing.T) {
+	p := buildPrompt(Request{Text: "investigate this"})
+	for _, want := range []string{
+		"Explanation format",
+		"Cut the trace",
+		"Never chain findings with commas",
+		"No confidence adjectives in prose",
+		`"the poller (ghfeedback)"`,
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing explanation-format element %q", want)
+		}
+	}
+	if !strings.Contains(p, "*Verdict.*") {
+		t.Error("schema example's reasoning should model the four-block format")
+	}
+}
