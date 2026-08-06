@@ -774,6 +774,131 @@ func TestDB_GitHubSlackMapping_Remove(t *testing.T) {
 	}
 }
 
+func TestDB_SetSetting_RoundTrip(t *testing.T) {
+	db := openTestDB(t)
+
+	if v, err := db.GetSetting("missing"); err != nil || v != "" {
+		t.Fatalf("expected empty/no-error for missing key, got %q, %v", v, err)
+	}
+
+	if err := db.SetSetting("foo", "bar"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	if v, err := db.GetSetting("foo"); err != nil || v != "bar" {
+		t.Fatalf("expected bar, got %q, %v", v, err)
+	}
+
+	// Upsert overwrites.
+	if err := db.SetSetting("foo", "baz"); err != nil {
+		t.Fatalf("SetSetting overwrite: %v", err)
+	}
+	if v, err := db.GetSetting("foo"); err != nil || v != "baz" {
+		t.Fatalf("expected baz, got %q, %v", v, err)
+	}
+}
+
+func TestDB_DeleteSetting(t *testing.T) {
+	db := openTestDB(t)
+
+	if err := db.SetSetting("foo", "bar"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	if err := db.DeleteSetting("foo"); err != nil {
+		t.Fatalf("DeleteSetting: %v", err)
+	}
+	if v, err := db.GetSetting("foo"); err != nil || v != "" {
+		t.Fatalf("expected empty after delete, got %q, %v", v, err)
+	}
+
+	// Deleting a missing key is a no-op, not an error.
+	if err := db.DeleteSetting("never-existed"); err != nil {
+		t.Fatalf("DeleteSetting on missing key: %v", err)
+	}
+}
+
+func TestDB_SetDigestChannelEnabled_RoundTrip(t *testing.T) {
+	db := openTestDB(t)
+
+	// Default: no override row means enabled.
+	disabled, err := db.DisabledDigestChannels()
+	if err != nil {
+		t.Fatalf("DisabledDigestChannels: %v", err)
+	}
+	if len(disabled) != 0 {
+		t.Fatalf("expected no disabled channels initially, got %v", disabled)
+	}
+
+	// Disabling a channel stores an "off" row.
+	if err := db.SetDigestChannelEnabled("C123", false); err != nil {
+		t.Fatalf("SetDigestChannelEnabled(false): %v", err)
+	}
+	v, err := db.GetSetting("digest_channel:C123")
+	if err != nil || v != "off" {
+		t.Fatalf("expected settings row 'off', got %q, %v", v, err)
+	}
+
+	disabled, err = db.DisabledDigestChannels()
+	if err != nil {
+		t.Fatalf("DisabledDigestChannels: %v", err)
+	}
+	if !disabled["C123"] {
+		t.Fatalf("expected C123 to be disabled, got %v", disabled)
+	}
+	if len(disabled) != 1 {
+		t.Fatalf("expected exactly one disabled channel, got %v", disabled)
+	}
+}
+
+func TestDB_SetDigestChannelEnabled_EnableRemovesRow(t *testing.T) {
+	db := openTestDB(t)
+
+	if err := db.SetDigestChannelEnabled("C123", false); err != nil {
+		t.Fatalf("SetDigestChannelEnabled(false): %v", err)
+	}
+	if err := db.SetDigestChannelEnabled("C123", true); err != nil {
+		t.Fatalf("SetDigestChannelEnabled(true): %v", err)
+	}
+
+	// The settings row must be gone entirely, not just re-marked "on".
+	v, err := db.GetSetting("digest_channel:C123")
+	if err != nil {
+		t.Fatalf("GetSetting: %v", err)
+	}
+	if v != "" {
+		t.Fatalf("expected no row after re-enabling, got %q", v)
+	}
+
+	disabled, err := db.DisabledDigestChannels()
+	if err != nil {
+		t.Fatalf("DisabledDigestChannels: %v", err)
+	}
+	if len(disabled) != 0 {
+		t.Fatalf("expected no disabled channels after re-enable, got %v", disabled)
+	}
+}
+
+func TestDB_DisabledDigestChannels_MultipleChannels(t *testing.T) {
+	db := openTestDB(t)
+
+	for _, id := range []string{"C1", "C2", "C3"} {
+		if err := db.SetDigestChannelEnabled(id, false); err != nil {
+			t.Fatalf("SetDigestChannelEnabled(%s, false): %v", id, err)
+		}
+	}
+	// Re-enable one.
+	if err := db.SetDigestChannelEnabled("C2", true); err != nil {
+		t.Fatalf("SetDigestChannelEnabled(C2, true): %v", err)
+	}
+
+	disabled, err := db.DisabledDigestChannels()
+	if err != nil {
+		t.Fatalf("DisabledDigestChannels: %v", err)
+	}
+	if len(disabled) != 2 || !disabled["C1"] || !disabled["C3"] || disabled["C2"] {
+		t.Fatalf("unexpected disabled set: %v", disabled)
+	}
+}
+
 func TestDB_MigratesToSchemaVersion12(t *testing.T) {
 	db := openTestDB(t)
 

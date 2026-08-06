@@ -922,6 +922,64 @@ func (d *DB) SetSetting(key, value string) error {
 	return err
 }
 
+// DeleteSetting removes a setting row by key. Deleting a key that doesn't
+// exist is a no-op, not an error.
+func (d *DB) DeleteSetting(key string) error {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	_, err := d.db.ExecContext(ctx, "DELETE FROM settings WHERE key = ?", key)
+	return err
+}
+
+// digestChannelSettingPrefix namespaces per-channel digest opt-out overrides
+// within the shared settings table: key "digest_channel:<channelID>" =
+// "off". Only the OFF state is ever stored — absence of a row means "on",
+// preserving the digest's existing default behavior (collect from every
+// channel toad is a member of) for every channel that has never been
+// toggled. This lets the dashboard (a separate process sharing the SQLite
+// state DB in WAL mode) opt individual channels out at runtime with no
+// schema migration and no daemon restart — the daemon's digestChannelGate
+// (cmd/digestgate.go) polls DisabledDigestChannels periodically to pick up
+// changes.
+const digestChannelSettingPrefix = "digest_channel:"
+
+// SetDigestChannelEnabled sets whether the digest should collect messages
+// from channelID. enabled=true deletes the override row (reverting to the
+// default "on" behavior); enabled=false upserts a "digest_channel:<id>" =
+// "off" row.
+func (d *DB) SetDigestChannelEnabled(channelID string, enabled bool) error {
+	key := digestChannelSettingPrefix + channelID
+	if enabled {
+		return d.DeleteSetting(key)
+	}
+	return d.SetSetting(key, "off")
+}
+
+// DisabledDigestChannels returns the set of channel IDs currently opted out
+// of the digest, keyed by channel ID with a true value (so callers can do a
+// plain map lookup: disabled[channelID]). Channels with no override row are
+// not present in the returned map — absence means "on", per
+// SetDigestChannelEnabled's doc comment.
+func (d *DB) DisabledDigestChannels() (map[string]bool, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := d.db.QueryContext(ctx, "SELECT key FROM settings WHERE key LIKE ?", digestChannelSettingPrefix+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	disabled := make(map[string]bool)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		disabled[strings.TrimPrefix(key, digestChannelSettingPrefix)] = true
+	}
+	return disabled, rows.Err()
+}
+
 // ClearDaemonStats removes daemon stats (called on clean shutdown).
 func (d *DB) ClearDaemonStats() error {
 	ctx, cancel := dbCtx()
