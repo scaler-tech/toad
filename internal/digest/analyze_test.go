@@ -2,6 +2,7 @@ package digest
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/scaler-tech/toad/internal/agent"
@@ -50,6 +51,25 @@ func TestAnalyze_RunOptsWiring(t *testing.T) {
 	}
 	if opts.Prompt == "" {
 		t.Error("expected non-empty prompt")
+	}
+}
+
+func TestPrompt_IncludesProseStyleRules(t *testing.T) {
+	mock := &agent.MockProvider{
+		RunResult: &agent.RunResult{Result: `[]`},
+	}
+	e := &Engine{
+		cfg:   &config.DigestConfig{},
+		agent: mock,
+		model: "haiku",
+	}
+	msgs := []Message{{Text: "test message", ChannelName: "general", User: "bob"}}
+	if _, err := e.analyze(context.Background(), msgs); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	prompt := mock.RunCalls[0].Prompt
+	if !strings.Contains(prompt, "never vague importance language") {
+		t.Error("expected the shared (slim) prose style rules in the digest prompt")
 	}
 }
 

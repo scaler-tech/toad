@@ -56,7 +56,9 @@ Structured alerts (Sentry, CI, monitoring bots):
 - Treat these as bug reports — the exception/error message IS the specification
 - Example: a Sentry alert with "SsoAuthException: Tenant ID mismatch" and a file path is actionable
 - Production errors are ticket-worthy even when the immediate cause looks infrastructural (DNS failures, timeouts, connection errors): resilience and error-handling improvements are valid scope, and the investigation decides feasibility — do not return [] just because no obvious code change exists
-- A transient-looking error appearing ONCE may still matter; the same error recurring ("(xN duplicates)") almost always does`
+- A transient-looking error appearing ONCE may still matter; the same error recurring ("(xN duplicates)") almost always does
+
+Writing style for the summary field: %s`
 
 // analyzeWithRetry runs analyze with the given timeout, retrying once with a
 // longer deadline if the first attempt is killed (typically by context timeout).
@@ -113,7 +115,7 @@ func (e *Engine) analyze(ctx context.Context, msgs []Message) ([]Opportunity, er
 		promptConf = 0.50
 	}
 
-	prompt := fmt.Sprintf(digestPrompt, sb.String(), repoSection, repoField, promptConf)
+	prompt := fmt.Sprintf(digestPrompt, sb.String(), repoSection, repoField, promptConf, agent.ProseStyleRulesSlim)
 
 	result, err := e.agent.Run(ctx, agent.RunOpts{
 		Prompt:      prompt,
