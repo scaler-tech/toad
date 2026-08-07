@@ -661,6 +661,113 @@ func TestDB_HasRecentOpportunity_GenuinelyDismissedStillSuppresses(t *testing.T)
 	})
 }
 
+// TestDB_HasRecentOpportunity_HumanOutcomeWindow covers the widened 7-day
+// suppression: a completed, human-visible outcome (dismissed or proposed)
+// keeps suppressing a recurrence past the tight 24h window, but an
+// investigation-error row never does, and even a human-visible outcome ages
+// out past 7 days.
+func TestDB_HasRecentOpportunity_HumanOutcomeWindow(t *testing.T) {
+	t.Run("3-day-old dismissed row suppresses", func(t *testing.T) {
+		db := openTestDB(t)
+
+		opp := &DigestOpportunity{
+			Summary:       "fix the bug",
+			Category:      "bug",
+			Channel:       "C123",
+			Reasoning:     "not feasible: already handled",
+			Dismissed:     true,
+			Investigating: false,
+			CreatedAt:     time.Now().Add(-3 * 24 * time.Hour),
+		}
+		if err := db.SaveDigestOpportunity(opp); err != nil {
+			t.Fatal(err)
+		}
+
+		has, err := db.HasRecentOpportunity("fix the bug", "", 24*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !has {
+			t.Error("expected a 3-day-old dismissed row to suppress via the human-outcome window")
+		}
+	})
+
+	t.Run("3-day-old proposed row suppresses", func(t *testing.T) {
+		db := openTestDB(t)
+
+		opp := &DigestOpportunity{
+			Summary:       "fix the bug",
+			Category:      "bug",
+			Channel:       "C123",
+			Reasoning:     "approved: root cause identified",
+			Dismissed:     false,
+			Investigating: false,
+			CreatedAt:     time.Now().Add(-3 * 24 * time.Hour),
+		}
+		if err := db.SaveDigestOpportunity(opp); err != nil {
+			t.Fatal(err)
+		}
+
+		has, err := db.HasRecentOpportunity("fix the bug", "", 24*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !has {
+			t.Error("expected a 3-day-old proposed row to suppress via the human-outcome window")
+		}
+	})
+
+	t.Run("3-day-old investigation-error row does not suppress", func(t *testing.T) {
+		db := openTestDB(t)
+
+		opp := &DigestOpportunity{
+			Summary:       "fix the bug",
+			Category:      "bug",
+			Channel:       "C123",
+			Reasoning:     InvestigationErrorPrefix + "context deadline exceeded",
+			Dismissed:     true,
+			Investigating: false,
+			CreatedAt:     time.Now().Add(-3 * 24 * time.Hour),
+		}
+		if err := db.SaveDigestOpportunity(opp); err != nil {
+			t.Fatal(err)
+		}
+
+		has, err := db.HasRecentOpportunity("fix the bug", "", 24*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if has {
+			t.Error("expected a 3-day-old investigation-error row to NOT suppress")
+		}
+	})
+
+	t.Run("8-day-old dismissed row does not suppress", func(t *testing.T) {
+		db := openTestDB(t)
+
+		opp := &DigestOpportunity{
+			Summary:       "fix the bug",
+			Category:      "bug",
+			Channel:       "C123",
+			Reasoning:     "not feasible: already handled",
+			Dismissed:     true,
+			Investigating: false,
+			CreatedAt:     time.Now().Add(-8 * 24 * time.Hour),
+		}
+		if err := db.SaveDigestOpportunity(opp); err != nil {
+			t.Fatal(err)
+		}
+
+		has, err := db.HasRecentOpportunity("fix the bug", "", 24*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if has {
+			t.Error("expected an 8-day-old dismissed row to NOT suppress (past the 7-day human-outcome window)")
+		}
+	})
+}
+
 func TestKeywordOverlap(t *testing.T) {
 	tests := []struct {
 		name   string

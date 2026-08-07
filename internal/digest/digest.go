@@ -576,6 +576,13 @@ func (e *Engine) processOpportunities(ctx context.Context, msgs []Message, oppor
 		// definition already represented by the previous proposal/ticket;
 		// investigation-error dismissals stay excluded so genuine retries
 		// still happen (see InvestigationErrorPrefix).
+		//
+		// HasRecentOpportunity also applies a second, wider 7-day window that
+		// suppresses on top of this one when the earlier row reached a
+		// completed human-visible outcome (proposed or genuinely declined) —
+		// see its doc comment. That guards against a different failure mode:
+		// a recurring alert whose family a human already dismissed/canceled
+		// days ago reappearing once the 24h window ages out.
 		if e.db != nil {
 			kw := strings.Join(opp.Keywords, ",")
 			if recent, err := e.db.HasRecentOpportunity(opp.Summary, kw, 24*time.Hour); err == nil && recent {

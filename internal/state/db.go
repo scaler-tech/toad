@@ -649,27 +649,76 @@ func (d *DB) StaleInvestigations() ([]*DigestOpportunity, error) {
 // both call sites so they can't drift apart.
 const InvestigationErrorPrefix = "investigation error: "
 
+// humanNoWindow is the widened lookback used by HasRecentOpportunity's second
+// pass: a similar opportunity that reached a completed, human-visible outcome
+// (proposed or genuinely declined) within this window keeps suppressing a
+// recurrence even after the tight 24h window has aged out. See
+// HasRecentOpportunity's doc comment for the incident that motivated it
+// (2026-08-06: humans dismissed/canceled a recurring Lumi-SLA alert family,
+// but the 24h window let a fresh proposal back in days later).
+const humanNoWindow = 7 * 24 * time.Hour
+
 // HasRecentOpportunity checks if a similar opportunity was already processed
-// within the given duration. Uses keyword overlap to catch semantically
-// equivalent issues that Haiku summarized with slightly different wording.
-// Falls back to exact summary match when keywords are unavailable.
+// recently. Uses keyword overlap to catch semantically equivalent issues that
+// Haiku summarized with slightly different wording, falling back to exact
+// summary match when keywords are unavailable.
 //
-// Rows dismissed only because investigation itself errored (Reasoning
-// starting with InvestigationErrorPrefix) are excluded from both matching
-// paths below — see that const's doc comment.
+// Two windows are checked:
+//   - within (typically 24h): ANY similar row suppresses, regardless of
+//     outcome — this catches a monitor alert firing again shortly after the
+//     first proposal/ticket already represents it.
+//   - humanNoWindow (7 days): a similar row suppresses only when it reflects
+//     a completed, human-visible outcome that wasn't acted on — dismissed
+//     (genuinely declined) or proposed (investigation approved, whether
+//     auto-filed or awaiting a CTA click). A row still mid-investigation
+//     doesn't count yet, since there's no outcome to have ignored.
+//
+// In both windows, rows dismissed only because investigation itself errored
+// (Reasoning starting with InvestigationErrorPrefix) are excluded — see that
+// const's doc comment. A transient failure must keep retrying, not suppress
+// a genuinely recurring alert for up to a week.
 func (d *DB) HasRecentOpportunity(summary string, keywords string, within time.Duration) (bool, error) {
+	found, err := d.hasRecentOpportunityWindow(summary, keywords, within, false)
+	if err != nil || found {
+		if found {
+			slog.Info("digest dedup: suppressed by recent window", "summary", summary, "window", within)
+		}
+		return found, err
+	}
+
+	found, err = d.hasRecentOpportunityWindow(summary, keywords, humanNoWindow, true)
+	if err != nil {
+		return false, err
+	}
+	if found {
+		slog.Info("digest dedup: suppressed by human-outcome window", "summary", summary, "window", humanNoWindow)
+	}
+	return found, nil
+}
+
+// hasRecentOpportunityWindow implements one window of HasRecentOpportunity's
+// suppression check. When requireCompletedOutcome is true, matches are
+// further restricted to rows that finished investigating (investigating =
+// FALSE) — used by the widened human-outcome window so an opportunity still
+// being investigated isn't treated as an ignored outcome.
+func (d *DB) hasRecentOpportunityWindow(summary string, keywords string, within time.Duration, requireCompletedOutcome bool) (bool, error) {
 	cutoff := time.Now().Add(-within)
 	errPrefixLike := InvestigationErrorPrefix + "%"
 
 	ctx, cancel := dbCtx()
 	defer cancel()
 
+	outcomeClause := ""
+	if requireCompletedOutcome {
+		outcomeClause = " AND investigating = FALSE"
+	}
+
 	// Fast path: exact summary match. SQL-side exclusion of
 	// investigation-error rows — cheap since it's just another WHERE clause
 	// on the existing COUNT query.
 	var count int
 	err := d.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM digest_opportunities WHERE summary = ? AND created_at > ? AND reasoning NOT LIKE ?",
+		"SELECT COUNT(*) FROM digest_opportunities WHERE summary = ? AND created_at > ? AND reasoning NOT LIKE ?"+outcomeClause,
 		summary, cutoff, errPrefixLike,
 	).Scan(&count)
 	if err != nil {
@@ -685,7 +734,7 @@ func (d *DB) HasRecentOpportunity(summary string, keywords string, within time.D
 	}
 
 	rows, err := d.db.QueryContext(ctx,
-		"SELECT keywords, reasoning FROM digest_opportunities WHERE created_at > ? AND keywords != ''",
+		"SELECT keywords, reasoning FROM digest_opportunities WHERE created_at > ? AND keywords != ''"+outcomeClause,
 		cutoff,
 	)
 	if err != nil {
