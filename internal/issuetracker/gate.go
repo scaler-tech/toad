@@ -74,8 +74,7 @@ func CheckAssigneeGate(ctx context.Context, tracker Tracker, opts GateOpts) *Gat
 		"## Toad investigation findings\n\n"+
 			"%s\n\n"+
 			"---\n"+
-			"_Toad detected this issue in Slack but deferred to you since you're assigned._\n"+
-			"_Say `@toad fix this` in the Slack thread to have Toad investigate anyway._",
+			"_Toad detected this issue in Slack but deferred to you since you're assigned._",
 		opts.Findings,
 	)
 	if opts.SlackPermalink != "" {
