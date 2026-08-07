@@ -41,6 +41,12 @@ Critical rules:
 - Estimated sizes: "tiny" (1-2 lines), "small" (1 file), or "medium" (2-3 files). Prefer smaller estimates, but use "medium" when the root cause clearly spans multiple files.
 - confidence must be >= %.2f to be considered
 - message_index is 0-based, referring to the message list above
+- Consider the channel name: if it looks like a client account, customer, deal, RFP, or another system's operational feed — rather than an engineering/product/team channel — apply maximum conservatism: only flag clear, reproducible product defects, never workflow/process/prompt-tuning suggestions. When unsure whether a channel is client-facing, treat it as if it is.
+
+Message provenance — each message line is prefixed with its source:
+- [user]: a human message. Evaluate per the rules above, unchanged.
+- [monitoring]: an alert from monitoring/alerting tooling (Sentry, etc). Follow the structured-alert rules below — these are bug candidates.
+- [bot]: a message from other internal automation (CI, deploy bots, agent/run-status bots). This is operational status — run progress, deploy notices, agent session updates, CI chatter — and is NEVER an opportunity UNLESS the message itself carries a concrete error or defect a human would need to file (e.g. a CI failure with a stack trace, not "build started" or "deployed to staging").
 
 Evaluating messages in a batch:
 - Evaluate EACH message individually — a batch may contain multiple unrelated requests. Return a separate opportunity for each distinct change, even if they come from the same person or channel.
@@ -92,11 +98,27 @@ func (e *Engine) analyzeWithRetry(ctx context.Context, ch chunk, timeout time.Du
 	return opps, nil
 }
 
+// provenanceLabel classifies a message's source for the analysis prompt:
+// "monitoring" for allowlisted monitoring/alerting bots (e.g. Sentry),
+// "bot" for any other bot (internal automation — CI, deploy, agent-run
+// status), and "user" for an ordinary human message.
+func provenanceLabel(msg Message) string {
+	switch {
+	case msg.IsMonitoringBot:
+		return "monitoring"
+	case msg.BotID != "":
+		return "bot"
+	default:
+		return "user"
+	}
+}
+
 func (e *Engine) analyze(ctx context.Context, msgs []Message) ([]Opportunity, error) {
-	// Format messages as numbered list
+	// Format messages as numbered list, prefixed with provenance (see the
+	// "Message provenance" prompt rules below).
 	var sb strings.Builder
 	for i, msg := range msgs {
-		fmt.Fprintf(&sb, "[%d] #%s @%s: %s\n", i, msg.ChannelName, msg.User, msg.Text)
+		fmt.Fprintf(&sb, "[%d][%s] #%s @%s: %s\n", i, provenanceLabel(msg), msg.ChannelName, msg.User, msg.Text)
 	}
 
 	repoSection := ""

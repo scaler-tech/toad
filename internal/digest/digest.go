@@ -28,6 +28,14 @@ type Message struct {
 	Timestamp   string
 	BotID       string
 
+	// IsMonitoringBot is true when BotID belongs to the configured monitoring
+	// bot allowlist (e.g. a Sentry app) — set at Collect time in
+	// cmd/handlers.go. It distinguishes structured monitoring alerts from
+	// ordinary internal-automation chatter (deploy bots, CI, agent-run
+	// status) so the analysis prompt can apply different rules to each; see
+	// the provenance labeling in analyze.go.
+	IsMonitoringBot bool
+
 	// attempts counts how many times this message has been through a chunk
 	// analysis call that ultimately errored (as opposed to succeeding with
 	// zero opportunities). Unexported/digest-package-internal: it only

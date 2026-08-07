@@ -88,13 +88,14 @@ func handleMessage(
 	// change or restart (see digestgate.go).
 	if digestEngine != nil && digestGate.enabled(msg.Channel) {
 		digestEngine.Collect(digest.Message{
-			Channel:     msg.Channel,
-			ChannelName: channelName,
-			User:        msg.User,
-			Text:        msg.Text,
-			ThreadTS:    msg.ThreadTimestamp,
-			Timestamp:   msg.Timestamp,
-			BotID:       msg.BotID,
+			Channel:         msg.Channel,
+			ChannelName:     channelName,
+			User:            msg.User,
+			Text:            msg.Text,
+			ThreadTS:        msg.ThreadTimestamp,
+			Timestamp:       msg.Timestamp,
+			BotID:           msg.BotID,
+			IsMonitoringBot: slices.Contains(botAllowlist, msg.BotID),
 		})
 	}
 
