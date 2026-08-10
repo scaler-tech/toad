@@ -3,6 +3,8 @@ package investigation
 import (
 	"strings"
 	"testing"
+
+	"github.com/scaler-tech/toad/internal/agent"
 )
 
 func TestParseFindings_CleanJSON(t *testing.T) {
@@ -292,7 +294,7 @@ func TestPrompt_InstructsLinearDestinationExtraction(t *testing.T) {
 
 func TestPrompt_IncludesProseStyleRules(t *testing.T) {
 	p := buildPrompt(Request{Text: "the export job double-counts refunds"})
-	if !strings.Contains(p, "cut deploy time from 40 to 4 minutes") {
+	if !strings.Contains(p, agent.ProseStyleRules) {
 		t.Error("prompt missing the shared prose style rules")
 	}
 }
@@ -334,20 +336,19 @@ func TestPrompt_InstructsLinearAssigneeExtraction(t *testing.T) {
 	}
 }
 
-func TestPrompt_IncludesExplanationFormat(t *testing.T) {
+func TestPrompt_ReasoningInstruction(t *testing.T) {
 	p := buildPrompt(Request{Text: "investigate this"})
 	for _, want := range []string{
-		"Explanation format",
-		"Cut the trace",
-		"Never chain findings with commas",
-		"No confidence adjectives in prose",
-		`"the poller (ghfeedback)"`,
+		"Lead with the conclusion",
+		"Describe the code, not your search",
 	} {
 		if !strings.Contains(p, want) {
-			t.Errorf("prompt missing explanation-format element %q", want)
+			t.Errorf("prompt missing reasoning instruction %q", want)
 		}
 	}
-	if !strings.Contains(p, "*Verdict.*") {
-		t.Error("schema example's reasoning should model the four-block format")
+	for _, gone := range []string{"*Verdict.*", "Explanation format", "*Not checked.*"} {
+		if strings.Contains(p, gone) {
+			t.Errorf("prompt still contains dropped template element %q", gone)
+		}
 	}
 }

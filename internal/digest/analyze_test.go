@@ -68,7 +68,7 @@ func TestPrompt_IncludesProseStyleRules(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	prompt := mock.RunCalls[0].Prompt
-	if !strings.Contains(prompt, "never vague importance language") {
+	if !strings.Contains(prompt, agent.ProseStyleRulesSlim) {
 		t.Error("expected the shared (slim) prose style rules in the digest prompt")
 	}
 }

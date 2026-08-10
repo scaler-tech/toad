@@ -332,7 +332,7 @@ func TestGenerateReleaseNotesText_Success(t *testing.T) {
 
 func TestPrompt_IncludesProseStyleRules(t *testing.T) {
 	p := buildReleaseNotesPrompt("v1.0.0", "v1.1.0", commitDelta{Subjects: []string{"fix: bug"}})
-	if !strings.Contains(p, "cut deploy time from 40 to 4 minutes") {
+	if !strings.Contains(p, agent.ProseStyleRules) {
 		t.Error("prompt missing the shared prose style rules")
 	}
 }

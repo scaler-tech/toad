@@ -444,7 +444,7 @@ func TestPrompt_IncludesProseStyleRules(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	prompt := mock.LastRunOpts().Prompt
-	if !strings.Contains(prompt, "cut deploy time from 40 to 4 minutes") {
+	if !strings.Contains(prompt, agent.ProseStyleRules) {
 		t.Error("expected the shared prose style rules in the ribbit prompt")
 	}
 }

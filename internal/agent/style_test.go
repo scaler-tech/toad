@@ -47,3 +47,18 @@ func TestProseStyleRules_SprintfSafe(t *testing.T) {
 		}
 	}
 }
+
+// TestProseStyleRules_NamesTheStandard pins both constants to ASD-STE100:
+// callers advertise Simplified Technical English to the model by name, and
+// the swap away from the old anti-slop rules is complete only when both
+// blocks say so.
+func TestProseStyleRules_NamesTheStandard(t *testing.T) {
+	for name, s := range map[string]string{
+		"ProseStyleRules":     ProseStyleRules,
+		"ProseStyleRulesSlim": ProseStyleRulesSlim,
+	} {
+		if !strings.Contains(s, "Simplified Technical English (ASD-STE100)") {
+			t.Errorf("%s does not name ASD-STE100", name)
+		}
+	}
+}
