@@ -191,6 +191,15 @@ func migrate(db *sql.DB) error {
 			count  INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (bucket, name)
 		);
+
+		CREATE TABLE IF NOT EXISTS agent_sessions (
+			session_id               TEXT PRIMARY KEY,
+			issue_id                 TEXT,
+			issue_identifier         TEXT,
+			status                   TEXT,
+			last_handled_activity_at DATETIME,
+			updated_at               DATETIME
+		);
 	`)
 	if err != nil {
 		return err
@@ -288,6 +297,17 @@ func migrate(db *sql.DB) error {
 				  bucket TEXT NOT NULL, name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
 				  PRIMARY KEY (bucket, name));
 			  ALTER TABLE investigations ADD COLUMN duration_ms INTEGER DEFAULT 0`},
+		// v13: linear agent sessions — dedup/progress record for the polled
+		// agent-session flow (internal/linearagent). New table, so CREATE TABLE
+		// IF NOT EXISTS is safe to replay; mirrored into the base schema block
+		// for fresh installs.
+		{13, `CREATE TABLE IF NOT EXISTS agent_sessions (
+			  session_id               TEXT PRIMARY KEY,
+			  issue_id                 TEXT,
+			  issue_identifier         TEXT,
+			  status                   TEXT,
+			  last_handled_activity_at DATETIME,
+			  updated_at               DATETIME)`},
 	}
 
 	// Read current schema version. If no version is stored, detect whether
@@ -1452,6 +1472,57 @@ func scanInvestigation(row *sql.Row) (*InvestigationRecord, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	return &rec, nil
+}
+
+// AgentSessionRecord is toad's handled-state for one Linear agent session.
+// LastHandledActivityAt is written only after a response posts, so a crash
+// mid-processing leaves the session detectable as unhandled on the next poll.
+type AgentSessionRecord struct {
+	SessionID             string
+	IssueID               string
+	IssueIdentifier       string
+	Status                string
+	LastHandledActivityAt time.Time
+	UpdatedAt             time.Time
+}
+
+func (d *DB) UpsertAgentSession(rec *AgentSessionRecord) error {
+	return dbRetry(func() error {
+		ctx, cancel := dbCtx()
+		defer cancel()
+		_, err := d.db.ExecContext(ctx, `INSERT OR REPLACE INTO agent_sessions
+			(session_id, issue_id, issue_identifier, status, last_handled_activity_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			rec.SessionID, rec.IssueID, rec.IssueIdentifier, rec.Status,
+			nullableTime(rec.LastHandledActivityAt), rec.UpdatedAt)
+		return err
+	})
+}
+
+func (d *DB) GetAgentSession(sessionID string) (*AgentSessionRecord, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	var rec AgentSessionRecord
+	var lastHandled sql.NullTime
+	var updated sql.NullTime
+	err := d.db.QueryRowContext(ctx, `SELECT session_id, issue_id, issue_identifier, status,
+			last_handled_activity_at, updated_at
+		FROM agent_sessions WHERE session_id = ?`, sessionID).
+		Scan(&rec.SessionID, &rec.IssueID, &rec.IssueIdentifier, &rec.Status,
+			&lastHandled, &updated)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if lastHandled.Valid {
+		rec.LastHandledActivityAt = lastHandled.Time
+	}
+	if updated.Valid {
+		rec.UpdatedAt = updated.Time
 	}
 	return &rec, nil
 }

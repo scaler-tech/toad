@@ -21,6 +21,8 @@ import (
 	"github.com/scaler-tech/toad/internal/digest"
 	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/linearagent"
+	"github.com/scaler-tech/toad/internal/linearauth"
 	toadlog "github.com/scaler-tech/toad/internal/log"
 	toadmcp "github.com/scaler-tech/toad/internal/mcp"
 	"github.com/scaler-tech/toad/internal/preflight"
@@ -117,6 +119,19 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 	defer stateDB.Close()
 
+	// Linear auth: prefer the connected OAuth app identity (toad linear
+	// connect), fall back to the personal API key. The api_token validation
+	// moved here from config.Validate because only the daemon can see the
+	// stored OAuth token.
+	linearStore := linearauth.NewStore(stateDB)
+	if cfg.IssueTracker.Enabled && cfg.IssueTracker.CreateIssues &&
+		cfg.IssueTracker.APIToken == "" && !linearStore.Connected() {
+		return fmt.Errorf("issue_tracker.create_issues is enabled but no Linear credential is configured: run 'toad linear connect' (app identity) or set TOAD_LINEAR_API_TOKEN")
+	}
+	linearAuth := linearauth.NewSource(linearStore,
+		os.Getenv("TOAD_LINEAR_CLIENT_ID"), os.Getenv("TOAD_LINEAR_CLIENT_SECRET"),
+		cfg.IssueTracker.APIToken)
+
 	// 6. Check required CLI tools
 	agentProvider, err := agent.NewProvider(cfg.Agent.Platform, cfg.Agent.FallbackAPIKeyEnv, func() {
 		incrementMetric(stateDB, "seat_fallback")
@@ -184,7 +199,7 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	triageEngine := triage.New(agentProvider, cfg.Triage.Model, profiles)
 
 	// Initialize issue tracker (before ribbit, which uses it for ticket enrichment)
-	tracker := issuetracker.NewTracker(cfg.IssueTracker)
+	tracker := issuetracker.NewTrackerWithAuth(cfg.IssueTracker, linearAuth)
 
 	// Resolve the toad home dir once — it's needed both to write the MCP
 	// config file below and to deny read-only agents access to it (it holds
@@ -387,14 +402,14 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 		"triggers", fmt.Sprintf("keywords=%v", cfg.Slack.Triggers.Keywords),
 	)
 
-	// bgWg tracks the five background goroutines below (MCP server, repo
-	// sync, digest engine's Run + ResumeInvestigations, outcome poller) —
-	// Important fix (I6): these were all bare goroutines with nothing
-	// waiting on them before shutdown closed stateDB, so any of them still
-	// mid-write when the DB closed could error or lose work. Waited on
-	// (bounded, ~35s) right before stateDB.Close() on both the normal-exit
-	// and restart/exec paths — see the wait call near the bottom of this
-	// function.
+	// bgWg tracks the six background goroutines below (MCP server, repo
+	// sync, digest engine's Run + ResumeInvestigations, the Linear agent
+	// poller, and the outcome poller). Important fix (I6): these were all
+	// bare goroutines with nothing waiting on them before shutdown closed
+	// stateDB, so any of them still mid-write when the DB closed could error
+	// or lose work. Waited on (bounded, ~35s) right before stateDB.Close()
+	// on both the normal-exit and restart/exec paths — see the wait call
+	// near the bottom of this function.
 	var bgWg sync.WaitGroup
 
 	// Start MCP server if enabled
@@ -440,6 +455,29 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 				digestEngine.ResumeInvestigations(ctx, staleOpps)
 			}()
 		}
+	}
+
+	// Linear agent sessions: answer @-mentions and delegations on Linear
+	// tickets with codebase-backed investigations. Polling-only (no inbound
+	// HTTP); starts only with a connected app identity.
+	if cfg.LinearAgent.Enabled && linearStore.Connected() {
+		agentClient := linearagent.NewClient(linearAuth)
+		processor := linearagent.NewProcessor(linearagent.ProcessorOpts{
+			Poster:      agentClient,
+			DB:          stateDB,
+			Claim:       stateManager.ClaimScoped,
+			Unclaim:     stateManager.UnclaimScoped,
+			Investigate: linearAgentInvestigate(deps),
+			Timeout:     deps.investigateTimeout,
+		})
+		poller := linearagent.NewPoller(agentClient, stateDB,
+			time.Duration(cfg.LinearAgent.PollSeconds)*time.Second, processor.Handle)
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			poller.Run(ctx)
+		}()
+		slog.Info("linear agent poller started", "interval_seconds", cfg.LinearAgent.PollSeconds)
 	}
 
 	// Outcome poller: watch what happens to tickets toad has filed so the

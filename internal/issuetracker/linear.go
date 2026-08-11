@@ -43,6 +43,8 @@ type LinearTracker struct {
 	featureLabelID string
 	createIssues   bool
 	httpClient     *http.Client
+	auth           AuthSource
+	graphqlURL     string
 
 	// teamIDMu guards team-key-to-UUID resolution. It's held across the
 	// resolution call itself, so concurrent first-callers serialize rather
@@ -83,6 +85,11 @@ type linearUserResolution struct {
 
 // NewLinearTracker creates a Linear tracker from config.
 func NewLinearTracker(cfg config.IssueTrackerConfig) *LinearTracker {
+	return NewLinearTrackerWithAuth(cfg, nil)
+}
+
+// NewLinearTrackerWithAuth creates a Linear tracker from config with an optional AuthSource.
+func NewLinearTrackerWithAuth(cfg config.IssueTrackerConfig, auth AuthSource) *LinearTracker {
 	return &LinearTracker{
 		apiToken:       cfg.APIToken,
 		teamID:         cfg.TeamID,
@@ -90,7 +97,21 @@ func NewLinearTracker(cfg config.IssueTrackerConfig) *LinearTracker {
 		featureLabelID: cfg.FeatureLabelID,
 		createIssues:   cfg.CreateIssues,
 		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		auth:           auth,
+		graphqlURL:     "https://api.linear.app/graphql",
 	}
+}
+
+// hasCredentials reports whether any Linear credential is available: the
+// personal API key, or an auth source that can produce an Authorization
+// header (a connected OAuth app token, or its API-key fallback). Guards
+// that skip API calls must use this, not a bare apiToken check — an
+// OAuth-only setup has an empty apiToken but a fully working credential.
+func (lt *LinearTracker) hasCredentials() bool {
+	if lt.apiToken != "" {
+		return true
+	}
+	return lt.auth != nil && lt.auth.AuthHeader() != ""
 }
 
 // ShouldCreateIssues reports whether auto-creation is enabled.
@@ -162,7 +183,7 @@ func issuePrefix(id string) string {
 
 // GetIssueDetails fetches the title and description of a Linear issue.
 func (lt *LinearTracker) GetIssueDetails(ctx context.Context, ref *IssueRef) (*IssueDetails, error) {
-	if lt.apiToken == "" {
+	if !lt.hasCredentials() {
 		return nil, nil
 	}
 
@@ -265,9 +286,27 @@ func parseIssueIdentifier(id string) (string, int, error) {
 	return prefix, num, nil
 }
 
+// sendGraphQL builds and sends one GraphQL POST with the given auth header.
+// The caller owns the response body.
+func (lt *LinearTracker) sendGraphQL(ctx context.Context, body []byte, authHeader string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", lt.graphqlURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", authHeader)
+	resp, err := lt.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("linear API request: %w", err)
+	}
+	return resp, nil
+}
+
 // doGraphQL sends a GraphQL request to the Linear API and returns the raw
-// response body. It handles auth headers, status code checks, and GraphQL
-// error extraction.
+// response body. When an AuthSource is present and the server returns 401, it
+// calls HandleUnauthorized for a new header and retries exactly once. With nil
+// auth, no 401 retry is attempted (legacy behavior). Checks status codes and
+// extracts GraphQL-level errors.
 func (lt *LinearTracker) doGraphQL(ctx context.Context, query string, variables map[string]any) (json.RawMessage, error) {
 	payload := map[string]any{"query": query}
 	if variables != nil {
@@ -279,22 +318,36 @@ func (lt *LinearTracker) doGraphQL(ctx context.Context, query string, variables 
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.linear.app/graphql", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+	header := lt.apiToken
+	if lt.auth != nil {
+		header = lt.auth.AuthHeader()
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", lt.apiToken)
 
-	resp, err := lt.httpClient.Do(req)
+	resp, err := lt.sendGraphQL(ctx, body, header)
 	if err != nil {
-		return nil, fmt.Errorf("linear API request: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized && lt.auth != nil {
+		newHeader, retry := lt.auth.HandleUnauthorized(ctx)
+		if !retry {
+			return nil, fmt.Errorf("linear API returned 401 and auth source could not recover")
+		}
+		resp, err = lt.sendGraphQL(ctx, body, newHeader)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		respBody, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("reading response: %w", err)
+		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -677,7 +730,7 @@ func (lt *LinearTracker) resolveAssignees(ctx context.Context, names []string) (
 
 // CreateIssue creates a new Linear issue via the GraphQL API.
 func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) (*IssueRef, error) {
-	if lt.apiToken == "" {
+	if !lt.hasCredentials() {
 		return nil, fmt.Errorf("linear API token not configured")
 	}
 	if lt.teamID == "" {
@@ -803,7 +856,7 @@ func (lt *LinearTracker) CreateIssue(ctx context.Context, opts CreateIssueOpts) 
 // Uses the issue's updatedAt as a proxy for assignment recency (Linear has no
 // first-class assignedAt field).
 func (lt *LinearTracker) GetIssueStatus(ctx context.Context, ref *IssueRef) (*IssueStatus, error) {
-	if lt.apiToken == "" {
+	if !lt.hasCredentials() {
 		return nil, nil
 	}
 
@@ -886,7 +939,7 @@ func (lt *LinearTracker) GetIssueStatus(ctx context.Context, ref *IssueRef) (*Is
 // PostComment posts a comment on a Linear issue.
 // If ref.InternalID is set, the status lookup is skipped.
 func (lt *LinearTracker) PostComment(ctx context.Context, ref *IssueRef, body string) error {
-	if lt.apiToken == "" {
+	if !lt.hasCredentials() {
 		return fmt.Errorf("linear API token not configured")
 	}
 

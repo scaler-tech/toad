@@ -835,6 +835,7 @@
         }).join("")
       : `<p class="subnote">No repos configured (or daemon offline and no local config).</p>`;
     reposHTML += `<div class="kv" style="margin-top:6px"><span>loaded</span><b>${(d.investigations||[]).length} investigations · ${(d.tickets||[]).length} tickets (last 50 each)</b></div>`;
+    reposHTML += `<div class="kv" style="margin-top:6px"><span>linear identity</span><b>${d.linear_app_connected ? 'app (connected)' : 'personal API key'}</b></div>`;
     if (dm.bot_intake_dropped) {
       reposHTML += `<div class="kv" style="margin-top:6px"><span>bot intake dropped</span><b title="Cumulative allowlisted-bot messages silently dropped (triage failure, non-actionable, claim conflict, or infeasible investigation) — see logs at Warn.">${num(dm.bot_intake_dropped)}</b></div>`;
     }

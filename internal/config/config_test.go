@@ -117,17 +117,19 @@ func TestApplyEnv_LinearToken(t *testing.T) {
 	}
 }
 
-func TestValidate_IssueTrackerCreateMissingToken(t *testing.T) {
+func TestValidate_IssueTrackerMissingTokenIsNotFatal(t *testing.T) {
 	cfg := validTestCfg()
 	cfg.Slack.AppToken = "xapp-test"
 	cfg.Slack.BotToken = "xoxb-test"
 	cfg.IssueTracker.Enabled = true
 	cfg.IssueTracker.CreateIssues = true
 	cfg.IssueTracker.TeamID = "team-123"
-	// No API token
-	err := Validate(cfg)
-	if err == nil {
-		t.Error("expected error for missing api_token when create_issues enabled")
+	cfg.IssueTracker.APIToken = ""
+	// A missing api_token must not fail Validate: OAuth (toad linear connect)
+	// may be connected, which only the daemon can see — that check moved to
+	// cmd/root.go after state.OpenDB().
+	if err := Validate(cfg); err != nil {
+		t.Errorf("missing api_token must not fail Validate (OAuth may be connected; daemon checks post-DB-open): %v", err)
 	}
 }
 
@@ -792,5 +794,15 @@ func TestValidate_MCPTLSFalseDoesNotRequireCertFiles(t *testing.T) {
 
 	if err := Validate(cfg); err != nil {
 		t.Errorf("expected no error when mcp.tls is disabled, got: %v", err)
+	}
+}
+
+func TestDefaults_LinearAgent(t *testing.T) {
+	cfg := defaults()
+	if !cfg.LinearAgent.Enabled {
+		t.Error("linear_agent.enabled should default true")
+	}
+	if cfg.LinearAgent.PollSeconds != 15 {
+		t.Errorf("poll_seconds default = %d, want 15", cfg.LinearAgent.PollSeconds)
 	}
 }

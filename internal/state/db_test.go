@@ -1006,15 +1006,15 @@ func TestDB_DisabledDigestChannels_MultipleChannels(t *testing.T) {
 	}
 }
 
-func TestDB_MigratesToSchemaVersion12(t *testing.T) {
+func TestDB_MigratesToLatestSchemaVersion(t *testing.T) {
 	db := openTestDB(t)
 
 	version, err := db.GetSetting("schema_version")
 	if err != nil {
 		t.Fatalf("GetSetting(schema_version): %v", err)
 	}
-	if version != "12" {
-		t.Errorf("schema_version: got %q, want %q", version, "12")
+	if version != "13" {
+		t.Errorf("schema_version: got %q, want %q", version, "13")
 	}
 
 	// Tables introduced in migration 10 must exist and be queryable.
@@ -1128,8 +1128,8 @@ func TestDB_MigrationV12_AddsMetricsAndDuration(t *testing.T) {
 	if err := rawDB.QueryRow(`SELECT value FROM settings WHERE key = 'schema_version'`).Scan(&version); err != nil {
 		t.Fatalf("reading schema_version: %v", err)
 	}
-	if version != "12" {
-		t.Errorf("schema_version after migrate: got %q, want %q", version, "12")
+	if version != "13" {
+		t.Errorf("schema_version after migrate: got %q, want %q", version, "13")
 	}
 }
 
@@ -1318,8 +1318,8 @@ func TestDB_MigrationV11_ForcesTokenRotation(t *testing.T) {
 	if err := rawDB.QueryRow(`SELECT value FROM settings WHERE key = 'schema_version'`).Scan(&version); err != nil {
 		t.Fatalf("reading schema_version: %v", err)
 	}
-	if version != "12" {
-		t.Errorf("schema_version after migrate: got %q, want %q", version, "12")
+	if version != "13" {
+		t.Errorf("schema_version after migrate: got %q, want %q", version, "13")
 	}
 }
 
@@ -1456,8 +1456,8 @@ func TestDB_PreVersionedDB_ProbeFreezesToV8AndRunsLaterMigrations(t *testing.T) 
 	if err := rawDB.QueryRow(`SELECT value FROM settings WHERE key = 'schema_version'`).Scan(&version); err != nil {
 		t.Fatalf("reading schema_version: %v", err)
 	}
-	if version != "12" {
-		t.Errorf("schema_version after migrate: got %q, want %q", version, "12")
+	if version != "13" {
+		t.Errorf("schema_version after migrate: got %q, want %q", version, "13")
 	}
 }
 
@@ -1548,7 +1548,7 @@ func TestIsBenignMigrationError(t *testing.T) {
 // pre-v11 schema; TestDB_MigrationV11_ForcesTokenRotation and
 // TestDB_MigrationV12_AddsMetricsAndDuration cover those.
 func TestDB_Migrate_SecondCallOnFreshDBIsNoOp(t *testing.T) {
-	db := openTestDB(t) // already migrated to v12 by OpenDBAt
+	db := openTestDB(t) // already migrated to the latest schema by OpenDBAt
 
 	if err := migrate(db.db); err != nil {
 		t.Fatalf("second migrate call should be a no-op, got error: %v", err)
@@ -1558,8 +1558,8 @@ func TestDB_Migrate_SecondCallOnFreshDBIsNoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSetting(schema_version): %v", err)
 	}
-	if version != "12" {
-		t.Errorf("schema_version after second migrate: got %q, want %q", version, "12")
+	if version != "13" {
+		t.Errorf("schema_version after second migrate: got %q, want %q", version, "13")
 	}
 }
 
@@ -1597,8 +1597,8 @@ func TestDB_MigrationIdempotent_ReopenFileBackedDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSetting(schema_version): %v", err)
 	}
-	if version != "12" {
-		t.Errorf("schema_version after reopen: got %q, want %q", version, "12")
+	if version != "13" {
+		t.Errorf("schema_version after reopen: got %q, want %q", version, "13")
 	}
 
 	entry, err := db2.GetTicketIndex("thread:C123:1722500000.000100")
@@ -2131,5 +2131,65 @@ func TestDB_MetricSeriesDaily(t *testing.T) {
 		if series[i] != want[i] {
 			t.Errorf("series[%d]: got %d, want %d (series=%v)", i, series[i], want[i], series)
 		}
+	}
+}
+
+func TestAgentSessions_UpsertAndGet(t *testing.T) {
+	db := openTestDB(t)
+	got, err := db.GetAgentSession("sess-1")
+	if err != nil || got != nil {
+		t.Fatalf("empty get = %v, %v; want nil, nil", got, err)
+	}
+	rec := &AgentSessionRecord{
+		SessionID: "sess-1", IssueID: "uuid-1", IssueIdentifier: "PLF-1",
+		Status: "active", LastHandledActivityAt: time.Now().UTC().Truncate(time.Second),
+		UpdatedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	if err := db.UpsertAgentSession(rec); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err = db.GetAgentSession("sess-1")
+	if err != nil || got == nil {
+		t.Fatalf("get: %v, %v", got, err)
+	}
+	if got.IssueIdentifier != "PLF-1" || got.Status != "active" {
+		t.Errorf("got %+v", got)
+	}
+	// Upsert overwrites.
+	rec.Status = "complete"
+	if err := db.UpsertAgentSession(rec); err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+	got, _ = db.GetAgentSession("sess-1")
+	if got.Status != "complete" {
+		t.Errorf("status = %q after re-upsert", got.Status)
+	}
+
+	// Test NULL handling for LastHandledActivityAt: upsert with zero time
+	// should store NULL, so GetAgentSession returns a zero time.IsZero()==true.
+	zeroRec := &AgentSessionRecord{
+		SessionID: "sess-2", IssueID: "uuid-2", IssueIdentifier: "PLF-2",
+		Status: "pending", LastHandledActivityAt: time.Time{}, // explicitly zero
+		UpdatedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	if err := db.UpsertAgentSession(zeroRec); err != nil {
+		t.Fatalf("upsert with zero LastHandledActivityAt: %v", err)
+	}
+	got, _ = db.GetAgentSession("sess-2")
+	if !got.LastHandledActivityAt.IsZero() {
+		t.Errorf("LastHandledActivityAt should be zero after upsert with zero time, got %v", got.LastHandledActivityAt)
+	}
+
+	// Verify the raw SQL sees NULL in the database.
+	var nullCount int
+	err = db.db.QueryRow(
+		`SELECT COUNT(*) FROM agent_sessions WHERE session_id = ? AND last_handled_activity_at IS NULL`,
+		"sess-2",
+	).Scan(&nullCount)
+	if err != nil {
+		t.Fatalf("querying NULL check: %v", err)
+	}
+	if nullCount != 1 {
+		t.Errorf("expected 1 row with NULL last_handled_activity_at, found %d", nullCount)
 	}
 }

@@ -9,6 +9,17 @@ import (
 	"github.com/scaler-tech/toad/internal/config"
 )
 
+// AuthSource supplies the Authorization header for Linear API calls and
+// reacts to a 401. Implemented by linearauth.Source; defined here
+// (consumer-side) so issuetracker does not import linearauth.
+type AuthSource interface {
+	// AuthHeader returns the current Authorization header value.
+	AuthHeader() string
+	// HandleUnauthorized is called after a 401. It returns a replacement
+	// header and whether the request should be retried (exactly once).
+	HandleUnauthorized(ctx context.Context) (string, bool)
+}
+
 // IssueDetails holds the title and description of an issue, used to enrich
 // investigation prompts with ticket context.
 type IssueDetails struct {
@@ -178,12 +189,18 @@ func (NoopTracker) PostComment(context.Context, *IssueRef, string) error        
 
 // NewTracker creates a Tracker from config. Returns NoopTracker when disabled.
 func NewTracker(cfg config.IssueTrackerConfig) Tracker {
+	return NewTrackerWithAuth(cfg, nil)
+}
+
+// NewTrackerWithAuth creates a Tracker from config with an optional AuthSource.
+// Returns NoopTracker when disabled. A nil auth behaves exactly like NewTracker.
+func NewTrackerWithAuth(cfg config.IssueTrackerConfig, auth AuthSource) Tracker {
 	if !cfg.Enabled {
 		return NoopTracker{}
 	}
 	switch cfg.Provider {
 	case "linear":
-		return NewLinearTracker(cfg)
+		return NewLinearTrackerWithAuth(cfg, auth)
 	default:
 		return NoopTracker{}
 	}

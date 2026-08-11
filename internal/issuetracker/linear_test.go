@@ -1891,3 +1891,154 @@ func TestResolveUser_ResolutionCached(t *testing.T) {
 		t.Errorf("user queries = %d, want 1 (second call must hit the cache)", queries)
 	}
 }
+
+// fakeAuth implements AuthSource for testing.
+type fakeAuth struct {
+	header      string
+	retryHeader string
+	retry       bool
+	unauthCalls int
+}
+
+func (f *fakeAuth) AuthHeader() string { return f.header }
+func (f *fakeAuth) HandleUnauthorized(ctx context.Context) (string, bool) {
+	f.unauthCalls++
+	return f.retryHeader, f.retry
+}
+
+func TestDoGraphQL_UsesAuthSourceHeader(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+
+	lt := NewLinearTrackerWithAuth(config.IssueTrackerConfig{Enabled: true, Provider: "linear"}, &fakeAuth{header: "Bearer app-token"})
+	lt.httpClient = srv.Client()
+	lt.graphqlURL = srv.URL
+
+	if _, err := lt.doGraphQL(context.Background(), `query { viewer { id } }`, nil); err != nil {
+		t.Fatalf("doGraphQL: %v", err)
+	}
+	if gotAuth != "Bearer app-token" {
+		t.Errorf("Authorization = %q, want Bearer app-token", gotAuth)
+	}
+}
+
+func TestDoGraphQL_401RetriesOnceWithNewHeader(t *testing.T) {
+	var headers []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers = append(headers, r.Header.Get("Authorization"))
+		if len(headers) == 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+
+	auth := &fakeAuth{header: "Bearer stale", retryHeader: "Bearer fresh", retry: true}
+	lt := NewLinearTrackerWithAuth(config.IssueTrackerConfig{Enabled: true, Provider: "linear"}, auth)
+	lt.httpClient = srv.Client()
+	lt.graphqlURL = srv.URL
+
+	if _, err := lt.doGraphQL(context.Background(), `query { viewer { id } }`, nil); err != nil {
+		t.Fatalf("doGraphQL after retry: %v", err)
+	}
+	if len(headers) != 2 || headers[0] != "Bearer stale" || headers[1] != "Bearer fresh" {
+		t.Errorf("headers = %v", headers)
+	}
+	if auth.unauthCalls != 1 {
+		t.Errorf("HandleUnauthorized called %d times, want 1", auth.unauthCalls)
+	}
+}
+
+func TestDoGraphQL_401NoRetryWhenSourceDeclines(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	lt := NewLinearTrackerWithAuth(config.IssueTrackerConfig{Enabled: true, Provider: "linear"}, &fakeAuth{header: "key", retry: false})
+	lt.httpClient = srv.Client()
+	lt.graphqlURL = srv.URL
+
+	if _, err := lt.doGraphQL(context.Background(), `query { viewer { id } }`, nil); err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Errorf("server called %d times, want 1 (no retry)", calls)
+	}
+}
+
+func TestDoGraphQL_NilAuthKeepsLegacyHeader(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+
+	lt := NewLinearTracker(config.IssueTrackerConfig{Enabled: true, Provider: "linear", APIToken: "personal-key"})
+	lt.httpClient = srv.Client()
+	lt.graphqlURL = srv.URL
+
+	if _, err := lt.doGraphQL(context.Background(), `query { viewer { id } }`, nil); err != nil {
+		t.Fatalf("doGraphQL: %v", err)
+	}
+	if gotAuth != "personal-key" {
+		t.Errorf("Authorization = %q, want raw personal-key", gotAuth)
+	}
+}
+
+func TestOAuthOnlyCredentials_GetIssueDetailsQueriesAPI(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte(`{"data":{"issues":{"nodes":[{"id":"uuid-1","identifier":"PLF-1","title":"T","description":"D","url":"u","comments":{"nodes":[]}}]}}}`))
+	}))
+	defer srv.Close()
+
+	// OAuth-only setup: no personal API key; the auth source carries the
+	// connected app token. The tracker must still perform lookups.
+	lt := NewLinearTrackerWithAuth(config.IssueTrackerConfig{Enabled: true, Provider: "linear"}, &fakeAuth{header: "Bearer app-tok"})
+	lt.httpClient = srv.Client()
+	lt.graphqlURL = srv.URL
+
+	details, err := lt.GetIssueDetails(context.Background(), &IssueRef{Provider: "linear", ID: "PLF-1"})
+	if err != nil {
+		t.Fatalf("GetIssueDetails: %v", err)
+	}
+	if details == nil {
+		t.Fatal("OAuth-only tracker returned nil details — empty-apiToken guard ignores the connected app token")
+	}
+	if hits == 0 {
+		t.Fatal("API was never queried")
+	}
+}
+
+func TestOAuthOnlyCredentials_PostCommentSucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":{"commentCreate":{"success":true}}}`))
+	}))
+	defer srv.Close()
+
+	lt := NewLinearTrackerWithAuth(config.IssueTrackerConfig{Enabled: true, Provider: "linear"}, &fakeAuth{header: "Bearer app-tok"})
+	lt.httpClient = srv.Client()
+	lt.graphqlURL = srv.URL
+
+	if err := lt.PostComment(context.Background(), &IssueRef{Provider: "linear", ID: "PLF-1", InternalID: "uuid-1"}, "hello"); err != nil {
+		t.Fatalf("OAuth-only PostComment: %v", err)
+	}
+}
+
+func TestNoCredentialsAtAll_GetIssueDetailsSkipsLookup(t *testing.T) {
+	lt := NewLinearTrackerWithAuth(config.IssueTrackerConfig{Enabled: true, Provider: "linear"}, &fakeAuth{header: ""})
+	details, err := lt.GetIssueDetails(context.Background(), &IssueRef{Provider: "linear", ID: "PLF-1"})
+	if err != nil || details != nil {
+		t.Fatalf("no credentials must skip lookup gracefully, got details=%v err=%v", details, err)
+	}
+}

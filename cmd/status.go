@@ -19,6 +19,7 @@ import (
 
 	"github.com/scaler-tech/toad/internal/config"
 	"github.com/scaler-tech/toad/internal/investigation"
+	"github.com/scaler-tech/toad/internal/linearauth"
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/toadpath"
 	"github.com/scaler-tech/toad/internal/update"
@@ -125,6 +126,7 @@ type apiResponse struct {
 	Aggregates         *apiAggregates      `json:"aggregates,omitempty"`
 	Series             *apiSeries          `json:"series,omitempty"`
 	Channels           []apiChannel        `json:"channels,omitempty"`
+	LinearAppConnected bool                `json:"linear_app_connected"`
 	AutoUpdate         bool                `json:"auto_update"`
 	AutoRestarting     bool                `json:"auto_restarting,omitempty"`
 	AutoRestartPID     int                 `json:"auto_restart_pid,omitempty"`
@@ -463,6 +465,7 @@ func apiDataHandler(db *state.DB, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		resp := apiResponse{Now: now.Unix()}
+		resp.LinearAppConnected = linearauth.NewStore(db).Connected()
 
 		daemonStats, _ := db.ReadDaemonStats()
 
@@ -1005,11 +1008,11 @@ func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", url) //nolint:gosec // fixed binary; url is an argv, never shell-interpreted, built from constant bases
 	case "linux":
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", url) //nolint:gosec // fixed binary; url is an argv, never shell-interpreted, built from constant bases
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url) //nolint:gosec // fixed binary; url is an argv, never shell-interpreted, built from constant bases
 	default:
 		return
 	}

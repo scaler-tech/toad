@@ -20,6 +20,7 @@ type Config struct {
 	Claude       ClaudeConfig       `yaml:"claude"` // Deprecated: use Agent.Model and Agent.AppendSystemPrompt
 	Digest       DigestConfig       `yaml:"digest"`
 	IssueTracker IssueTrackerConfig `yaml:"issue_tracker"`
+	LinearAgent  LinearAgentConfig  `yaml:"linear_agent"`
 	VCS          VCSConfig          `yaml:"vcs"`
 	Agent        AgentConfig        `yaml:"agent"`
 	Log          LogConfig          `yaml:"log"`
@@ -91,6 +92,13 @@ type IssueTrackerConfig struct {
 	FeatureLabelID   string `yaml:"feature_label_id"`
 	RespectAssignees bool   `yaml:"respect_assignees"` // defer to ticket assignee instead of spawning
 	StaleDays        int    `yaml:"stale_days"`        // assignments older than this are ignored (default: 7)
+}
+
+// LinearAgentConfig controls the polled Linear agent-session flow
+// (mentions/delegations answered with investigations).
+type LinearAgentConfig struct {
+	Enabled     bool `yaml:"enabled"`      // default: true (needs a connected app token to start)
+	PollSeconds int  `yaml:"poll_seconds"` // default: 15, min 5
 }
 
 type VCSConfig struct {
@@ -183,6 +191,10 @@ func defaults() *Config {
 			Provider:  "linear",
 			StaleDays: 7,
 		},
+		LinearAgent: LinearAgentConfig{
+			Enabled:     true,
+			PollSeconds: 15,
+		},
 		VCS: VCSConfig{
 			Platform: "github",
 		},
@@ -232,6 +244,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.Claude.AppendSystemPrompt != "" && cfg.Agent.AppendSystemPrompt == "" {
 		cfg.Agent.AppendSystemPrompt = cfg.Claude.AppendSystemPrompt
+	}
+
+	// linear_agent.poll_seconds has a floor of 5s — anything lower risks
+	// hammering the Linear API on every tick for no real latency benefit.
+	if cfg.LinearAgent.PollSeconds < 5 {
+		cfg.LinearAgent.PollSeconds = 5
 	}
 
 	// Apply defaults and normalize paths for individual repos
@@ -328,9 +346,11 @@ func Validate(cfg *Config) error {
 		return err
 	}
 	if cfg.IssueTracker.Enabled && cfg.IssueTracker.CreateIssues {
-		if cfg.IssueTracker.APIToken == "" {
-			return fmt.Errorf("issue_tracker.api_token is required when create_issues is enabled (set in config or TOAD_LINEAR_API_TOKEN env)")
-		}
+		// The api_token check lived here previously, but a missing api_token
+		// is not fatal on its own: the OAuth app identity (toad linear
+		// connect) may be connected instead, and only the daemon can see the
+		// stored OAuth token (it lives in the state DB, opened after
+		// Validate runs). See cmd/root.go, right after state.OpenDB().
 		if cfg.IssueTracker.TeamID == "" {
 			return fmt.Errorf("issue_tracker.team_id is required when create_issues is enabled")
 		}
