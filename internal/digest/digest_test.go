@@ -615,6 +615,7 @@ func TestProcessOpportunities_AlwaysReachesProposePath(t *testing.T) {
 
 // fakeTracker is a test tracker that extracts a fixed ref from matching text.
 type fakeTracker struct {
+	issuetracker.NoopTracker
 	extractRef   *issuetracker.IssueRef
 	createRef    *issuetracker.IssueRef
 	createCalled bool

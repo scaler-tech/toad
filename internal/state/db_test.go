@@ -1899,6 +1899,55 @@ func TestDB_SaveInvestigation_GetByThread(t *testing.T) {
 	}
 }
 
+func TestDB_GetInvestigationsByThread(t *testing.T) {
+	db := openTestDB(t)
+
+	older := &InvestigationRecord{
+		ID: "inv-1", ThreadTS: "t1", Channel: "C1",
+		FindingsJSON: `{"summary":"first"}`, CreatedAt: time.Now().Add(-2 * time.Hour),
+	}
+	newer := &InvestigationRecord{
+		ID: "inv-2", ThreadTS: "t1", Channel: "C1",
+		FindingsJSON: `{"summary":"second"}`, CreatedAt: time.Now().Add(-time.Hour),
+	}
+	other := &InvestigationRecord{
+		ID: "inv-3", ThreadTS: "t2", Channel: "C1",
+		FindingsJSON: `{"summary":"other thread"}`, CreatedAt: time.Now(),
+	}
+	for _, rec := range []*InvestigationRecord{older, newer, other} {
+		if err := db.SaveInvestigation(rec); err != nil {
+			t.Fatalf("SaveInvestigation(%s): %v", rec.ID, err)
+		}
+	}
+
+	recs, err := db.GetInvestigationsByThread("t1", 5)
+	if err != nil {
+		t.Fatalf("GetInvestigationsByThread: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 records for t1, got %d: %+v", len(recs), recs)
+	}
+	if recs[0].ID != "inv-2" || recs[1].ID != "inv-1" {
+		t.Errorf("expected newest-first order [inv-2, inv-1], got [%s, %s]", recs[0].ID, recs[1].ID)
+	}
+
+	limited, err := db.GetInvestigationsByThread("t1", 1)
+	if err != nil {
+		t.Fatalf("GetInvestigationsByThread (limited): %v", err)
+	}
+	if len(limited) != 1 || limited[0].ID != "inv-2" {
+		t.Errorf("expected limit to cap at the newest row, got %+v", limited)
+	}
+
+	none, err := db.GetInvestigationsByThread("nonexistent", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("expected no records for an unknown thread, got %+v", none)
+	}
+}
+
 func TestDB_GetInvestigationByThread_NotFound(t *testing.T) {
 	db := openTestDB(t)
 

@@ -986,3 +986,58 @@ func (lt *LinearTracker) PostComment(ctx context.Context, ref *IssueRef, body st
 
 	return nil
 }
+
+// UpdateIssue updates an issue's title and/or description via issueUpdate.
+// Empty fields are omitted from the mutation input so Linear leaves them
+// unchanged. If ref.InternalID is set, the status lookup is skipped.
+func (lt *LinearTracker) UpdateIssue(ctx context.Context, ref *IssueRef, opts UpdateIssueOpts) error {
+	if opts.Title == "" && opts.Description == "" {
+		return nil
+	}
+	if !lt.hasCredentials() {
+		return fmt.Errorf("linear API token not configured")
+	}
+
+	issueID := ref.InternalID
+	if issueID == "" {
+		status, err := lt.GetIssueStatus(ctx, ref)
+		if err != nil {
+			return fmt.Errorf("resolving issue for update: %w", err)
+		}
+		if status == nil || status.InternalID == "" {
+			return fmt.Errorf("issue %s not found", ref.ID)
+		}
+		issueID = status.InternalID
+	}
+
+	input := map[string]any{}
+	if opts.Title != "" {
+		input["title"] = opts.Title
+	}
+	if opts.Description != "" {
+		input["description"] = opts.Description
+	}
+
+	query := `mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+		issueUpdate(id: $id, input: $input) {
+			success
+		}
+	}`
+
+	data, err := lt.doGraphQL(ctx, query, map[string]any{"id": issueID, "input": input})
+	if err != nil {
+		return err
+	}
+	var result struct {
+		IssueUpdate struct {
+			Success bool `json:"success"`
+		} `json:"issueUpdate"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return fmt.Errorf("parsing issue update response: %w", err)
+	}
+	if !result.IssueUpdate.Success {
+		return fmt.Errorf("linear issue update failed")
+	}
+	return nil
+}

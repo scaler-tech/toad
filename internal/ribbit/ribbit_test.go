@@ -256,7 +256,57 @@ func TestRespond_NilTracker(t *testing.T) {
 	}
 }
 
+func TestPrompt_NoTicketInPlayNoteWhenNoIssueRefs(t *testing.T) {
+	mock := &agent.MockProvider{RunResult: &agent.RunResult{Result: "answer"}}
+	cfg := &config.Config{
+		Agent:  config.AgentConfig{Model: "sonnet"},
+		Limits: config.LimitsConfig{TimeoutMinutes: 5},
+	}
+	// nil tracker: fetchIssueContext short-circuits, so TicketContext stays
+	// empty regardless of the "about toad" capability blurb — that blurb
+	// must land in Capabilities now, not TicketContext (Fix 1), or this note
+	// would never fire on Slack.
+	e := New(mock, cfg, nil)
+
+	tr := &triage.Result{Summary: "test"}
+	_, err := e.Respond(context.Background(), "plain question, no ticket mentioned", tr, nil, nil, "/repo", "main", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	prompt := mock.LastRunOpts().Prompt
+	if !strings.Contains(prompt, "no ticket is in play") {
+		t.Error("expected the 'no ticket is in play' note when no ticket is linked to this conversation")
+	}
+	if !strings.Contains(prompt, "About toad (you)") {
+		t.Error("expected the toad capability blurb to still reach the prompt via Capabilities")
+	}
+}
+
+func TestPrompt_TicketInPlaySuppressesNoTicketNote(t *testing.T) {
+	mock := &agent.MockProvider{RunResult: &agent.RunResult{Result: "not json, just prose"}}
+	cfg := &config.Config{
+		Agent:  config.AgentConfig{Model: "sonnet"},
+		Limits: config.LimitsConfig{TimeoutMinutes: 5},
+	}
+	tracker := &mockTracker{
+		refs:    []*issuetracker.IssueRef{{Provider: "linear", ID: "PLF-123"}},
+		details: &issuetracker.IssueDetails{ID: "PLF-123", Title: "Nil pointer in handler"},
+	}
+	e := New(mock, cfg, tracker)
+
+	tr := &triage.Result{Summary: "test"}
+	_, err := e.Respond(context.Background(), "what's up with PLF-123?", tr, nil, nil, "/repo", "main", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	prompt := mock.LastRunOpts().Prompt
+	if strings.Contains(prompt, "no ticket is in play") {
+		t.Error("must not show the 'no ticket is in play' note when a ticket is linked to this conversation")
+	}
+}
+
 type mockTracker struct {
+	issuetracker.NoopTracker
 	refs    []*issuetracker.IssueRef
 	details *issuetracker.IssueDetails
 }
@@ -428,6 +478,45 @@ func TestRespond_ThreadContextTruncatedKeepsOldest(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "[thread truncated]") {
 		t.Error("expected truncation marker for an oversized thread")
+	}
+}
+
+func TestRespond_PassesThroughEnvelope(t *testing.T) {
+	mock := &agent.MockProvider{RunResult: &agent.RunResult{Result: `{"reply":"answer","ticket_update":{"issue":"DAT-1","comment":"c"},"did_investigate":true,"findings_summary":"looked at exports"}`}}
+	cfg := &config.Config{Agent: config.AgentConfig{Model: "sonnet"}, Limits: config.LimitsConfig{TimeoutMinutes: 10}}
+	e := New(mock, cfg, nil)
+
+	resp, err := e.Respond(context.Background(), "q", &triage.Result{}, nil, nil, "/repo", "", nil)
+	if err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	if resp.Text != "answer" {
+		t.Errorf("Text = %q", resp.Text)
+	}
+	if resp.TicketUpdate == nil || resp.TicketUpdate.Issue != "DAT-1" {
+		t.Errorf("TicketUpdate = %+v", resp.TicketUpdate)
+	}
+	if !resp.DidInvestigate || resp.FindingsSummary != "looked at exports" {
+		t.Errorf("investigate fields = %v %q", resp.DidInvestigate, resp.FindingsSummary)
+	}
+}
+
+func TestRespond_ConversationCarriesThreadAndPrior(t *testing.T) {
+	mock := &agent.MockProvider{RunResult: &agent.RunResult{Result: `{"reply":"ok"}`}}
+	cfg := &config.Config{Agent: config.AgentConfig{Model: "sonnet"}, Limits: config.LimitsConfig{TimeoutMinutes: 10}}
+	e := New(mock, cfg, nil)
+
+	prior := &PriorContext{Summary: "asked about exports", Response: "the cap was removed"}
+	_, err := e.Respond(context.Background(), "and the retry path?", &triage.Result{Summary: "follow-up"},
+		[]string{"first thread msg", "second thread msg"}, prior, "/repo", "", nil)
+	if err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	p := mock.RunCalls[0].Prompt
+	for _, want := range []string{"and the retry path?", "first thread msg", "the cap was removed"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
 	}
 }
 

@@ -26,6 +26,7 @@ import (
 	toadlog "github.com/scaler-tech/toad/internal/log"
 	toadmcp "github.com/scaler-tech/toad/internal/mcp"
 	"github.com/scaler-tech/toad/internal/preflight"
+	"github.com/scaler-tech/toad/internal/responder"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
@@ -226,6 +227,8 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	}
 
 	ribbitEngine := ribbit.New(readOnlyProvider, cfg, tracker)
+	responderEngine := responder.New(readOnlyProvider, cfg.Agent.Model,
+		time.Duration(cfg.Limits.TimeoutMinutes)*time.Minute, cfg.VCS)
 
 	// Separate concurrency pools: ribbits are fast (seconds), investigations are slow (minutes).
 	// Ribbit pool is generous so Q&A stays responsive even while investigations run.
@@ -463,12 +466,13 @@ func runDaemon(cmd *cobra.Command, args []string) error {
 	if cfg.LinearAgent.Enabled && linearStore.Connected() {
 		agentClient := linearagent.NewClient(linearAuth)
 		processor := linearagent.NewProcessor(linearagent.ProcessorOpts{
-			Poster:      agentClient,
-			DB:          stateDB,
-			Claim:       stateManager.ClaimScoped,
-			Unclaim:     stateManager.UnclaimScoped,
-			Investigate: linearAgentInvestigate(deps),
-			Timeout:     deps.investigateTimeout,
+			Poster:       agentClient,
+			DB:           stateDB,
+			Claim:        stateManager.ClaimScoped,
+			Unclaim:      stateManager.UnclaimScoped,
+			Respond:      linearAgentRespond(deps, responderEngine),
+			UpdateTicket: linearAgentUpdateTicket(deps),
+			Timeout:      deps.investigateTimeout,
 		})
 		poller := linearagent.NewPoller(agentClient, stateDB,
 			time.Duration(cfg.LinearAgent.PollSeconds)*time.Second, processor.Handle)

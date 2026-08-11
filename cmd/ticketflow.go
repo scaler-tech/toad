@@ -31,6 +31,7 @@ import (
 	"github.com/scaler-tech/toad/internal/digest"
 	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/responder"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/ticket"
@@ -55,6 +56,89 @@ var ticketRequestRe = regexp.MustCompile(`(?i)\b(?:make|create|add|file|open)\b[
 // for a ticket/issue to be created.
 func isExplicitTicketRequest(text string) bool {
 	return ticketRequestRe.MatchString(text)
+}
+
+// shouldInvestigateFirstTouch reports whether a first-touch message routes
+// to the investigate-and-gate flow. Only a bug/feature REPORT does — a
+// question or action about a bug converses via the responder instead. A
+// missing intent (older triage output, model omission) falls back to
+// report: the misroute cost is an unnecessary investigation, never a lost
+// report.
+func shouldInvestigateFirstTouch(result *triage.Result) bool {
+	if result.Category != categoryBug && result.Category != categoryFeature {
+		return false
+	}
+	if result.Confidence < 0.5 {
+		return false
+	}
+	return result.Intent == "report" || result.Intent == ""
+}
+
+// priorThreadStateWindow bounds how old thread memory or an investigation
+// record can be and still count as "prior state" for hasPriorThreadState.
+// Without a bound, a thread toad once answered converses forever — a
+// genuinely NEW bug reported months later in the same (long-lived, e.g.
+// #incidents) thread would never reach the investigate-and-file flow, so a
+// Sentry-corroborated auto-file could never trigger for it. Bounding to 7
+// days is a deliberate trade-off: a fresh conversation (follow-up within a
+// week) still converses via the responder as intended, but a stale thread
+// gets a fresh triage-routed look instead of being trapped in "we already
+// talked here" forever.
+const priorThreadStateWindow = 7 * 24 * time.Hour
+
+// hasPriorThreadState reports whether toad has already answered in this
+// thread (ribbit thread memory or a persisted investigation) WITHIN
+// priorThreadStateWindow — follow-ups in such threads converse instead of
+// re-investigating. Older rows don't count: see priorThreadStateWindow's
+// doc comment.
+func hasPriorThreadState(db *state.DB, threadTS string) bool {
+	if db == nil {
+		return false
+	}
+	if mem, err := db.GetThreadMemory(threadTS); err == nil && mem != nil && time.Since(mem.CreatedAt) < priorThreadStateWindow {
+		return true
+	}
+	if rec, err := db.GetInvestigationByThread(threadTS); err == nil && rec != nil && time.Since(rec.CreatedAt) < priorThreadStateWindow {
+		return true
+	}
+	return false
+}
+
+// applySlackTicketUpdate applies a responder-proposed safe edit to the named
+// issue via the shared applyTicketUpdate core (cmd/linearagentflow.go) —
+// title/description via UpdateIssue, comment via PostComment. Thin wrapper:
+// the actual body lives in one place, shared with the Linear agent bridge.
+func applySlackTicketUpdate(ctx context.Context, deps flowDeps, u *responder.TicketUpdate) error {
+	return applyTicketUpdate(ctx, deps.tracker, u.Issue, *u)
+}
+
+// issueReferencedByHumans reports whether issue appears among the issue
+// references extracted from texts — the messages humans actually sent in
+// this Slack thread (the triggering message plus its already-fetched thread
+// context). This is the anchor check for applying a responder-proposed
+// TicketUpdate on Slack: unlike the Linear-agent bridge (where a session is
+// already scoped to one ticket), Slack has no implicit ticket, so the
+// responder's TicketUpdate.Issue names ANY issue it likes — applying it
+// unconditionally is a prompt-injection surface (a message could coax toad
+// into "updating PLF-1 to say X" for an issue nobody in the thread ever
+// mentioned). Requiring the named issue to appear in the humans' own text
+// closes that: the model can only act on a ticket a human actually
+// referenced, mirroring how the Linear bridge is scoped to its own session's
+// ticket. tracker may be nil (Slack can run without an issue tracker
+// configured) — a nil tracker never matches anything, and neither does an
+// empty issue.
+func issueReferencedByHumans(tracker issuetracker.Tracker, texts []string, issue string) bool {
+	if tracker == nil || issue == "" {
+		return false
+	}
+	for _, text := range texts {
+		for _, ref := range tracker.ExtractAllIssueRefs(text) {
+			if ref != nil && strings.EqualFold(ref.ID, issue) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // shouldForceEscalateForTicketRequest reports whether handleTriggered's
@@ -928,42 +1012,89 @@ func runTicketRequest(
 	return ticketRequestOutcome{ReplyText: composeFiledReply(*findings, fileResult)}
 }
 
+// reuseRecentInvestigationLookback bounds how many of a thread's most recent
+// investigation rows reuseRecentInvestigation examines. More than one row
+// matters because the newest row for a thread is often a responder.Envelope
+// — a conversational follow-up reply persisted by the Slack responder path
+// (see Fix 1's ribbit/handlers.go changes) or the Linear agent bridge — not
+// an investigation.Findings record at all; reuseRecentInvestigation must
+// look past it to the newest actual Findings row underneath. 5 is a small,
+// generous bound: a thread accumulates at most a handful of investigation
+// rows before investigationReuseWindow itself makes older ones irrelevant.
+const reuseRecentInvestigationLookback = 5
+
 // reuseRecentInvestigation returns a previously-saved investigation's
 // findings and ID when one exists for threadTS, is younger than
 // investigationReuseWindow, AND was feasible. Returns nil, "" (never an
-// error) on any miss — a DB error, no saved investigation, an unparseable
-// record, one that's gone stale, or one that was infeasible all just mean
-// "run a fresh investigation instead", logged for visibility but never
-// blocking the caller.
+// error) on any miss — a DB error, no saved investigation, nothing but
+// unparseable/envelope-shaped/infeasible records, or everything gone stale
+// all just mean "run a fresh investigation instead", logged for visibility
+// but never blocking the caller.
 //
-// The infeasible check matters: saveInvestigationRecord persists a finding
-// regardless of Feasible (runTriggeredInvestigation saves before checking
-// it, for audit visibility), so an infeasible record can be sitting in the
-// DB when a human clicks the CTA button afterward. Reusing it as-is would
-// file a ticket from a finding that explicitly said "no real fix found here"
-// — this forces a fresh investigation instead (review Critical finding).
+// Rows are fetched newest-first and scanned in that order:
+//   - A row older than investigationReuseWindow ends the scan immediately
+//     (every row after it, being older still, is too) rather than skipping
+//     past it — matching the single-row behavior this replaced.
+//   - A row shaped as a responder.Envelope (see isEnvelopeRecord) is a
+//     conversational reply, not an investigation — skipped so it can't
+//     shadow an older, genuinely reusable Findings row and force a
+//     redundant fresh investigation on every CTA click that follows a
+//     responder follow-up in the same thread (Fix 4).
+//   - A row that fails to parse as Findings is skipped (logged) rather than
+//     aborting the whole scan — one malformed row should not hide an older,
+//     good one.
+//   - The infeasible check matters: saveInvestigationRecord persists a
+//     finding regardless of Feasible (runTriggeredInvestigation saves before
+//     checking it, for audit visibility), so an infeasible record can be
+//     sitting in the DB when a human clicks the CTA button afterward.
+//     Reusing it as-is would file a ticket from a finding that explicitly
+//     said "no real fix found here" — this skips it instead (review
+//     Critical finding).
 func reuseRecentInvestigation(db *state.DB, threadTS string) (*investigation.Findings, string) {
 	if db == nil {
 		return nil, ""
 	}
-	rec, err := db.GetInvestigationByThread(threadTS)
+	recs, err := db.GetInvestigationsByThread(threadTS, reuseRecentInvestigationLookback)
 	if err != nil {
 		slog.Warn("failed to look up existing investigation, running a fresh one", "error", err, "thread", threadTS)
 		return nil, ""
 	}
-	if rec == nil || time.Since(rec.CreatedAt) >= investigationReuseWindow {
-		return nil, ""
+	for _, rec := range recs {
+		if rec == nil || time.Since(rec.CreatedAt) >= investigationReuseWindow {
+			return nil, ""
+		}
+		if isEnvelopeRecord(rec.FindingsJSON) {
+			slog.Debug("skipping conversational-envelope record", "thread", threadTS, "id", rec.ID)
+			continue
+		}
+		var f investigation.Findings
+		if err := json.Unmarshal([]byte(rec.FindingsJSON), &f); err != nil {
+			slog.Warn("failed to parse saved investigation, skipping it", "error", err, "thread", threadTS, "id", rec.ID)
+			continue
+		}
+		if !f.Feasible {
+			slog.Debug("saved investigation was infeasible, skipping it", "thread", threadTS, "id", rec.ID)
+			continue
+		}
+		return &f, rec.ID
 	}
-	var f investigation.Findings
-	if err := json.Unmarshal([]byte(rec.FindingsJSON), &f); err != nil {
-		slog.Warn("failed to parse saved investigation, running a fresh one", "error", err, "thread", threadTS)
-		return nil, ""
+	return nil, ""
+}
+
+// isEnvelopeRecord reports whether findingsJSON is shaped as a
+// responder.Envelope (a conversational reply — e.g. one persisted by the
+// Slack responder path or a Linear agent session) rather than an
+// investigation.Findings record. The two shapes' JSON tags are disjoint, and
+// Envelope always carries a non-empty "reply" when it was actually
+// persisted (see responder.tryUnmarshal), so a non-empty Reply after
+// unmarshaling as an Envelope reliably identifies the shape without needing
+// a stored type tag.
+func isEnvelopeRecord(findingsJSON string) bool {
+	var env responder.Envelope
+	if err := json.Unmarshal([]byte(findingsJSON), &env); err != nil {
+		return false
 	}
-	if !f.Feasible {
-		slog.Debug("saved investigation was infeasible, running a fresh one instead", "thread", threadTS)
-		return nil, ""
-	}
-	return &f, rec.ID
+	return env.Reply != ""
 }
 
 // handleTicketRequest is the :ticket: CTA entry point, and — via the

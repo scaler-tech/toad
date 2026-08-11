@@ -1404,6 +1404,36 @@ func (d *DB) GetInvestigationByThread(threadTS string) (*InvestigationRecord, er
 	return scanInvestigation(row)
 }
 
+// GetInvestigationsByThread returns up to limit investigations for a Slack
+// thread, newest first. Unlike GetInvestigationByThread (which returns only
+// the single newest row), this lets a caller look past the newest record
+// when it turns out to be shaped as something other than what it needs —
+// e.g. reuseRecentInvestigation (cmd/ticketflow.go) skipping a
+// responder.Envelope row (a conversational follow-up) to find the newest
+// investigation.Findings row underneath it.
+func (d *DB) GetInvestigationsByThread(threadTS string, limit int) ([]*InvestigationRecord, error) {
+	ctx, cancel := dbCtx()
+	defer cancel()
+	rows, err := d.db.QueryContext(ctx,
+		"SELECT id, thread_ts, channel, repo, findings_json, COALESCE(duration_ms,0), created_at FROM investigations WHERE thread_ts = ? ORDER BY created_at DESC LIMIT ?",
+		threadTS, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var recs []*InvestigationRecord
+	for rows.Next() {
+		var rec InvestigationRecord
+		if err := rows.Scan(&rec.ID, &rec.ThreadTS, &rec.Channel, &rec.Repo, &rec.FindingsJSON, &rec.DurationMs, &rec.CreatedAt); err != nil {
+			return nil, err
+		}
+		recs = append(recs, &rec)
+	}
+	return recs, rows.Err()
+}
+
 // FindInvestigationByTicket resolves the investigation behind a tracking
 // ticket by joining through ticket_index.investigation_id. Returns nil, nil
 // if no ticket_index row references an investigation for this issue.

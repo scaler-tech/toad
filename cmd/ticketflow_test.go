@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/scaler-tech/toad/internal/digest"
 	"github.com/scaler-tech/toad/internal/investigation"
 	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/responder"
 	islack "github.com/scaler-tech/toad/internal/slack"
 	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/ticket"
@@ -790,6 +792,44 @@ func TestReuseRecentInvestigation_SkipsInfeasibleFindings(t *testing.T) {
 	f, id := reuseRecentInvestigation(db, "800.1")
 	if f != nil || id != "" {
 		t.Fatalf("expected an infeasible saved finding to be skipped, got findings=%+v id=%q", f, id)
+	}
+}
+
+// TestReuseRecentInvestigation_SkipsEnvelopeShadowingOlderFindings is Fix
+// 4's carried finding: the newest row on a thread often belongs to a
+// responder follow-up (a conversational reply, persisted as a
+// responder.Envelope — see Fix 1), not a fresh investigation. Before this
+// fix, that envelope row was treated as "an infeasible/unparseable
+// investigation" and the whole lookup gave up, forcing a fresh investigation
+// on the very next CTA click even though an older, perfectly reusable
+// Findings row already existed on the same thread.
+func TestReuseRecentInvestigation_SkipsEnvelopeShadowingOlderFindings(t *testing.T) {
+	db := newTestDB(t)
+
+	old := investigation.Findings{Feasible: true, Reasoning: "root cause found", Repo: "svc"}
+	oj, _ := json.Marshal(old)
+	if err := db.SaveInvestigation(&state.InvestigationRecord{
+		ID: "invest-old-findings", ThreadTS: "900.1", Channel: "C9",
+		FindingsJSON: string(oj), CreatedAt: time.Now().Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatalf("SaveInvestigation (findings): %v", err)
+	}
+
+	env := responder.Envelope{Reply: "sure, here's an update", DidInvestigate: true, FindingsSummary: "looked around"}
+	ej, _ := json.Marshal(env)
+	if err := db.SaveInvestigation(&state.InvestigationRecord{
+		ID: "linv-followup-1", ThreadTS: "900.1", Channel: "C9",
+		FindingsJSON: string(ej), CreatedAt: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("SaveInvestigation (envelope): %v", err)
+	}
+
+	f, id := reuseRecentInvestigation(db, "900.1")
+	if f == nil || id != "invest-old-findings" {
+		t.Fatalf("expected the older Findings row to be reused past the newer envelope row, got findings=%+v id=%q", f, id)
+	}
+	if f.Reasoning != "root cause found" {
+		t.Errorf("unexpected findings reused: %+v", f)
 	}
 }
 
@@ -1775,5 +1815,84 @@ func TestEnforceExplicitDestinations(t *testing.T) {
 	enforceExplicitDestinations(&f2, "jobs stuck in queued state for >1hr")
 	if f2.LinearTeam != "" || len(f2.LinearAssignees) != 0 {
 		t.Errorf("monitor-alert text must clear all inferred destinations, got team=%q assignees=%v", f2.LinearTeam, f2.LinearAssignees)
+	}
+}
+
+func TestIssueReferencedByHumans(t *testing.T) {
+	// A real LinearTracker (no credentials — ExtractAllIssueRefs is pure
+	// regex and needs none) so the table exercises the actual extraction
+	// logic, not a hand-rolled stand-in for it.
+	real := issuetracker.NewLinearTracker(config.IssueTrackerConfig{})
+
+	cases := []struct {
+		name    string
+		tracker issuetracker.Tracker
+		texts   []string
+		issue   string
+		want    bool
+	}{
+		{
+			name:    "issue named in the triggering message",
+			tracker: real,
+			texts:   []string{"can you update PLF-3125 with a summary?"},
+			issue:   "PLF-3125",
+			want:    true,
+		},
+		{
+			name:    "issue named only in thread context",
+			tracker: real,
+			texts:   []string{"seems related", "we filed https://linear.app/acme/issue/PLF-42/some-slug earlier"},
+			issue:   "PLF-42",
+			want:    true,
+		},
+		{
+			name:    "issue case-insensitive match",
+			tracker: real,
+			texts:   []string{"see PLF-99 for context"},
+			issue:   "plf-99",
+			want:    true,
+		},
+		{
+			name:    "issue nobody referenced is rejected",
+			tracker: real,
+			texts:   []string{"can you update PLF-3125 with a summary?"},
+			issue:   "PLF-9999",
+			want:    false,
+		},
+		{
+			name:    "no texts at all",
+			tracker: real,
+			texts:   nil,
+			issue:   "PLF-1",
+			want:    false,
+		},
+		{
+			name:    "empty issue never matches",
+			tracker: real,
+			texts:   []string{"PLF-1 is broken"},
+			issue:   "",
+			want:    false,
+		},
+		{
+			name:    "nil tracker never matches",
+			tracker: nil,
+			texts:   []string{"PLF-1 is broken"},
+			issue:   "PLF-1",
+			want:    false,
+		},
+		{
+			name:    "tracker with no extraction support (NoopTracker) never matches",
+			tracker: issuetracker.NoopTracker{},
+			texts:   []string{"PLF-1 is broken"},
+			issue:   "PLF-1",
+			want:    false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := issueReferencedByHumans(c.tracker, c.texts, c.issue); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
 	}
 }

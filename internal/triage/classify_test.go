@@ -110,3 +110,39 @@ func TestParseResult_DefaultsEscalateFalse(t *testing.T) {
 		t.Error("expected escalate=false by default, got true")
 	}
 }
+
+func TestTriagePrompt_ContainsIntentInTemplate(t *testing.T) {
+	if !strings.Contains(triagePrompt, `"intent":`) {
+		t.Error("triagePrompt JSON template should include intent field")
+	}
+}
+
+func TestTriagePrompt_ContainsIntentDefinitions(t *testing.T) {
+	for _, want := range []string{`"report"`, `"question"`, `"action"`, `"chatter"`, "Intent definitions"} {
+		if !strings.Contains(triagePrompt, want) {
+			t.Errorf("triagePrompt missing intent definition element %q", want)
+		}
+	}
+}
+
+func TestParseResult_RoundTripsIntent(t *testing.T) {
+	jsonData := []byte(`{"actionable":true,"confidence":0.85,"summary":"t","category":"bug","estimated_size":"small","keywords":[],"files_hint":[],"escalate":false,"intent":"Question"}`)
+	result, err := parseResult(jsonData)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Intent != "question" {
+		t.Errorf("Intent = %q, want normalized %q", result.Intent, "question")
+	}
+}
+
+func TestParseResult_DefaultsIntentEmpty(t *testing.T) {
+	jsonData := []byte(`{"actionable":true,"confidence":0.85,"summary":"t","category":"bug","estimated_size":"small","keywords":[],"files_hint":[],"escalate":false}`)
+	result, err := parseResult(jsonData)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Intent != "" {
+		t.Errorf("Intent = %q, want empty when omitted", result.Intent)
+	}
+}

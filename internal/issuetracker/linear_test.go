@@ -2042,3 +2042,63 @@ func TestNoCredentialsAtAll_GetIssueDetailsSkipsLookup(t *testing.T) {
 		t.Fatalf("no credentials must skip lookup gracefully, got details=%v err=%v", details, err)
 	}
 }
+
+func TestUpdateIssue_SendsOnlyNonEmptyFields(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Write([]byte(`{"data":{"issueUpdate":{"success":true}}}`))
+	}))
+	defer srv.Close()
+
+	lt := NewLinearTracker(config.IssueTrackerConfig{Enabled: true, Provider: "linear", APIToken: "k"})
+	lt.httpClient = srv.Client()
+	lt.graphqlURL = srv.URL
+
+	ref := &IssueRef{Provider: "linear", ID: "PLF-9", InternalID: "uuid-1"}
+	if err := lt.UpdateIssue(context.Background(), ref, UpdateIssueOpts{Title: "New title"}); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	vars := gotBody["variables"].(map[string]any)
+	input := vars["input"].(map[string]any)
+	if input["title"] != "New title" {
+		t.Errorf("title = %v", input["title"])
+	}
+	if _, hasDesc := input["description"]; hasDesc {
+		t.Error("empty description must not be sent (would wipe the ticket body)")
+	}
+	if vars["id"] != "uuid-1" {
+		t.Errorf("id = %v, want the internal UUID", vars["id"])
+	}
+}
+
+func TestUpdateIssue_BothFieldsEmptyIsNoOp(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+	lt := NewLinearTracker(config.IssueTrackerConfig{Enabled: true, Provider: "linear", APIToken: "k"})
+	lt.httpClient = srv.Client()
+	lt.graphqlURL = srv.URL
+	if err := lt.UpdateIssue(context.Background(), &IssueRef{ID: "PLF-9", InternalID: "u"}, UpdateIssueOpts{}); err != nil {
+		t.Fatalf("no-op UpdateIssue: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("no-op made %d API calls, want 0", calls)
+	}
+}
+
+func TestUpdateIssue_FailureSurfaces(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":{"issueUpdate":{"success":false}}}`))
+	}))
+	defer srv.Close()
+	lt := NewLinearTracker(config.IssueTrackerConfig{Enabled: true, Provider: "linear", APIToken: "k"})
+	lt.httpClient = srv.Client()
+	lt.graphqlURL = srv.URL
+	if err := lt.UpdateIssue(context.Background(), &IssueRef{ID: "PLF-9", InternalID: "u"}, UpdateIssueOpts{Title: "x"}); err == nil {
+		t.Fatal("success=false must surface as an error")
+	}
+}

@@ -3,6 +3,7 @@ package issuetracker
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -141,6 +142,12 @@ type Tracker interface {
 
 	// PostComment posts a comment on an existing issue.
 	PostComment(ctx context.Context, ref *IssueRef, body string) error
+
+	// UpdateIssue updates an issue's title and/or description. This is the
+	// ONLY mutation toad may perform on existing issues: UpdateIssueOpts
+	// deliberately cannot express status, assignee, label, or project
+	// changes. Empty fields are left unchanged.
+	UpdateIssue(ctx context.Context, ref *IssueRef, opts UpdateIssueOpts) error
 }
 
 // CreateIssueOpts holds parameters for creating a new issue.
@@ -174,6 +181,13 @@ type CreateIssueOpts struct {
 	Assignees []string
 }
 
+// UpdateIssueOpts is the safe-edit subset: title and description only.
+// A non-empty Description REPLACES the whole issue body.
+type UpdateIssueOpts struct {
+	Title       string
+	Description string
+}
+
 // NoopTracker is a no-op implementation that returns nil for everything.
 type NoopTracker struct{}
 
@@ -186,6 +200,9 @@ func (NoopTracker) CreateIssue(context.Context, CreateIssueOpts) (*IssueRef, err
 func (NoopTracker) ShouldCreateIssues() bool                                        { return false }
 func (NoopTracker) GetIssueStatus(context.Context, *IssueRef) (*IssueStatus, error) { return nil, nil }
 func (NoopTracker) PostComment(context.Context, *IssueRef, string) error            { return nil }
+func (NoopTracker) UpdateIssue(context.Context, *IssueRef, UpdateIssueOpts) error {
+	return fmt.Errorf("issue tracker not configured")
+}
 
 // NewTracker creates a Tracker from config. Returns NoopTracker when disabled.
 func NewTracker(cfg config.IssueTrackerConfig) Tracker {

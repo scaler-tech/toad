@@ -385,6 +385,10 @@ func RegisterAskTool(srv *gomcp.Server, deps *AskDeps) {
 			}, nil, nil
 		}
 
+		if !resp.TicketUpdate.IsZero() {
+			slog.Debug("dropping proposed ticket update (surface does not apply updates)", "issue", resp.TicketUpdate.Issue, "user", tok.SlackUser)
+		}
+
 		// Store exchange in session.
 		deps.Sessions.AddExchange(sessionID, args.Question, resp.Text)
 

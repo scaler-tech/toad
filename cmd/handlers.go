@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -9,8 +10,10 @@ import (
 
 	"github.com/scaler-tech/toad/internal/digest"
 	"github.com/scaler-tech/toad/internal/issuetracker"
+	"github.com/scaler-tech/toad/internal/responder"
 	"github.com/scaler-tech/toad/internal/ribbit"
 	islack "github.com/scaler-tech/toad/internal/slack"
+	"github.com/scaler-tech/toad/internal/state"
 	"github.com/scaler-tech/toad/internal/ticket"
 	"github.com/scaler-tech/toad/internal/triage"
 )
@@ -294,7 +297,11 @@ func handleTriggered(
 	// investigation gate before a ticket is filed or proposed. An infeasible
 	// (or errored) investigation falls through to the unchanged ribbit path
 	// below — v1 semantics.
-	if (result.Category == categoryBug || result.Category == categoryFeature) && result.Confidence >= 0.5 {
+	//
+	// Follow-ups in threads toad already answered converse below instead
+	// (the responder sees the prior findings via prior.PriorFindings) —
+	// only a first-touch bug/feature REPORT investigates.
+	if shouldInvestigateFirstTouch(result) && !hasPriorThreadState(deps.stateManager.DB(), threadTS) {
 		if !deps.stateManager.Claim(threadTS) {
 			slackClient.ReplyInThread(msg.Channel, threadTS, ":frog: Already working on this thread")
 			return
@@ -339,6 +346,12 @@ func handleTriggered(
 			}
 			slog.Debug("using thread memory for follow-up", "thread", threadTS)
 		}
+		if rec, err := deps.stateManager.DB().GetInvestigationByThread(threadTS); err == nil && rec != nil {
+			if prior == nil {
+				prior = &ribbit.PriorContext{}
+			}
+			prior.PriorFindings = renderPriorFindings(rec)
+		}
 	}
 
 	repoPath := ""
@@ -374,6 +387,36 @@ func handleTriggered(
 		slog.Warn("ribbit reply failed", "error", err)
 	}
 	slackClient.React(msg.Channel, msg.Timestamp, "speech_balloon")
+
+	// Apply a proposed safe ticket edit (explicit asks only — the responder
+	// envelope carries one only when the teammate asked). Slack has no
+	// implicit ticket, so a missing issue name means nothing to apply.
+	if !resp.TicketUpdate.IsZero() {
+		if resp.TicketUpdate.Issue == "" {
+			slog.Warn("responder proposed a ticket update without naming an issue; skipping")
+		} else if !issueReferencedByHumans(deps.tracker, append([]string{msg.Text}, msg.ThreadContext...), resp.TicketUpdate.Issue) {
+			slog.Warn("responder proposed update to an issue nobody referenced; skipping",
+				"issue", resp.TicketUpdate.Issue, "channel", msg.Channel, "thread", threadTS)
+		} else if err := applySlackTicketUpdate(ctx, deps, resp.TicketUpdate); err != nil {
+			slog.Warn("applying ticket update from slack responder", "issue", resp.TicketUpdate.Issue, "error", err)
+			slackClient.ReplyInThread(msg.Channel, msg.ThreadTS(), ":warning: I could not update "+resp.TicketUpdate.Issue+": "+firstLine(err.Error()))
+		}
+	}
+
+	// Persist investigated findings so later follow-ups and the CTA path
+	// see them.
+	if resp.DidInvestigate && resp.FindingsSummary != "" && deps.stateManager.DB() != nil {
+		ej, _ := json.Marshal(responder.Envelope{Reply: resp.Text, DidInvestigate: true, FindingsSummary: resp.FindingsSummary})
+		if err := deps.stateManager.DB().SaveInvestigation(&state.InvestigationRecord{
+			ID:           fmt.Sprintf("slackresp-%s-%d", threadTS, time.Now().UnixNano()),
+			ThreadTS:     threadTS,
+			Channel:      msg.Channel,
+			FindingsJSON: string(ej),
+			CreatedAt:    time.Now().UTC(),
+		}); err != nil {
+			slog.Warn("persisting slack responder findings", "error", err)
+		}
+	}
 }
 
 // handlePassive is the untriggered (no @mention/reaction/keyword trigger)
@@ -470,6 +513,9 @@ func handlePassive(
 
 	daemonCounters.ribbits.Add(1)
 	incrementMetric(deps.stateManager.DB(), "qa")
+	if !resp.TicketUpdate.IsZero() {
+		slog.Debug("dropping proposed ticket update (surface does not apply updates)", "issue", resp.TicketUpdate.Issue, "channel", msg.Channel)
+	}
 	// NOTE: pre-refactor this branch built its CTA button on msg.ThreadTS()
 	// while posting the reply anchored at msg.Timestamp (the plain-text
 	// branch always used msg.Timestamp too). ReplyWithOptionalCTA uses one
