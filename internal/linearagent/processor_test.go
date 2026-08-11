@@ -358,3 +358,26 @@ func TestHandle_ResponsePostFailureDoesNotWriteHandledRecord(t *testing.T) {
 		t.Error("response should not be posted on failure")
 	}
 }
+
+func TestHandle_AckFailureAbortsWithoutInvestigating(t *testing.T) {
+	db := procDB(t)
+	poster := &fakePoster{failOn: "thought"}
+	investigated := false
+	p := newTestProcessor(db, poster, func(ctx context.Context, w Work) (*investigation.Findings, error) {
+		investigated = true
+		return testFindings(), nil
+	})
+	p.Handle(context.Background(), work())
+
+	if investigated {
+		t.Error("a session we cannot ack must not be investigated (e.g. Linear rejects the session: foreign, dismissed, or stale)")
+	}
+	if rec, _ := db.GetAgentSession("sess-1"); rec != nil {
+		t.Error("aborted session must not write the handled record (transient ack failures retry next poll)")
+	}
+	for _, a := range poster.posted {
+		if a.Type == "response" || a.Type == "error" {
+			t.Errorf("no further activities after failed ack, got %+v", a)
+		}
+	}
+}

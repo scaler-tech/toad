@@ -43,9 +43,14 @@ func (p *Processor) Handle(ctx context.Context, w Work) {
 	ctx, cancel := context.WithTimeout(ctx, p.opts.Timeout)
 	defer cancel()
 
-	// Ack immediately — Linear marks silent sessions unresponsive.
+	// Ack immediately — Linear marks silent sessions unresponsive. A failed
+	// ack aborts the session: if we cannot post to it, we cannot answer it
+	// either (Linear rejects foreign, dismissed, or stale sessions with
+	// "Invalid agent session"), so investigating would be pure waste. The
+	// handled record stays unwritten, so a transient failure retries next poll.
 	if err := p.opts.Poster.CreateActivity(ctx, w.Session.ID, "thought", "Reading the ticket and the code."); err != nil {
-		slog.Warn("posting session ack", "session", w.Session.ID, "error", err)
+		slog.Warn("posting session ack; skipping session", "session", w.Session.ID, "error", err)
+		return
 	}
 
 	claimKey := w.Session.IssueIdentifier

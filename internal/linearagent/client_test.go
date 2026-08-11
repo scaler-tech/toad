@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -15,10 +16,12 @@ func (s staticAuth) HandleUnauthorized(ctx context.Context) (string, bool) { ret
 
 const sessionsFixture = `{"data":{"agentSessions":{"nodes":[
   {"id":"sess-1","status":"pending","createdAt":"2026-08-10T10:00:00.000Z","updatedAt":"2026-08-10T10:00:00.000Z",
+   "appUser":{"id":"app-user-1"},
    "issue":{"id":"uuid-1","identifier":"PLF-9","title":"Exports are slow"},
    "sourceComment":{"body":"@toad can you look at this?"},
    "activities":{"nodes":[]}},
   {"id":"sess-2","status":"active","createdAt":"2026-08-10T09:00:00.000Z","updatedAt":"2026-08-10T09:30:00.000Z",
+   "appUser":{"id":"app-user-1"},
    "issue":{"id":"uuid-2","identifier":"PLF-10","title":"Login flaky"},
    "sourceComment":null,
    "activities":{"nodes":[
@@ -31,6 +34,14 @@ func TestListSessions_ParsesFixture(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer app-tok" {
 			t.Errorf("auth header = %q", got)
+		}
+		var req struct {
+			Query string `json:"query"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if strings.Contains(req.Query, "viewer") {
+			w.Write([]byte(viewerFixture))
+			return
 		}
 		w.Write([]byte(sessionsFixture))
 	}))
@@ -100,5 +111,66 @@ func TestCreateActivity_GraphQLErrorSurfaces(t *testing.T) {
 	c.graphqlURL = srv.URL
 	if err := c.CreateActivity(context.Background(), "s", "response", "b"); err == nil {
 		t.Fatal("expected error from GraphQL errors array")
+	}
+}
+
+const viewerFixture = `{"data":{"viewer":{"id":"app-user-1"}}}`
+
+const mixedOwnershipFixture = `{"data":{"agentSessions":{"nodes":[
+  {"id":"sess-own","status":"pending","createdAt":"2026-08-11T08:00:00.000Z","updatedAt":"2026-08-11T08:00:00.000Z",
+   "appUser":{"id":"app-user-1"},
+   "issue":{"id":"uuid-1","identifier":"PLF-9","title":"Ours"},
+   "sourceComment":{"body":"@toad look"},
+   "activities":{"nodes":[]}},
+  {"id":"sess-foreign","status":"pending","createdAt":"2026-08-11T08:01:00.000Z","updatedAt":"2026-08-11T08:01:00.000Z",
+   "appUser":{"id":"biome-app-user"},
+   "issue":{"id":"uuid-2","identifier":"PLF-10","title":"Biome's"},
+   "sourceComment":{"body":"@biome fix this"},
+   "activities":{"nodes":[]}}
+]}}}`
+
+// twoPhaseServer answers the viewer-id query and the sessions query from one
+// handler, dispatching on the request body.
+func twoPhaseServer(t *testing.T, sessionsJSON string, viewerCalls *int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		if strings.Contains(req.Query, "viewer") {
+			if viewerCalls != nil {
+				*viewerCalls++
+			}
+			w.Write([]byte(viewerFixture))
+			return
+		}
+		w.Write([]byte(sessionsJSON))
+	}))
+}
+
+func TestListSessions_FiltersToOwnAppUser(t *testing.T) {
+	viewerCalls := 0
+	srv := twoPhaseServer(t, mixedOwnershipFixture, &viewerCalls)
+	defer srv.Close()
+
+	c := NewClient(staticAuth{"Bearer app-tok"})
+	c.httpClient = srv.Client()
+	c.graphqlURL = srv.URL
+
+	sessions, err := c.ListSessions(context.Background(), 50)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "sess-own" {
+		t.Fatalf("workspace sessions from other agents must be filtered out; got %+v", sessions)
+	}
+
+	// The viewer id is cached — a second list must not re-query it.
+	if _, err := c.ListSessions(context.Background(), 50); err != nil {
+		t.Fatalf("second ListSessions: %v", err)
+	}
+	if viewerCalls != 1 {
+		t.Errorf("viewer queried %d times, want 1 (cached)", viewerCalls)
 	}
 }

@@ -40,7 +40,7 @@ func runLinearConnect(cmd *cobra.Command, args []string) error {
 	clientID := os.Getenv("TOAD_LINEAR_CLIENT_ID")
 	clientSecret := os.Getenv("TOAD_LINEAR_CLIENT_SECRET")
 	if clientID == "" || clientSecret == "" {
-		return errors.New("set TOAD_LINEAR_CLIENT_ID and TOAD_LINEAR_CLIENT_SECRET first (create the OAuth app in Linear workspace settings, redirect URL http://localhost:9482/callback, agent capabilities enabled)")
+		return errors.New("set TOAD_LINEAR_CLIENT_ID and TOAD_LINEAR_CLIENT_SECRET first (create the OAuth app in Linear workspace settings: redirect URL http://localhost:9482/callback, agent capabilities enabled, and webhooks ENABLED with agent session events — Linear requires webhooks on for agent sessions to be created at all; any reachable-looking URL works, toad polls and never reads the deliveries)")
 	}
 
 	db, err := state.OpenDB()
