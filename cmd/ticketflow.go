@@ -1337,7 +1337,7 @@ func composeDigestProposalText(f investigation.Findings) string {
 	if strings.TrimSpace(body) == "" {
 		body = f.Problem
 	}
-	return ":crown: Spotted while monitoring — here's what I found:\n\n" + body
+	return ":crown: _Spotted while monitoring_\n\n" + body
 }
 
 // proposeFromDigest is digest.ProposeFunc's real implementation (modulo the

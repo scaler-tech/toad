@@ -689,9 +689,7 @@ func (c *Client) PostToChannel(channelName, text string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolving channel %q: %w", channelName, err)
 	}
-	if c.pathScrubber != nil {
-		text = c.pathScrubber(text)
-	}
+	text = c.outbound(text)
 	_, ts, err := c.api.PostMessage(id, slack.MsgOptionText(text, false))
 	if err != nil {
 		return "", fmt.Errorf("posting to channel %q: %w", channelName, err)

@@ -70,9 +70,7 @@ func TicketInProgressBlocks(origBlocks slack.Blocks, userName string) []slack.Bl
 
 // ReplyInThreadWithBlocks posts a Block Kit message as a thread reply and tracks it.
 func (c *Client) ReplyInThreadWithBlocks(channel, threadTS, fallbackText string, blocks []slack.Block) (string, error) {
-	if c.pathScrubber != nil {
-		fallbackText = c.pathScrubber(fallbackText)
-	}
+	fallbackText = c.outbound(fallbackText)
 	_, ts, err := c.api.PostMessage(
 		channel,
 		slack.MsgOptionText(fallbackText, false),
@@ -97,6 +95,7 @@ func (c *Client) ReplyInThreadWithBlocks(channel, threadTS, fallbackText string,
 // (it would always error when clicked).
 func (c *Client) ReplyWithOptionalCTA(channel, threadTS, text string, showCTA bool) (string, error) {
 	if showCTA {
+		text = c.outbound(text) // the section text is not covered by the fallback path
 		blocks := TicketBlocks(text, threadTS)
 		return c.ReplyInThreadWithBlocks(channel, threadTS, text, blocks)
 	}
@@ -105,9 +104,7 @@ func (c *Client) ReplyWithOptionalCTA(channel, threadTS, text string, showCTA bo
 
 // ReplyInThread posts a message as a thread reply and tracks it as a toad reply.
 func (c *Client) ReplyInThread(channel, threadTS, text string) (string, error) {
-	if c.pathScrubber != nil {
-		text = c.pathScrubber(text)
-	}
+	text = c.outbound(text)
 	_, ts, err := c.api.PostMessage(
 		channel,
 		slack.MsgOptionText(text, false),
@@ -181,4 +178,13 @@ func (c *Client) GetPermalink(channel, timestamp string) (string, error) {
 		return "", fmt.Errorf("getting permalink: %w", err)
 	}
 	return link, nil
+}
+
+// outbound is the single boundary for model-authored text: repo-relative
+// paths, then Markdown to Slack mrkdwn.
+func (c *Client) outbound(text string) string {
+	if c.pathScrubber != nil {
+		text = c.pathScrubber(text)
+	}
+	return ToMrkdwn(text)
 }
